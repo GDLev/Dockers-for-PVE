@@ -207,7 +207,7 @@ consoleRequest.success({ result: { data: 'UPID:restart' } });
 assert.equal(createdWindows.length, 0, 'shutdown and restart must not open TaskViewer');
 configPanel.tbar.find(button => button.itemId === 'startButton').handler();
 consoleRequest.success({ result: { data: 'UPID:start' } });
-assert.equal(createdWindows[0].name, 'Proxmox.window.TaskViewer');
+assert.equal(createdWindows.length, 0, 'start must not open TaskViewer');
 const clickedRecord = { data: { id: 'docker/' + 'c'.repeat(32), type: 'docker', node: 'pve-other', name: 'other-project', status: 'running' } };
 const navigation = [];
 const menuWorkspace = { selectById: id => navigation.push(id), query: () => [

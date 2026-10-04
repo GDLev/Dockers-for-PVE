@@ -13,7 +13,7 @@
     const dockerAction = (info, operation, target) => request({
         url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1] + '/action',
         method: 'POST', params: { action: operation }, waitMsgTarget: target,
-        success: response => { if (operation !== 'stop' && operation !== 'restart') { task(response); } },
+        success: response => { if (operation === 'delete') { task(response); } },
     });
     const deployment = values => {
         const common = { name: values.name, mode: values.mode, environment: values.environment || '',
