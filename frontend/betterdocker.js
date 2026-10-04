@@ -243,6 +243,16 @@
 
     Ext.define('PVE.betterdocker.Config', {
         extend: 'PVE.panel.Config', alias: 'widget.pveBetterDockerConfig', showSearch: false,
+        // The native Config panel passes this to Help on every card activation.
+        onlineHelp: 'chapter_system_administration',
+        activateCard: function (cardid) {
+            try {
+                return PVE.panel.Config.prototype.activateCard.call(this, cardid);
+            } finally {
+                // Native selectionchange resets this only after activateCard returns.
+                this.suspendLayout = false;
+            }
+        },
         initComponent: function () {
             const me = this;
             const info = me.pveSelNode.data;

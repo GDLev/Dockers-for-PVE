@@ -17,11 +17,11 @@ PVE::API2::BetterDocker::hook_resources();
 # END BETTERDOCKER
 '''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=6" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=7" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker.js?v=6"></script>
+<script src="/pve2/js/betterdocker.js?v=7"></script>
 <!-- END BETTERDOCKER -->'''
 
 

@@ -12,7 +12,7 @@ const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => in
     nodeSortFn: (a, b) => a.data.vmid - b.data.vmid } };
 const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; } } };
 const context = { window: null, console,
-    PVE: { window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
+    PVE: { panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { get_object_icon_class: () => 'fa fa-cube' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam' },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
@@ -131,3 +131,19 @@ guests.sort((a, b) => treeOverride.nodeSortFn.call({ 'group-guest-types': false 
 assert.deepEqual(guests.map(item => item.data.type), ['lxc', 'docker', 'docker', 'qemu']);
 assert.equal(guests[1].data.name, 'alpha');
 console.log('Consistent LXC → Docker → VM ordering passed');
+
+const dockerConfig = definitions['PVE.betterdocker.Config'];
+// Native Config.activateCard always calls Help.setOnlineHelp, whose lookup uses .replace().
+// An undefined section used to abort initialization before native selectionchange reset layouts.
+for (const card of configPanel.items) {
+    const section = card.onlineHelp || dockerConfig.onlineHelp;
+    assert.equal(typeof section, 'string', 'all Docker cards need a native help fallback');
+    assert.doesNotThrow(() => section.replace(/_/g, '-'));
+}
+const activation = { suspendLayout: true };
+context.PVE.panel.Config.prototype.activateCard = () => { throw new Error('card initialization failed'); };
+assert.throws(() => dockerConfig.activateCard.call(activation, 'summary'), /card initialization failed/);
+assert.equal(activation.suspendLayout, false, 'a failed Docker card must not leave layouts suspended');
+context.PVE.panel.Config.prototype.activateCard = () => 'activated';
+assert.equal(dockerConfig.activateCard.call(activation, 'resources'), 'activated');
+console.log('Native Help fallback and layout recovery regression passed');
