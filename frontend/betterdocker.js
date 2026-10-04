@@ -18,11 +18,22 @@
             (/^\d+$/.test(String(id)) ? 'DCT ' + id : 'Docker') + ' - ' + label;
     });
     Proxmox.Utils.override_task_descriptions(dockerTaskDescriptions);
-    const dockerAction = (info, operation, target) => request({
-        url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1] + '/action',
-        method: 'POST', params: { action: operation }, waitMsgTarget: target,
-        success: response => { if (operation === 'delete') { task(response); } },
-    });
+    const dockerAction = (info, operation, target) => {
+        const execute = () => request({
+            url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1] + '/action',
+            method: 'POST', params: { action: operation }, waitMsgTarget: target,
+            success: response => { if (operation === 'delete') { task(response); } },
+        });
+        if (operation === 'stop' || operation === 'restart') {
+            const label = operation === 'stop' ? 'Shutdown' : 'Restart';
+            const guest = (info.vmid ? 'DCT ' + info.vmid : 'Docker') + ' (' + info.name + ')';
+            Ext.Msg.confirm('Confirm', Ext.htmlEncode(label + ' ' + guest + '?'), answer => {
+                if (answer === 'yes') { execute(); }
+            });
+            return;
+        }
+        return execute();
+    };
     const deployment = values => {
         const common = { name: values.name, mode: values.mode, environment: values.environment || '',
             bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
@@ -488,7 +499,8 @@
                 { xtype: 'splitbutton', text: 'Shutdown', itemId: 'stopButton', iconCls: 'fa fa-power-off', handler: () => act('stop'),
                     menu: [{ text: 'Restart', itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('restart') }] },
                 { text: 'Console', iconCls: 'fa fa-terminal', handler: () => me.selectById('console') },
-                { text: 'More', menu: [{ text: 'Edit deployment', handler: editDeployment }, { text: 'Refresh', handler: reload },
+                { text: 'More', menu: [{ text: 'Edit deployment', iconCls: 'fa fa-fw fa-pencil', handler: editDeployment },
+                    { text: 'Refresh', iconCls: 'fa fa-fw fa-refresh', handler: reload },
                     { text: 'Remove', iconCls: 'fa fa-trash', handler: () => Ext.Msg.confirm('Remove Docker project',
                         'Remove this project? Volumes and bind-mount data are retained.', answer => { if (answer === 'yes') { act('delete'); } }) }] },
             ];

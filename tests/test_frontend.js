@@ -197,6 +197,7 @@ assert.equal(summaryFields['#diskValue'].usage, 0.1);
 console.log('SWAP usage and Bootdisk size status rows passed');
 
 const createdWindows = [];
+context.Ext.Msg = { confirm: (title, message, callback) => callback('yes') };
 context.Ext.create = (name, options) => { createdWindows.push({ name, options }); return {}; };
 const shutdownButton = configPanel.tbar.find(button => button.itemId === 'stopButton');
 shutdownButton.handler();
@@ -262,7 +263,10 @@ for (const label of ['Start', 'Shutdown', 'Restart', 'Console', 'Edit deployment
     assert(!menu.destroyed, `${label}: hide must leave the item alive until its click handler runs`);
     assert.equal(typeof item.handler, 'function');
     let confirmed = false;
-    context.Ext.Msg = { confirm() { confirmed = true; } };
+    context.Ext.Msg = { confirm(title, message, callback) {
+        confirmed = true;
+        if (label !== 'Remove') { callback('yes'); }
+    } };
     item.handler();
     if (label === 'Remove') { assert(confirmed); }
     else if (label === 'Console') { assert.equal(navigation.at(-1), 'console'); }
@@ -311,3 +315,31 @@ assert(!context.taskDescriptions.betterdocker('', 'a'.repeat(32)).includes('a'.r
 assert(!context.taskDescriptions.betterdockerconsole('', 'a'.repeat(32)).includes('a'.repeat(32)));
 assert.equal(wizard.items[0].items.find(item => item.name === 'vmid').emptyText, 'Next available guest ID');
 console.log('Readable DCT task descriptions and numeric ID wizard passed');
+
+for (const [handler, operation] of [
+    [shutdownButton.handler, 'stop'], [shutdownButton.menu[0].handler, 'restart'],
+    [commandMenu.items.find(item => item.text === 'Shutdown').handler, 'stop'],
+    [commandMenu.items.find(item => item.text === 'Restart').handler, 'restart'],
+]) {
+    let answer;
+    const previousRequest = consoleRequest;
+    context.Ext.Msg.confirm = (title, message, callback) => {
+        assert.equal(title, 'Confirm');
+        assert(message.includes(operation === 'stop' ? 'Shutdown' : 'Restart'));
+        answer = callback;
+    };
+    handler();
+    assert.equal(consoleRequest, previousRequest, 'No action before confirmation');
+    answer('no');
+    assert.equal(consoleRequest, previousRequest, 'Cancel must not send an action');
+    handler();
+    answer('yes');
+    assert.equal(consoleRequest.params.action, operation);
+    const windowsBefore = createdWindows.length;
+    consoleRequest.success({ result: { data: 'UPID:confirmed-action' } });
+    assert.equal(createdWindows.length, windowsBefore, 'Confirmed action must not open task output');
+}
+context.Ext.Msg.confirm = () => { throw new Error('Start must not ask for confirmation'); };
+configPanel.tbar.find(button => button.itemId === 'startButton').handler();
+assert.equal(consoleRequest.params.action, 'start');
+console.log('Shutdown/restart confirmation and cancellation in toolbar and context menu passed');
