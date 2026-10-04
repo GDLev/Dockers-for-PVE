@@ -1,2 +1,13 @@
-.bd-docker-icon { background-image: url('/pve2/images/betterdocker.svg'); background-repeat: no-repeat; background-position: center; background-size: contain; }
+.bd-docker-icon { position: relative; background-image: url('/pve2/images/betterdocker.svg'); background-repeat: no-repeat; background-position: center; background-size: contain; }
 .bd-docker-icon::before { content: '\00a0'; }
+
+/* Native status overlays assume a font glyph; the Docker logo is a background. */
+.x-tree-icon-custom.bd-docker-icon::after,
+.x-grid-icon-custom.bd-docker-icon::after {
+    position: absolute;
+    left: auto;
+    top: auto;
+    right: -3px;
+    bottom: -1px;
+    line-height: 1;
+}

@@ -19,6 +19,8 @@ import uuid
 ROOT = Path('/var/lib/betterdocker/projects')
 METADATA = Path('/etc/pve/betterdocker')
 LOCK = Path('/run/lock/betterdocker-projects.lock')
+PROC = Path('/proc')
+CGROUP = Path('/sys/fs/cgroup')
 
 
 def run(args, **kwargs):
@@ -297,7 +299,7 @@ def container_records(identifier):
         records.append({'id': item['Id'], 'name': item['Name'].lstrip('/'),
                         'service': labels.get('com.docker.compose.service', ''),
                         'state': item['State']['Status'], 'started': item['State'].get('StartedAt', ''),
-                        'image': item['Config']['Image']})
+                        'image': item['Config']['Image'], 'pid': item['State'].get('Pid', 0)})
     return records
 
 
@@ -332,6 +334,68 @@ def metric_snapshot(containers, stats, services):
             'diskread_total': sum(pair[0] for pair in disk), 'diskwrite_total': sum(pair[1] for pair in disk),
             'uptime': max(0, int(time.time() - min(started))) if started else 0,
             'instances': ','.join(sorted(item['id'] for item in active))}
+
+
+
+def swap_usage(containers, services):
+    try:
+        match = re.search(r'^SwapTotal:\s+(\d+)\s+kB$', (PROC / 'meminfo').read_text(), re.M)
+        if not match:
+            return {'swap': None, 'maxswap': None}
+        host_swap = int(match[1]) * 1024
+        active = [item for item in containers if item['state'] == 'running']
+        used, capacity, seen = 0, 0, set()
+        for item in active:
+            pid = item.get('pid', 0)
+            if not isinstance(pid, int) or pid <= 0:
+                return {'swap': None, 'maxswap': None}
+            groups = (PROC / str(pid) / 'cgroup').read_text().splitlines()
+            relative = next((line[3:] for line in groups if line.startswith('0::')), None)
+            # A recycled PID must never attribute another workload's swap to this project.
+            if not relative or item['id'] not in relative:
+                return {'swap': None, 'maxswap': None}
+            path = (CGROUP / relative.lstrip('/')).resolve()
+            if not path.is_relative_to(CGROUP.resolve()):
+                return {'swap': None, 'maxswap': None}
+            if path in seen:
+                continue
+            seen.add(path)
+            used += int((path / 'memory.swap.current').read_text())
+            limit = (path / 'memory.swap.max').read_text().strip()
+            capacity += host_swap if limit == 'max' else int(limit)
+        if not active:
+            unlimited = any(not item['settings']['memory'] or item['settings']['swap'] == -1 for item in services)
+            capacity = host_swap if unlimited else sum(item['settings']['swap'] * 1048576 * item.get('replicas', 1) for item in services)
+        return {'swap': used, 'maxswap': min(capacity, host_swap)}
+    except (OSError, ValueError):
+        return {'swap': None, 'maxswap': None}
+
+
+def disk_usage(identifier, containers):
+    path = ROOT / identifier / 'disk-usage.json'
+    ids = sorted(item['id'] for item in containers)
+    try:
+        cached = json.loads(path.read_text()) if path.exists() else {}
+        if cached.get('ids') == ids and time.time() - cached.get('time', 0) < 60:
+            return cached['usage']
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        data_root = capture(['docker', 'info', '--format', '{{.DockerRootDir}}']).strip()
+        if not data_root or not Path(data_root).is_absolute():
+            raise ValueError('Invalid Docker storage directory')
+        filesystem = os.statvfs(data_root)
+        inspected = json.loads(capture(['docker', 'inspect', '--type', 'container', '--size', *ids])) if ids else []
+        if {item['Id'] for item in inspected} != set(ids) or any(not isinstance(item.get('SizeRootFs'), int) or item['SizeRootFs'] < 0 for item in inspected):
+            raise ValueError('Docker root filesystem measurement unavailable')
+        # Logical root filesystem sizes. Capacity is shared Docker storage, not a project quota.
+        usage = {'disk': sum(item['SizeRootFs'] for item in inspected),
+                 'maxdisk': filesystem.f_blocks * filesystem.f_frsize}
+        write_json(path, {'ids': ids, 'time': int(time.time()), 'usage': usage})
+        os.chmod(path, 0o600)
+        return usage
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {'disk': None, 'maxdisk': None}
 
 
 def record_metrics(info):
@@ -408,6 +472,8 @@ def management(identifier, node, shared_stats=None):
     elif active:
         info['stats'] = [json.loads(line) for line in capture(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *active]).splitlines()]
     info['metrics'] = metric_snapshot(info['containers'], info['stats'], info['services'])
+    info['metrics'].update(swap_usage(info['containers'], info['services']))
+    info['metrics'].update(disk_usage(identifier, info['containers']))
     return info
 
 

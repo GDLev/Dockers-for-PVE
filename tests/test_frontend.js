@@ -13,7 +13,7 @@ const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => in
 const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; } } };
 const context = { window: null, console,
     PVE: { panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
-        Utils: { get_object_icon_class: () => 'fa fa-cube' } },
+        Utils: { get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam' },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
         override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
@@ -170,11 +170,11 @@ context.Proxmox.Utils.format_duration_long = value => String(value);
 context.Proxmox.Utils.render_cpu_usage = (value, cpus) => `${value * 100}% of ${cpus} CPU(s)`;
 context.Proxmox.Utils.render_size_usage = (used, max) => `${used} / ${max}`;
 const renderedSummary = { down(id) { return id === '#statusPanel' ? { setTitle: value => { summaryFields.title = value; } } :
-    { updateValue: (text, usage) => { summaryFields[id] = { text, usage }; } }; } };
+    { updateValue: (text, usage) => { summaryFields[id] = { text, usage }; }, setPrintBar() {} }; } };
 const summaryData = { name: 'app', node: 'pve', status: 'running', address: '192.0.2.32',
     containers: [{ state: 'running' }], services: [{ name: 'app', settings: { memory: 512, swap: 0, cpus: 1, cpuunits: 0,
         pids: 0, dns: [], dns_search: [], restart: 'always' }, mounts: [], ports: [] }],
-    deployment: { mode: 'compose', compose: 'services: {}' }, metrics: { uptime: 60, cpu: 0.25, cpus: 1, mem: 128, maxmem: 512 } };
+    deployment: { mode: 'compose', compose: 'services: {}' }, metrics: { uptime: 60, cpu: 0.25, cpus: 1, mem: 128, maxmem: 512, swap: 32, maxswap: 128, disk: 100, maxdisk: 1000 } };
 definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, summaryData);
 assert.equal(summaryFields['#memoryValue'].usage, 0.25);
 assert.equal(summaryFields['#cpuValue'].usage, 0.25);
@@ -190,3 +190,52 @@ panelEvents.afterrender();
 assert.doesNotThrow(() => consoleRequest.success({ result: { data: summaryData } }));
 panelEvents.beforedestroy();
 console.log('Summary values and reload with inactive cards absent passed');
+
+assert.equal(summaryFields['#swapValue'].usage, 0.25);
+assert.equal(summaryFields['#diskValue'].usage, 0.1);
+console.log('SWAP usage and Bootdisk size status rows passed');
+
+const createdWindows = [];
+context.Ext.create = (name, options) => { createdWindows.push({ name, options }); return {}; };
+const shutdownButton = configPanel.tbar.find(button => button.itemId === 'stopButton');
+shutdownButton.handler();
+assert.equal(consoleRequest.params.action, 'stop');
+consoleRequest.success({ result: { data: 'UPID:stop' } });
+shutdownButton.menu[0].handler();
+assert.equal(consoleRequest.params.action, 'restart');
+consoleRequest.success({ result: { data: 'UPID:restart' } });
+assert.equal(createdWindows.length, 0, 'shutdown and restart must not open TaskViewer');
+configPanel.tbar.find(button => button.itemId === 'startButton').handler();
+consoleRequest.success({ result: { data: 'UPID:start' } });
+assert.equal(createdWindows[0].name, 'Proxmox.window.TaskViewer');
+const clickedRecord = { data: { id: 'docker/' + 'c'.repeat(32), type: 'docker', node: 'pve-other', name: 'other-project', status: 'running' } };
+const navigation = [];
+const menuWorkspace = { selectById: id => navigation.push(id), query: () => [
+    { pveSelNode: clickedRecord, selectById: card => navigation.push(card) }] };
+const commandMenu = { pveSelNode: clickedRecord, workspace: menuWorkspace, callParent };
+definitions['PVE.betterdocker.CmdMenu'].initComponent.call(commandMenu);
+assert(commandMenu.items.find(item => item.text === 'Start').disabled);
+commandMenu.items.find(item => item.text === 'Restart').handler();
+assert.equal(consoleRequest.url, '/nodes/pve-other/docker/' + 'c'.repeat(32) + '/action');
+const beforeRestart = createdWindows.length;
+consoleRequest.success({ result: { data: 'UPID:restart-other' } });
+assert.equal(createdWindows.length, beforeRestart);
+commandMenu.items.find(item => item.text === 'Console').handler();
+assert.deepEqual(navigation, [clickedRecord.data.id, 'console']);
+context.Ext.tree = { View: class {} };
+const treeView = new context.Ext.tree.View();
+treeView.up = () => menuWorkspace;
+let shownAt, menuArguments, suppressed = false;
+context.Ext.create = (name, options) => { menuArguments = { name, options }; return { on() {}, showAt(xy) { shownAt = xy; } }; };
+context.PVE.Utils.createCmdMenu(treeView, clickedRecord, null, 0, { stopEvent() { suppressed = true; }, getXY() { return [100, 200]; } });
+assert(suppressed);
+assert.deepEqual(shownAt, [100, 200]);
+assert.equal(menuArguments.name, 'PVE.betterdocker.CmdMenu');
+assert.equal(menuArguments.options.pveSelNode, clickedRecord);
+assert.equal(context.PVE.Utils.createCmdMenu(treeView, { data: { type: 'lxc' } }), 'native-menu');
+context.Proxmox.UserName = 'user@pve';
+const restrictedMenu = { pveSelNode: clickedRecord, workspace: menuWorkspace, callParent };
+definitions['PVE.betterdocker.CmdMenu'].initComponent.call(restrictedMenu);
+assert(restrictedMenu.items.filter(item => item.handler).every(item => item.disabled));
+context.Proxmox.UserName = 'root@pam';
+console.log('Silent shutdown/restart and project-scoped native context menu passed');

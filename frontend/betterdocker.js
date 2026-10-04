@@ -10,6 +10,11 @@
         failure: response => Ext.Msg.alert('Docker', response.htmlStatus),
     }, options));
     const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
+    const dockerAction = (info, operation, target) => request({
+        url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1] + '/action',
+        method: 'POST', params: { action: operation }, waitMsgTarget: target,
+        success: response => { if (operation !== 'stop' && operation !== 'restart') { task(response); } },
+    });
     const deployment = values => {
         const common = { name: values.name, mode: values.mode, environment: values.environment || '',
             bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
@@ -266,6 +271,14 @@
             update('cpuValue', Proxmox.Utils.render_cpu_usage(metrics.cpu, metrics.cpus), Math.min(1, metrics.cpu));
             update('memoryValue', metrics.maxmem ? Proxmox.Utils.render_size_usage(metrics.mem, metrics.maxmem) : '0 B',
                 metrics.maxmem ? metrics.mem / metrics.maxmem : 0);
+            ['swap', 'disk'].forEach(key => {
+                const used = metrics[key], maximum = metrics['max' + key];
+                const available = typeof used === 'number' && typeof maximum === 'number';
+                const text = !available ? 'Unavailable' : maximum > 0 ? Proxmox.Utils.render_size_usage(used, maximum) :
+                    '0.00% (' + Proxmox.Utils.format_size(used) + ' of 0 B)';
+                update(key + 'Value', text, available && maximum > 0 ? Math.min(1, used / maximum) : 0);
+                me.down('#' + key + 'Value').setPrintBar(available);
+            });
             update('ipValue', Ext.htmlEncode(data.address || 'Waiting for DHCP'));
         },
         initComponent: function () {
@@ -286,7 +299,7 @@
             me.tbar = ['->', { xtype: 'proxmoxRRDTypeSelector' }];
             me.items = [{ xtype: 'container', itemId: 'itemcontainer', minWidth: 700, layout: 'column',
                 defaults: { minHeight: 350, padding: 5 }, items: [
-                    { xtype: 'container', height: 330, layout: { type: 'hbox', align: 'stretch' }, items: [
+                    { xtype: 'container', height: 360, layout: { type: 'hbox', align: 'stretch' }, items: [
                         { xtype: 'panel', itemId: 'statusPanel', title: me.projectName, flex: 1, padding: '0 5 0 0',
                             layout: { type: 'vbox', align: 'stretch' }, items: [
                                 { xtype: 'box', height: 20 },
@@ -296,6 +309,14 @@
                                 { xtype: 'box', height: 10 },
                                 metric('cpuValue', 'CPU usage', 'fa fa-fw pmx-itype-icon-processor pmx-icon', true),
                                 metric('memoryValue', 'Memory usage', 'fa fa-fw pmx-itype-icon-memory pmx-icon', true),
+                                metric('swapValue', 'SWAP usage', 'fa fa-refresh fa-fw', true),
+                                Object.assign(metric('diskValue', 'Bootdisk size', 'fa fa-hdd-o fa-fw', true), {
+                                    listeners: { afterrender: widget => { widget.diskTooltip = Ext.create('Ext.tip.ToolTip', { target: widget.getEl(),
+                                        html: 'Total size of container root filesystems, including images and writable layers. Capacity is shared Docker storage. Volumes and bind mounts are excluded; shared image blocks may be counted for each container.',
+                                    }); }, destroy: widget => {
+                                            if (widget.diskTooltip) { widget.diskTooltip.destroy(); }
+                                        } },
+                                }),
                                 { xtype: 'box', height: 10 },
                                 metric('ipValue', 'IPs', 'fa fa-exchange fa-fw'),
                             ] },
@@ -385,8 +406,7 @@
                     failure: response => { loading = false; if (!me.destroyed) { Proxmox.Utils.setErrorMask(me, response.htmlStatus); } },
                 });
             };
-            const act = operation => request({ url: url + '/action', method: 'POST', params: { action: operation },
-                waitMsgTarget: me, success: task });
+            const act = operation => dockerAction(info, operation, me);
             const editDeployment = () => request({ url, method: 'GET', success: response => {
                 Ext.create('PVE.betterdocker.CreateWizard', { projectId: identifier, nodename: info.node,
                     deployment: response.result.data.deployment }).show();
@@ -509,6 +529,56 @@
             me.on('beforedestroy', () => clearInterval(me.poll));
         },
     });
+
+    Ext.define('PVE.betterdocker.CmdMenu', {
+        extend: 'Ext.menu.Menu', showSeparator: false,
+        initComponent: function () {
+            const me = this, record = me.pveSelNode, info = record.data;
+            const running = info.status === 'running' || info.status === 'partial';
+            const allowed = Proxmox.UserName === 'root@pam';
+            const act = operation => dockerAction(info, operation);
+            me.title = 'Docker ' + info.name;
+            me.items = [
+                { text: 'Start', iconCls: 'fa fa-fw fa-play', disabled: !allowed || info.status === 'running', handler: () => act('start') },
+                { text: 'Shutdown', iconCls: 'fa fa-fw fa-power-off', disabled: !allowed || !running, handler: () => act('stop') },
+                { text: 'Restart', iconCls: 'fa fa-fw fa-refresh', disabled: !allowed || !running, handler: () => act('restart') },
+                { xtype: 'menuseparator' },
+                { text: 'Console', iconCls: 'fa fa-fw fa-terminal', disabled: !allowed || !running || !me.workspace,
+                    handler: () => {
+                        me.workspace.selectById(info.id);
+                        const panel = me.workspace.query('pveBetterDockerConfig').find(item =>
+                            !item.destroyed && item.pveSelNode.data.id === info.id);
+                        if (panel) { panel.selectById('console'); }
+                    } },
+                { text: 'Edit deployment', iconCls: 'fa fa-fw fa-pencil', disabled: !allowed,
+                    handler: () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1],
+                        method: 'GET', success: response => Ext.create('PVE.betterdocker.CreateWizard', {
+                            projectId: info.id.split('/')[1], nodename: info.node, deployment: response.result.data.deployment,
+                        }).show() }) },
+                { xtype: 'menuseparator' },
+                { text: 'Remove', iconCls: 'fa fa-fw fa-trash', disabled: !allowed,
+                    handler: () => Ext.Msg.confirm('Remove Docker project',
+                        'Remove this project? Volumes and bind-mount data are retained.', answer => {
+                            if (answer === 'yes') { act('delete'); }
+                        }) },
+            ];
+            me.callParent();
+        },
+    });
+
+    const originalCmdMenu = PVE.Utils.createCmdMenu;
+    PVE.Utils.createCmdMenu = function (view, record, item, index, event) {
+        if (!record || record.data.type !== 'docker') { return originalCmdMenu.apply(this, arguments); }
+        event.stopEvent();
+        // Keep the native tree's right-click selection behavior.
+        if (!(view instanceof Ext.tree.View)) { view.select(record); }
+        const menu = Ext.create('PVE.betterdocker.CmdMenu', {
+            pveSelNode: record, workspace: view.up('pveStdWorkspace'),
+        });
+        menu.on('hide', () => menu.destroy(), menu, { single: true });
+        menu.showAt(event.getXY());
+        return menu;
+    };
 
     const originalInit = PVE.StdWorkspace.prototype.initComponent;
     const originalContent = PVE.StdWorkspace.prototype.setContent;
