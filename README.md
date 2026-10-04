@@ -77,7 +77,15 @@ Compose `network_mode` bypasses the managed port-binding model and is rejected. 
 
 ## Manage projects
 
-Docker resources appear under their owning node in the normal machine tree. Selecting one opens its own screen with **Start**, **Stop**, **Restart**, **Edit deployment**, **Refresh**, **Remove**, and **Logs**. Edit deployment changes the YAML/image settings and reapplies Compose while retaining the project name and network settings; DHCP may update the assigned IP. Removed services are stopped and removed on redeployment; named Docker volumes are retained.
+Docker resources appear under their owning node in the normal machine tree. Selecting one opens the native Proxmox vertical navigation layout with **Summary**, **Console**, **Resources**, **Network**, **DNS**, **Options**, **Deployment**, **Logs**, and **Task History**. The top toolbar provides Start, Stop, Restart, Console and a More menu for deployment editing, refresh and removal.
+
+Summary displays service/container state and live Docker CPU, memory, network and disk I/O usage. Resources uses an LXC-style settings grid and edit dialog for memory, swap, CPU limit, CPU units and PID limit, alongside a mount list. Select a Compose service first: these limits apply to each container of that service, not to an aggregate project budget. A zero CPU/memory/PID limit means unlimited; with a memory limit, zero swap disables swap and -1 permits unlimited swap. CPU units map to Docker CPU shares. DNS edits container DNS servers/search domains; Options edits restart policy.
+
+Applying settings recreates running containers of the selected service. Stopped services remain stopped, and dependencies are not restarted. Persistent GUI overrides take precedence over the corresponding settings in Compose YAML, including after redeployment. Mounts and published ports can be edited through Deployment. Network shows the dedicated interface settings and port mappings; project bridge/MAC/IP mode stay fixed.
+
+Console provides an interactive xterm.js terminal through Proxmox's authenticated termproxy/websocket transport. Select a running container (including the instance for replicated services), choose `/bin/sh` or `/bin/bash` and Connect. The selected shell must exist in the image. It runs inside that container using its default user. Task History lists recent API operations and console sessions for this project; double-click opens the normal task viewer. Tasks created by earlier versions without a project ID are not included.
+
+ Edit deployment changes the YAML/image settings and reapplies Compose while retaining the project name and network settings; DHCP may update the assigned IP. Removed services are stopped and removed on redeployment; named Docker volumes are retained.
 
 Project IDs are UUIDs, independent of VM/CT IDs. Public summaries are stored in `/etc/pve/betterdocker/` for cluster resource discovery. Deployment YAML, `.env` and canonical runtime configuration are root-only local files under `/var/lib/betterdocker/projects/<id>/`. A timer refreshes statuses every 15 seconds. Resource discovery does not expose YAML or environment secrets.
 
@@ -89,7 +97,7 @@ docker compose -p bd-PROJECT_ID -f compose.runtime.json ps
 docker compose -p bd-PROJECT_ID -f compose.runtime.json logs --tail=100
 ```
 
-Failed deployments remain visible for inspection, editing and retrying. Removing a project runs Compose down, releases its dedicated IP/interface and removes its cluster entry. Docker volumes and the local project directory, including bind-mount data and deployment configuration, are retained for recovery or manual cleanup. This is a host Docker workload: native VM/CT backup, HA, migration, console and resource-limit controls do not apply. Configure resource limits in Compose and back up the Docker volumes and managed deployment files separately.
+Failed deployments remain visible for inspection, editing and retrying. Removing a project runs Compose down, releases its dedicated IP/interface and removes its cluster entry. Docker volumes and the local project directory, including bind-mount data and deployment configuration, are retained for recovery or manual cleanup. This is a host Docker workload: native VM/CT backup, HA, replication, snapshots, migration and firewall controls do not apply. Back up the Docker volumes and managed deployment files separately.
 
 ## Upgrade from the first LXC release
 
@@ -101,7 +109,7 @@ Previously created Docker-in-LXC machines remain LXC machines with their data. T
 
 ## Validation
 
-Local validation includes the real Compose parser for relative bind mounts and `.env` resolution during edits, DHCP hook isolation, lease-driven port rebinding, and retaining bind data on removal. It also covers Compose-driven setup without an image field, dedicated-IP port binding, preservation of internal networks and volumes, rejection of the management IP, ARP probe failures, secret file permissions, fail-before-allocation behavior, API permissions, Docker resource discovery, reversible package patches, and ExtJS compatibility.
+Local validation covers service-scoped resource overrides, stopped-service preservation, console target ownership, native management navigation, and the real Compose parser for relative bind mounts and `.env` resolution during edits, DHCP hook isolation, lease-driven port rebinding, and retaining bind data on removal. It also covers Compose-driven setup without an image field, dedicated-IP port binding, preservation of internal networks and volumes, rejection of the management IP, ARP probe failures, secret file permissions, fail-before-allocation behavior, API permissions, Docker resource discovery, reversible package patches, and ExtJS compatibility.
 
 ```bash
 python3 -m unittest discover -s tests -v

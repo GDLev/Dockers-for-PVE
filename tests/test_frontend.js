@@ -7,7 +7,9 @@ function callParent() {
     assert.ok(callParent.caller, 'ExtJS callParent must have a non-strict caller');
     this.initialized = true;
 }
-const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => info } };
+const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => info,
+    getTypeOrder: type => ({ lxc: 0, qemu: 1, node: 2, storage: 4 })[type] ?? 9,
+    nodeSortFn: (a, b) => a.data.vmid - b.data.vmid } };
 const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; } } };
 const context = { window: null, console,
     PVE: { window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
@@ -57,3 +59,75 @@ assert.equal(groups.composeDisabled, false);
 assert.equal(groups.imageDisabled, true);
 assert(fs.readFileSync('frontend/docker.svg', 'utf8').includes('fill="#ffffff"'));
 console.log('English wizard, LXC-style IPv4/DHCP controls, Docker resource routing and ExtJS checks passed');
+const configPanel = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), node: 'pve', name: 'web' } },
+    callParent, on() {}, down() { return null; } };
+definitions['PVE.betterdocker.Config'].initComponent.call(configPanel);
+assert.equal(definitions['PVE.betterdocker.Config'].extend, 'PVE.panel.Config');
+assert.deepEqual(Array.from(configPanel.items, card => card.title),
+    ['Summary', 'Console', 'Resources', 'Network', 'DNS', 'Options', 'Deployment', 'Logs', 'Task History']);
+assert(configPanel.items.every(card => card.itemId && card.iconCls));
+assert(configPanel.items.find(card => card.title === 'Resources').tbar.some(button => button.text === 'Edit'));
+assert.equal(configPanel.items.find(card => card.title === 'Console').xtype, 'pveBetterDockerConsole');
+assert(definitions['PVE.betterdocker.Console']);
+console.log('Native vertical management navigation, resource editors and console configuration passed');
+let consoleRequest;
+let inputHandler;
+let sizeHandler;
+let disposed = false;
+context.TextEncoder = TextEncoder;
+context.location = { protocol: 'https:', host: 'pve.example:8006' };
+context.setInterval = () => 1;
+context.clearInterval = () => {};
+context.Proxmox.Utils = { API2Request: options => { consoleRequest = options; } };
+context.Terminal = class {
+    constructor() { this.cols = 80; this.rows = 24; }
+    loadAddon() {} open() {} focus() {} write() {}
+    dispose() { disposed = true; }
+    onData(handler) { inputHandler = handler; }
+    onResize(handler) { sizeHandler = handler; }
+};
+context.FitAddon = { FitAddon: class { fit() {} } };
+const sent = [];
+let socket;
+context.WebSocket = class {
+    static OPEN = 1;
+    constructor(url) { socket = this; this.url = url; this.readyState = 1; }
+    send(value) { sent.push(value); }
+    close() { this.readyState = 3; if (this.onclose) { this.onclose(); } }
+};
+const events = {};
+const consolePanel = { apiUrl: '/nodes/pve/docker/' + 'a'.repeat(32), callParent,
+    down(id) { return id === '#terminal' ? { getEl: () => ({ dom: {} }) } :
+        { getValue: () => id === '#container' ? 'b'.repeat(64) : '/bin/sh' }; },
+    on(event, callback) { events[event] = callback; } };
+definitions['PVE.betterdocker.Console'].initComponent.call(consolePanel);
+consolePanel.tbar.find(button => button.text === 'Connect').handler();
+assert.equal(consoleRequest.method, 'POST');
+assert.equal(consoleRequest.params.container, 'b'.repeat(64));
+consoleRequest.success({ result: { data: { user: 'root@pam', ticket: 'ticket', port: 5901 } } });
+assert(socket.url.startsWith('wss://pve.example:8006/api2/json/nodes/pve/docker/'));
+socket.onopen();
+assert.equal(sent[0], 'root@pam:ticket\n');
+socket.onmessage({ data: new Uint8Array([79, 75]).buffer });
+inputHandler('ą');
+assert(sent.includes('0:2:ą'), 'terminal frames must use UTF-8 byte lengths');
+sizeHandler({ cols: 100, rows: 30 });
+assert(sent.includes('1:100:30:'));
+events.beforedestroy();
+assert(disposed);
+assert.equal(socket.readyState, 3);
+assert.equal(consolePanel.fit, null);
+console.log('Authenticated terminal handshake, Unicode input, resizing and cleanup passed');
+
+const treeOverride = overrides.get(tree);
+assert.equal(treeOverride.getTypeOrder.call({}, 'docker'), 0.5);
+const guests = [
+    { data: { type: 'qemu', vmid: 1, id: 'qemu/1' } },
+    { data: { type: 'docker', id: 'docker/z', name: 'zeta' } },
+    { data: { type: 'lxc', vmid: 100, id: 'lxc/100' } },
+    { data: { type: 'docker', id: 'docker/a', name: 'alpha' } },
+];
+guests.sort((a, b) => treeOverride.nodeSortFn.call({ 'group-guest-types': false }, a, b));
+assert.deepEqual(guests.map(item => item.data.type), ['lxc', 'docker', 'docker', 'qemu']);
+assert.equal(guests[1].data.name, 'alpha');
+console.log('Consistent LXC → Docker → VM ordering passed');

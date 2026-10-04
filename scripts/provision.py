@@ -202,6 +202,7 @@ def prepare(data, identifier, directory, project_directory=None):
     except subprocess.CalledProcessError:
         raise ValueError('Invalid Compose configuration. Check YAML, .env and referenced files.') from None
     config = bind_ports(config, data['address'], identifier)
+    apply_settings(config, load_settings(project_directory))
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
     def escape(value):
         if isinstance(value, str):
@@ -214,6 +215,150 @@ def prepare(data, identifier, directory, project_directory=None):
     write_json(directory / 'compose.runtime.json', escape(config))
     os.chmod(directory / 'compose.runtime.json', 0o600)
     return config
+
+
+def load_settings(directory):
+    path = directory / 'settings.json'
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def validate_settings(value):
+    if not isinstance(value, dict) or set(value) - {'cpus', 'memory', 'swap', 'cpuunits', 'pids', 'dns', 'dns_search', 'restart'}:
+        raise ValueError('Invalid service settings')
+    result = {}
+    for key, maximum in [('cpus', 8192), ('memory', 1048576), ('swap', 1048576), ('cpuunits', 262144), ('pids', 4194304)]:
+        raw = value.get(key, 0)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not (-1 if key == 'swap' else 0) <= raw <= maximum or (key != 'cpus' and int(raw) != raw):
+            raise ValueError(f'Invalid {key} limit')
+        result[key] = raw
+    if result['cpuunits'] and result['cpuunits'] < 2:
+        raise ValueError('CPU units must be at least 2')
+    if result['swap'] and not result['memory']:
+        raise ValueError('Set a memory limit before setting swap')
+    dns = value.get('dns', [])
+    if not isinstance(dns, list) or len(dns) > 8:
+        raise ValueError('Invalid DNS servers')
+    result['dns'] = [str(ipaddress.ip_address(server)) for server in dns]
+    search = value.get('dns_search', [])
+    if not isinstance(search, list) or len(search) > 8 or any(not isinstance(v, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,253}', v) for v in search):
+        raise ValueError('Invalid DNS search domains')
+    result['dns_search'] = search
+    restart = value.get('restart', 'unless-stopped')
+    if not isinstance(restart, str) or not re.fullmatch(r'(?:no|always|unless-stopped|on-failure(?::[1-9][0-9]*)?)', restart):
+        raise ValueError('Invalid restart policy')
+    result['restart'] = restart
+    return result
+
+
+def apply_settings(config, settings):
+    for name, values in settings.items():
+        if name not in config['services']:
+            continue
+        service = config['services'][name]
+        values = validate_settings(values)
+        for key in ('cpus', 'cpu_shares', 'cpu_period', 'cpu_quota', 'mem_limit', 'memswap_limit', 'pids_limit'):
+            service.pop(key, None)
+        resources = service.get('deploy', {}).get('resources', {})
+        for group in ('limits', 'reservations'):
+            for key in ('cpus', 'memory', 'pids'):
+                resources.get(group, {}).pop(key, None)
+            if group in resources and not resources[group]:
+                resources.pop(group)
+        if 'resources' in service.get('deploy', {}) and not resources:
+            service['deploy'].pop('resources')
+        if values['cpus']:
+            service['cpus'] = values['cpus']
+        if values['cpuunits']:
+            service['cpu_shares'] = values['cpuunits']
+        if values['memory']:
+            service['mem_limit'] = int(values['memory']) * 1048576
+            service['memswap_limit'] = -1 if values['swap'] == -1 else int(values['memory'] + values['swap']) * 1048576
+            # A source reservation cannot exceed a new hard limit.
+            service.pop('mem_reservation', None)
+        if values['pids']:
+            service['pids_limit'] = values['pids']
+        service['dns'] = values['dns']
+        service['dns_search'] = values['dns_search']
+        service['restart'] = values['restart']
+    return config
+
+
+def container_records(identifier):
+    ids = capture(['docker', 'ps', '-aq', '--filter', 'label=betterdocker.id=' + identifier]).split()
+    if not ids:
+        return []
+    inspected = json.loads(capture(['docker', 'inspect', *ids]))
+    records = []
+    for item in inspected:
+        labels = item['Config'].get('Labels') or {}
+        if labels.get('betterdocker.id') != identifier:
+            continue
+        records.append({'id': item['Id'], 'name': item['Name'].lstrip('/'),
+                        'service': labels.get('com.docker.compose.service', ''),
+                        'state': item['State']['Status'], 'started': item['State'].get('StartedAt', ''),
+                        'image': item['Config']['Image']})
+    return records
+
+
+def management(identifier, node):
+    info = detail(identifier, node)
+    directory = ROOT / identifier
+    config = json.loads((directory / 'compose.runtime.json').read_text())
+    settings = load_settings(directory)
+    info['services'] = []
+    for name, service in config['services'].items():
+        limits = service.get('deploy', {}).get('resources', {}).get('limits', {})
+        memory = int(service.get('mem_limit') or limits.get('memory') or 0) // 1048576
+        total = int(service.get('memswap_limit') or 0) // 1048576
+        values = {'cpus': float(service.get('cpus') or limits.get('cpus') or 0), 'memory': memory,
+                  'swap': -1 if service.get('memswap_limit') == -1 else max(0, total - memory) if total else memory, 'cpuunits': service.get('cpu_shares', 0),
+                  'pids': max(0, int(service.get('pids_limit') or limits.get('pids') or 0)),
+                  'dns': service.get('dns', []), 'dns_search': service.get('dns_search', []),
+                  'restart': service.get('restart', 'no')}
+        info['services'].append({'name': name, 'image': service.get('image', ''),
+                                 'settings': settings.get(name, values),
+                                 'mounts': service.get('volumes', []), 'ports': service.get('ports', [])})
+    info['containers'] = container_records(identifier)
+    active = [item['id'] for item in info['containers'] if item['state'] == 'running']
+    info['stats'] = []
+    if active:
+        info['stats'] = [json.loads(line) for line in capture(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *active]).splitlines()]
+    return info
+
+
+def service_settings(identifier, node, service, values):
+    values = validate_settings(values)
+    with locked():
+        info = detail(identifier, node)
+        directory = ROOT / identifier
+        runtime = directory / 'compose.runtime.json'
+        original = runtime.read_text()
+        config = json.loads(original)
+        if service not in config['services']:
+            raise ValueError('Unknown Compose service')
+        settings = load_settings(directory)
+        settings[service] = values
+        active = any(item['service'] == service and item['state'] == 'running' for item in container_records(identifier))
+        apply_settings(config, {service: values})
+        write_json(runtime, config)
+        os.chmod(runtime, 0o600)
+        try:
+            run(compose_base(directory, identifier) + ['up', '-d' if active else '--no-start', '--no-deps', service], timeout=1800)
+        except Exception:
+            runtime.write_text(original)
+            raise
+        write_json(directory / 'settings.json', settings)
+        os.chmod(directory / 'settings.json', 0o600)
+        refresh(node)
+
+
+def console_target(identifier, node, container, shell):
+    detail(identifier, node)
+    if shell not in ('/bin/sh', '/bin/bash') or not re.fullmatch(r'[0-9a-f]{64}', container):
+        raise ValueError('Invalid console target')
+    if not any(item['id'] == container and item['state'] == 'running' for item in container_records(identifier)):
+        raise ValueError('Choose a running container belonging to this project')
+    return ['docker', 'exec', '-it', container, shell]
 
 
 def bridge_addresses(bridge):
@@ -442,11 +587,13 @@ def current_node():
     return os.uname().nodename.split('.')[0]
 
 
-def create(data, node):
+def create(data, node, identifier=None):
     if node != current_node():
         raise ValueError('The request was sent to the wrong node')
-    identifier = uuid.uuid4().hex
+    identifier = project_id(identifier) if identifier else uuid.uuid4().hex
     with locked():
+        if (METADATA / (identifier + ".json")).exists() or (ROOT / identifier).exists():
+            raise ValueError("Project ID already exists")
         network_preflight(data)
         directory = ROOT / identifier
         try:
@@ -579,18 +726,28 @@ def restore(node):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release'])
+    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
-    if args.operation in ('validate', 'create'):
+    if args.operation == 'new-id':
+        print(uuid.uuid4().hex)
+    elif args.operation in ('validate', 'create'):
         data = validate(json.loads(Path(values[0]).read_text()))
         if args.operation == 'create':
-            create(data, values[1])
+            create(data, values[1], values[2] if len(values) > 2 else None)
     elif args.operation == 'update':
         update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())))
     elif args.operation in ('dhcp-client', 'dhcp-release'):
         dhcp_client(values[0], release=args.operation == 'dhcp-release')
+    elif args.operation == 'management':
+        print(json.dumps(management(*values)))
+    elif args.operation == 'settings':
+        service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()))
+    elif args.operation in ('console-check', 'console'):
+        command = console_target(*values)
+        if args.operation == 'console':
+            os.execvp(command[0], command)
     elif args.operation == 'detail':
         print(json.dumps(detail(*values)))
     elif args.operation == 'action':

@@ -44,10 +44,33 @@
             typeof icon === 'string' ? icon.replace('fa-cube', 'bd-docker-icon') : icon;
     };
     const originalAdd = PVE.tree.ResourceTree.prototype.addChildSorted;
+    const originalTypeOrder = PVE.tree.ResourceTree.prototype.getTypeOrder;
+    const originalSort = PVE.tree.ResourceTree.prototype.nodeSortFn;
+    const guestOrder = { lxc: 0, docker: 1, qemu: 2 };
     Ext.override(PVE.tree.ResourceTree, {
+        getTypeOrder: function (type) {
+            if (type === 'docker') {
+                return (originalTypeOrder.call(this, 'lxc') + originalTypeOrder.call(this, 'qemu')) / 2;
+            }
+            return originalTypeOrder.call(this, type);
+        },
+        nodeSortFn: function (node1, node2) {
+            const a = node1.data, b = node2.data;
+            const typeA = a.type === 'type' ? a.groupbyid : a.type;
+            const typeB = b.type === 'type' ? b.groupbyid : b.type;
+            // Keep all three guest types in a consistent order even when native guest grouping is off.
+            if (!a.groupbyid === !b.groupbyid && typeA in guestOrder && typeB in guestOrder) {
+                if (typeA !== typeB) { return guestOrder[typeA] - guestOrder[typeB]; }
+                if (typeA === 'docker') {
+                    return String(a.name || a.text || '').localeCompare(String(b.name || b.text || '')) ||
+                        String(a.id).localeCompare(String(b.id));
+                }
+            }
+            return originalSort.call(this, node1, node2);
+        },
         addChildSorted: function (node, info) {
             if (info.type === 'docker') { info.text = info.name; }
-            return originalAdd.call(this, node, info);
+            return originalAdd.apply(this, arguments);
         },
     });
 
@@ -145,46 +168,257 @@
         },
     });
 
+    Ext.define('PVE.betterdocker.Console', {
+        extend: 'Ext.panel.Panel', alias: 'widget.pveBetterDockerConsole', layout: 'fit', bodyStyle: 'background:#000',
+        initComponent: function () {
+            const me = this;
+            const disconnect = () => {
+                if (me.socket) { me.socket.close(); me.socket = null; }
+                clearInterval(me.ping);
+                if (me.terminal) { me.terminal.dispose(); me.terminal = null; }
+                me.connected = false; me.fit = null;
+                me.generation = (me.generation || 0) + 1;
+            };
+            const resize = () => { if (me.fit) { me.fit.fit(); } };
+            const connect = () => {
+                const container = me.down('#container').getValue();
+                if (!container) { Ext.Msg.alert('Console', 'Choose a running container.'); return; }
+                disconnect();
+                const generation = me.generation;
+                request({ url: me.apiUrl + '/termproxy', method: 'POST',
+                    params: { container, shell: me.down('#shell').getValue() }, waitMsgTarget: me,
+                    success: response => {
+                        if (me.destroyed || generation !== me.generation) { return; }
+                        const data = response.result.data;
+                        me.terminal = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 5000 });
+                        me.fit = new FitAddon.FitAddon();
+                        me.terminal.loadAddon(me.fit);
+                        me.terminal.open(me.down('#terminal').getEl().dom);
+                        resize();
+                        const socket = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host +
+                            '/api2/json' + me.apiUrl + '/vncwebsocket?port=' + data.port + '&vncticket=' + encodeURIComponent(data.ticket));
+                        me.socket = socket;
+                        socket.binaryType = 'arraybuffer';
+                        socket.onopen = () => socket.send(data.user + ':' + data.ticket + '\n');
+                        socket.onmessage = event => {
+                            if (me.socket !== socket || !me.terminal) { return; }
+                            const bytes = new Uint8Array(event.data);
+                            if (!me.connected) {
+                                if (bytes[0] !== 79 || bytes[1] !== 75) { socket.close(); return; }
+                                me.connected = true;
+                                me.terminal.write(bytes.slice(2));
+                                me.terminal.focus();
+                                socket.send('1:' + me.terminal.cols + ':' + me.terminal.rows + ':');
+                            } else { me.terminal.write(bytes); }
+                        };
+                        socket.onclose = () => {
+                            if (me.socket === socket && me.terminal) {
+                                me.connected = false; clearInterval(me.ping);
+                                me.terminal.write('\r\nConnection closed. Use Connect to open a new session.\r\n');
+                            }
+                        };
+                        socket.onerror = () => { if (me.terminal) { me.terminal.write('\r\nConsole connection failed.\r\n'); } };
+                        me.terminal.onData(value => {
+                            if (me.connected) { socket.send('0:' + new TextEncoder().encode(value).length + ':' + value); }
+                        });
+                        me.terminal.onResize(size => { if (me.connected) { socket.send('1:' + size.cols + ':' + size.rows + ':'); } });
+                        me.ping = setInterval(() => { if (socket.readyState === WebSocket.OPEN) { socket.send('2'); } }, 30000);
+                    },
+                });
+            };
+            me.tbar = [
+                { xtype: 'combobox', itemId: 'container', fieldLabel: 'Container', labelWidth: 65, width: 350,
+                    queryMode: 'local', editable: false, displayField: 'name', valueField: 'id',
+                    store: { fields: ['id', 'name'], data: [] } },
+                { xtype: 'combobox', itemId: 'shell', width: 110, value: '/bin/sh', editable: false,
+                    queryMode: 'local', store: [['/bin/sh', '/bin/sh'], ['/bin/bash', '/bin/bash']] },
+                { text: 'Connect', handler: connect }, { text: 'Disconnect', handler: disconnect },
+            ];
+            me.items = [{ xtype: 'component', itemId: 'terminal' }];
+            me.callParent();
+            me.on('resize', resize);
+            me.on('beforedestroy', disconnect);
+        },
+    });
+
     Ext.define('PVE.betterdocker.Config', {
-        extend: 'Ext.panel.Panel', alias: 'widget.pveBetterDockerConfig', layout: 'fit',
+        extend: 'PVE.panel.Config', alias: 'widget.pveBetterDockerConfig', showSearch: false,
         initComponent: function () {
             const me = this;
             const info = me.pveSelNode.data;
             const identifier = info.id.split('/')[1];
             const url = '/nodes/' + encodeURIComponent(info.node) + '/docker/' + identifier;
-            const reload = () => request({ url, method: 'GET', success: response => {
-                const data = response.result.data;
-                me.down('#summary').setValue(data.name + ' · ' + data.status + ' · ' + data.address + ' · ' + data.bridge);
-                me.down('#source').setValue(data.deployment.mode === 'compose' ? data.deployment.compose :
-                    'Image: ' + data.deployment.image + '\nPublished ports:\n' + (data.deployment.ports || 'None'));
-            } });
+            let current;
+            let selectedService;
+            let loading = false;
+            const set = (id, value) => { const item = me.down('#' + id); if (item) { item.setValue(value); } };
+            const rows = (id, data) => { const item = me.down('#' + id); if (item) { item.getStore().loadData(data); } };
+            const service = () => current && current.services.find(item => item.name === selectedService);
+            const populate = () => {
+                if (!current) { return; }
+                const running = current.containers.some(item => item.state === 'running');
+                [['startButton', current.status === 'running'], ['stopButton', !running], ['restartButton', !running]].forEach(([id, disabled]) => {
+                    const button = me.down('#' + id); if (button) { button.setDisabled(disabled); }
+                });
+                selectedService = service() ? selectedService : (current.services[0] || {}).name;
+                me.query('[itemId=serviceSelector]').forEach(combo => {
+                    combo.getStore().loadData(current.services.map(item => ({ name: item.name })));
+                    combo.setValue(selectedService);
+                });
+                rows('summaryGrid', [
+                    { key: 'Status', value: current.status }, { key: 'Node', value: info.node },
+                    { key: 'IP address', value: current.address || 'Waiting for DHCP' },
+                    { key: 'Services', value: current.services.length },
+                    { key: 'Running containers', value: current.containers.filter(item => item.state === 'running').length },
+                ]);
+                rows('containerGrid', current.containers);
+                rows('usageGrid', current.stats);
+                rows('networkGrid', [
+                    { key: 'Bridge', value: current.bridge }, { key: 'IPv4', value: current.address || 'Waiting for DHCP' },
+                    { key: 'IPv4 mode', value: current.ipv4mode || 'static' }, { key: 'MAC address', value: current.hwaddr || '' },
+                    { key: 'MTU', value: current.mtu || 'Same as bridge' }, { key: 'Gateway', value: 'Inherited from host routing' },
+                ]);
+                rows('portGrid', current.services.flatMap(item => item.ports.map(port => Object.assign({ service: item.name }, port))));
+                const active = service();
+                if (active) {
+                    const values = active.settings;
+                    rows('resourceGrid', [
+                        { key: 'Memory', value: values.memory ? values.memory + ' MiB' : 'Unlimited' },
+                        { key: 'Swap', value: values.memory ? values.swap + ' MiB' : 'Docker default' },
+                        { key: 'CPU limit', value: values.cpus || 'Unlimited' },
+                        { key: 'CPU units', value: values.cpuunits || 'Docker default' },
+                        { key: 'PID limit', value: values.pids || 'Unlimited' },
+                    ]);
+                    rows('mountGrid', active.mounts);
+                    rows('dnsGrid', [{ key: 'DNS servers', value: values.dns.join(', ') || 'Docker default' },
+                        { key: 'Search domains', value: values.dns_search.join(', ') || 'Docker default' }]);
+                    rows('optionGrid', [{ key: 'Restart policy', value: values.restart }, { key: 'Image', value: active.image }]);
+                }
+                set('source', current.deployment.mode === 'compose' ? current.deployment.compose :
+                    'Image: ' + current.deployment.image + '\nPublished ports:\n' + (current.deployment.ports || 'None'));
+                const consoleCombo = me.down('#container');
+                if (consoleCombo) {
+                    const old = consoleCombo.getValue();
+                    const containers = current.containers.filter(item => item.state === 'running');
+                    consoleCombo.getStore().loadData(containers);
+                    consoleCombo.setValue(containers.some(item => item.id === old) ? old : (containers[0] || {}).id);
+                }
+            };
+            const reload = () => {
+                if (loading || me.destroyed) { return; }
+                loading = true;
+                request({ url: url + '/management', method: 'GET',
+                    success: response => { loading = false; if (!me.destroyed) { Proxmox.Utils.setErrorMask(me, false); current = response.result.data; populate(); } },
+                    failure: response => { loading = false; if (!me.destroyed) { Proxmox.Utils.setErrorMask(me, response.htmlStatus); } },
+                });
+            };
             const act = operation => request({ url: url + '/action', method: 'POST', params: { action: operation },
                 waitMsgTarget: me, success: task });
-            me.title = 'Docker — ' + info.name;
+            const editDeployment = () => request({ url, method: 'GET', success: response => {
+                Ext.create('PVE.betterdocker.CreateWizard', { projectId: identifier, nodename: info.node,
+                    deployment: response.result.data.deployment }).show();
+            } });
+            const editSettings = group => {
+                const active = service();
+                if (!active) { return; }
+                const values = active.settings;
+                const numeric = (name, label, maximum, extra) => field(name, label, values[name] || 0,
+                    Object.assign({ xtype: 'numberfield', minValue: 0, maxValue: maximum, allowDecimals: false, allowBlank: false }, extra));
+                const fields = group === 'resources' ? [
+                    numeric('memory', 'Memory (MiB)', 1048576), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1 }),
+                    numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3 }),
+                    numeric('cpuunits', 'CPU units', 262144), numeric('pids', 'PID limit', 4194304),
+                    { xtype: 'displayfield', value: 'Limits apply to each container of this service. Zero CPU, memory or PID limit means unlimited. With a memory limit, zero swap disables swap; -1 allows unlimited swap.' },
+                ] : group === 'dns' ? [
+                    field('dns', 'DNS servers', values.dns.join(', ')), field('dns_search', 'Search domains', values.dns_search.join(', ')),
+                    { xtype: 'displayfield', value: 'Separate entries with commas. Empty fields use Docker defaults.' },
+                ] : [field('restart', 'Restart policy', values.restart, { xtype: 'combobox', editable: false, queryMode: 'local',
+                    store: [['no', 'No'], ['always', 'Always'], ['unless-stopped', 'Unless stopped'], ['on-failure', 'On failure']] })];
+                const win = Ext.create('Ext.window.Window', { title: 'Edit ' + group + ' — ' + active.name,
+                    modal: true, width: 520, layout: 'fit', items: [{ xtype: 'form', bodyPadding: 12, items: fields }],
+                    buttons: [{ text: 'Apply', handler: () => {
+                        const form = win.down('form').getForm();
+                        if (!form.isValid()) { return; }
+                        const changed = form.getValues();
+                        const settings = Object.assign({}, values);
+                        Object.keys(changed).forEach(key => { settings[key] = group === 'resources' ? Number(changed[key]) : changed[key]; });
+                        if (group === 'dns') {
+                            ['dns', 'dns_search'].forEach(key => { settings[key] = changed[key].split(',').map(v => v.trim()).filter(Boolean); });
+                        }
+                        request({ url: url + '/settings', method: 'PUT', waitMsgTarget: win,
+                            params: { service: active.name, settings: JSON.stringify(settings) },
+                            success: response => { task(response); win.close(); } });
+                    } }, { text: 'Cancel', handler: () => win.close() }],
+                });
+                win.show();
+            };
+            const selector = () => ({ xtype: 'combobox', itemId: 'serviceSelector', fieldLabel: 'Service', labelWidth: 50,
+                queryMode: 'local', editable: false, displayField: 'name', valueField: 'name',
+                store: { fields: ['name'], data: [] }, listeners: { select: combo => { selectedService = combo.getValue(); populate(); } } });
+            const grid = (id, columns, fields) => ({ xtype: 'grid', itemId: id, minHeight: 150,
+                store: { fields, data: [] }, columns: columns.map(column => Object.assign({ flex: 1, renderer: Ext.htmlEncode }, column)) });
+            const properties = id => grid(id, [{ text: 'Setting', dataIndex: 'key', width: 200, flex: 0 },
+                { text: 'Value', dataIndex: 'value' }], ['key', 'value']);
+            const card = (title, id, icon, items, tbar, extra) => Object.assign({ xtype: 'panel', title, itemId: id,
+                iconCls: 'fa fa-' + icon, layout: 'anchor', scrollable: true, bodyPadding: 10,
+                defaults: { anchor: '100%', margin: '0 0 10 0' }, items, tbar,
+                listeners: { afterrender: reload, activate: reload } }, extra);
+            me.title = 'Docker (' + info.name + ') on node \'' + info.node + '\'';
+            me.hstateid = 'betterdocker-' + identifier;
             me.tbar = [
-                { text: 'Start', iconCls: 'fa fa-play', handler: () => act('start') },
-                { text: 'Stop', iconCls: 'fa fa-stop', handler: () => act('stop') },
-                { text: 'Restart', iconCls: 'fa fa-refresh', handler: () => act('restart') },
-                { text: 'Refresh', handler: reload },
-                { text: 'Edit deployment', handler: () => request({ url, method: 'GET', success: response => {
-                    Ext.create('PVE.betterdocker.CreateWizard', { projectId: identifier, nodename: info.node,
-                        deployment: response.result.data.deployment }).show();
-                } }) }, '->',
-                { text: 'Remove', iconCls: 'fa fa-trash', handler: () => Ext.Msg.confirm('Remove Docker project',
-                    'Remove this project? Volumes and bind-mount data are retained.', answer => { if (answer === 'yes') { act('delete'); } }) },
+                { text: 'Start', itemId: 'startButton', iconCls: 'fa fa-play', handler: () => act('start') },
+                { text: 'Stop', itemId: 'stopButton', iconCls: 'fa fa-stop', handler: () => act('stop') },
+                { text: 'Restart', itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('restart') },
+                { text: 'Console', iconCls: 'fa fa-terminal', handler: () => me.selectById('console') },
+                { text: 'More', menu: [{ text: 'Edit deployment', handler: editDeployment }, { text: 'Refresh', handler: reload },
+                    { text: 'Remove', iconCls: 'fa fa-trash', handler: () => Ext.Msg.confirm('Remove Docker project',
+                        'Remove this project? Volumes and bind-mount data are retained.', answer => { if (answer === 'yes') { act('delete'); } }) }] },
             ];
-            me.items = [{ xtype: 'tabpanel', items: [{ title: 'Deployment', xtype: 'panel', bodyPadding: 12,
-                layout: 'anchor', items: [
-                    { xtype: 'displayfield', itemId: 'summary', anchor: '100%', fieldLabel: 'Status', renderer: Ext.htmlEncode },
-                    { xtype: 'textarea', itemId: 'source', anchor: '100%', height: 390, readOnly: true, fieldLabel: 'Deployment' },
-                    { xtype: 'displayfield', value: 'Docker projects use the host engine. VM/CT backup and migration actions do not apply.' },
-                ] }, { title: 'Logs', xtype: 'panel', layout: 'fit',
-                    items: [{ xtype: 'textarea', itemId: 'logs', readOnly: true }],
-                    listeners: { activate: () => request({ url: url + '/logs', method: 'GET',
-                        success: response => me.down('#logs').setValue(response.result.data) }) },
-                } ] }];
+            me.items = [
+                card('Summary', 'summary', 'book', [properties('summaryGrid'),
+                    grid('containerGrid', [{ text: 'Container', dataIndex: 'name' }, { text: 'Service', dataIndex: 'service' },
+                        { text: 'Status', dataIndex: 'state' }, { text: 'Started', dataIndex: 'started' }], ['name', 'service', 'state', 'started']),
+                    grid('usageGrid', [{ text: 'Container', dataIndex: 'Name' }, { text: 'CPU usage', dataIndex: 'CPUPerc' },
+                        { text: 'Memory usage / limit', dataIndex: 'MemUsage' }, { text: 'Network I/O', dataIndex: 'NetIO' },
+                        { text: 'Disk I/O', dataIndex: 'BlockIO' }], ['Name', 'CPUPerc', 'MemUsage', 'NetIO', 'BlockIO'])]),
+                { xtype: 'pveBetterDockerConsole', title: 'Console', itemId: 'console', iconCls: 'fa fa-terminal', apiUrl: url,
+                    listeners: { afterrender: reload } },
+                card('Resources', 'resources', 'cube', [properties('resourceGrid'),
+                    grid('mountGrid', [{ text: 'Type', dataIndex: 'type' }, { text: 'Source', dataIndex: 'source' },
+                        { text: 'Mount point', dataIndex: 'target' }, { text: 'Read only', dataIndex: 'read_only' }], ['type', 'source', 'target', 'read_only'])],
+                    [selector(), { text: 'Edit', handler: () => editSettings('resources') }, { text: 'Edit mounts', handler: editDeployment }]),
+                card('Network', 'network', 'exchange', [properties('networkGrid'),
+                    grid('portGrid', [{ text: 'Service', dataIndex: 'service' }, { text: 'IP address', dataIndex: 'host_ip' },
+                        { text: 'Published port', dataIndex: 'published' }, { text: 'Container port', dataIndex: 'target' },
+                        { text: 'Protocol', dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']),
+                    { xtype: 'displayfield', value: 'Published ports use this project IP. Bridge, MAC and IP mode are fixed for this project; port mappings can be edited in Deployment.' }],
+                    [{ text: 'Edit ports', handler: editDeployment }]),
+                card('DNS', 'dns', 'globe', [properties('dnsGrid')], [selector(), { text: 'Edit', handler: () => editSettings('dns') }]),
+                card('Options', 'options', 'cog', [properties('optionGrid')], [selector(), { text: 'Edit', handler: () => editSettings('options') }]),
+                card('Deployment', 'deployment', 'file-code-o', [{ xtype: 'textarea', itemId: 'source', readOnly: true, height: 470 }],
+                    [{ text: 'Edit', handler: editDeployment }]),
+                card('Logs', 'logs', 'file-text-o', [{ xtype: 'textarea', itemId: 'logsText', readOnly: true, height: 470 }],
+                    [{ text: 'Refresh', handler: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) }],
+                    { listeners: { afterrender: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) } }),
+                card('Task History', 'tasks', 'list-alt', [grid('taskGrid', [{ text: 'Start time', dataIndex: 'starttime',
+                    renderer: value => new Date(value * 1000).toLocaleString() }, { text: 'Type', dataIndex: 'type' },
+                    { text: 'User', dataIndex: 'user' }, { text: 'Status', dataIndex: 'status' }], ['upid', 'starttime', 'type', 'user', 'status'])],
+                    [{ text: 'Refresh', handler: () => me.loadDockerTasks() }],
+                    { listeners: { afterrender: panel => {
+                        panel.down('grid').on('itemdblclick', (_, record) => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: record.get('upid') }));
+                        me.loadDockerTasks();
+                    } } }),
+            ];
+            me.loadDockerTasks = () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/tasks', method: 'GET',
+                params: { limit: 200 }, success: response => rows('taskGrid', response.result.data.filter(item =>
+                    (item.type === 'betterdocker' || item.type === 'betterdockerconsole') && item.id === identifier)) });
+            ['resources', 'dns', 'options'].forEach(group => {
+                const entry = me.items.find(item => item.itemId === group);
+                entry.items[0].listeners = { itemdblclick: () => editSettings(group) };
+            });
             me.callParent();
-            me.on('afterrender', reload, me, { single: true });
+            me.on('afterrender', () => { reload(); me.poll = setInterval(reload, 10000); }, me, { single: true });
+            me.on('beforedestroy', () => clearInterval(me.poll));
         },
     });
 

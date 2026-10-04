@@ -31,7 +31,7 @@ case "$ACTION" in
 esac
 echo 'Updating the package index and installing BetterDocker dependencies.'
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates curl iputils-arping isc-dhcp-client
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs
 python3 "$PROJECT_DIR/scripts/patch.py" check
 BACKUP_DIR="/var/backups/betterdocker/$(date +%Y%m%d-%H%M%S)-$$"
 install -d -m 0700 "$BACKUP_DIR"

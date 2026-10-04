@@ -23,6 +23,7 @@ sub get { bless {}, __PACKAGE__ }
 sub get_user { 'root@pam' }
 1;
 ''')
+            (base / 'PVE/AccessControl.pm').write_text('package PVE::AccessControl; 1;')
             (base / 'PVE/Tools.pm').write_text('package PVE::Tools; 1;')
             # Avoid relying on a locally installed Perl JSON distribution.
             (base / 'JSON.pm').write_text('''
@@ -38,7 +39,7 @@ die 'LXC template still required' if $create->{parameters}->{properties}->{ostem
 die 'deployment missing' unless $create->{parameters}->{properties}->{deployment};
 for my $route (@main::registered) {
     die 'non-root grant' if $route->{permissions}->{user} || $route->{permissions}->{check};
-    die 'unprotected' unless $route->{protected};
+    die 'unprotected' unless $route->{protected} || $route->{name} eq 'vncwebsocket';
 }
 package PVE::API2::Cluster;
 our $info = { code => sub { [] }, returns => { items => { properties => { type => { enum => ['lxc', 'qemu'] } } } } };
