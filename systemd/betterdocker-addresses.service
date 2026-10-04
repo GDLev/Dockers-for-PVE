@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore dedicated BetterDocker IPv4 addresses
+Wants=network-online.target
+Requires=pve-cluster.service
+After=network-online.target pve-cluster.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/betterdocker/provision.py restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

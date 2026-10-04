@@ -1,50 +1,43 @@
 # Proxmox BetterDockers
 
-Dodatek do Proxmox VE, który dodaje przycisk **Utwórz Docker**, osobny kreator oraz ikonę Dockera w drzewie maszyn. Skrypt startowy: `start.sh`.
+Run Docker directly on a Proxmox VE node and manage projects from its web interface. BetterDockers adds **Create Docker**, a three-step wizard, Docker resources in the machine tree with a white icon, and a dedicated management screen.
 
-Każda maszyna Docker to **osobny nieuprzywilejowany LXC z Debianem, Docker Engine i Compose v2**, własnym VMID, interfejsem sieciowym i IP. Backend Proxmox nadal traktuje ją jako LXC. Dodatek nie tworzy nowego typu w rdzeniu platformy; dzięki temu działają istniejące operacje start/stop, konsola, zasoby, sieć, backup i usuwanie.
+There is no OS template, guest OS, LXC, VMID or separate VM to configure. Docker Engine and Compose run on the Proxmox host. Each project publishes its ports through a dedicated additional IPv4 address on a selected Linux bridge, rather than the Proxmox management IP.
 
-## Instalacja
+## Install
 
-Uruchom jako **root na hoście Proxmox VE** — instalacja jedną komendą:
+Run as **root on a Proxmox VE 8 or 9 host**:
 
 ```bash
 curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash
 ```
 
-Skrypt `install.sh` pobiera archiwum domyślnej gałęzi do katalogu tymczasowego i uruchamia `start.sh`, który wykonuje `apt-get update` oraz instaluje zależności (`python3`, `ca-certificates`). Po zakończeniu usuwa pobraną kopię projektu. Git nie jest wymagany; do pobrania potrzebne są `curl` i `tar`. Ponowne uruchomienie tej samej komendy pobiera aktualny projekt i ponownie instaluje integrację.
+The remote script downloads the default branch into a temporary directory, runs `start.sh`, and removes the download. No Git installation is required. The raw script and archive must be available without login. For a private repository, download an authenticated copy and run `bash start.sh install` locally.
 
-Adres skryptu i archiwum musi być dostępny bez logowania. Dla prywatnego repozytorium pobierz projekt po uwierzytelnieniu i uruchom lokalne `bash start.sh install`.
+The installer runs `apt-get update`, installs Python and networking dependencies, and installs Docker Engine plus Compose from Docker's Debian repository when necessary. An existing working Engine and Compose installation is reused. A new engine is configured with `ip-forward-no-drop` so Docker does not change the host's default forwarding policy to DROP. Existing engine configuration is preserved.
 
-Jeśli masz już kopię projektu, uruchom z jego katalogu:
+Install on every node in a cluster. The installer checks the expected Proxmox file structure, saves integration backups under `/var/backups/betterdocker/`, and restarts `pvedaemon` and `pveproxy`. After installation, refresh the browser with **Ctrl+Shift+R** and sign in as **root@pam**. Docker management routes are restricted to that account.
+
+Local commands:
 
 ```bash
 bash start.sh check
 bash start.sh install
+bash start.sh repair
+bash start.sh uninstall
 ```
 
-Wymagane: Proxmox VE 8 lub 9 i standardowe narzędzia PVE. Python 3 jest instalowany automatycznie; tryb `check` wymaga jego wcześniejszej dostępności. Instalator sprawdza strukturę plików konkretnej wersji. W klastrze zainstaluj dodatek **na każdym węźle**, również na węźle udostępniającym interfejs WWW.
+`check` requires Python to be present and does not install packages. `repair` reapplies the integration after Proxmox package updates. Running the remote installer again downloads and installs the current version.
 
-Instalacja restartuje `pvedaemon` i `pveproxy`. Nie restartuje maszyn. Kopie zmienianych plików trafiają do `/var/backups/betterdocker/`. Po instalacji odśwież przeglądarkę przez Ctrl+Shift+R i zaloguj się jako **root@pam**. Tworzenie przez dodatek jest obecnie dostępne wyłącznie dla root@pam; własny endpoint nie udostępnia wykonywania poleceń innym użytkownikom.
+## Create a project
 
-Przed utworzeniem maszyny pobierz w Proxmox standardowy szablon **Debian 12 lub 13** do magazynu z zawartością `vztmpl`. Nie wybieraj szablonu appliance ani backupu. Węzeł musi mieć magazyn obsługujący rootfs LXC; nowy gość potrzebuje dostępu do Internetu, DNS i repozytoriów Debian/Docker.
+The wizard is in English and has three steps:
 
-## Kreator
+1. **Deployment** — choose the node, project name and Docker Compose or Docker image. Compose is the default. Paste your YAML and optionally provide `.env` contents. Image and port fields appear only in image mode.
+2. **Network** — choose a Linux bridge and an unused IPv4 address within its connected subnet, outside its DHCP pool.
+3. **Review** — review the project and address, then deploy. Progress appears in the standard Proxmox task viewer.
 
-Kreator dziedziczy rzeczywiste ekrany Proxmox: ogólne, szablon, dyski, CPU, pamięć, sieć i DNS. Dodaje:
-
-- **Docker Engine**: pojedynczy obraz, projekt Compose albo sam silnik; zmienne środowiskowe i polecenie jako JSON.
-- **Porty**: lista mapowań TCP/UDP jako JSON. „host” to port na IP tej maszyny Docker.
-- **Docker Compose**: edytor pełnego `compose.yaml`.
-- **Potwierdzenie** i standardowy podgląd zadania PVE z postępem instalacji.
-
-Przykład pojedynczego obrazu: `nginx:stable`, porty:
-
-```json
-[{"host":8080,"container":80,"protocol":"tcp"}]
-```
-
-Przykład Compose:
+Example Compose YAML:
 
 ```yaml
 services:
@@ -59,48 +52,52 @@ volumes:
   web-data:
 ```
 
-W trybie Compose konfiguracja portów, zmiennych i poleceń pochodzi z YAML. Pola tych ustawień dla pojedynczego obrazu są wtedy pomijane. Sam silnik nie wdraża aplikacji. Pojedynczy obraz jest zapisywany jako projekt Compose z `restart: unless-stopped`; w własnym YAML ustaw politykę restartu samodzielnie.
+If the project IP is `192.0.2.50`, the application is available at `http://192.0.2.50:8080`. Compose defines images, ports, environment, internal networks and volumes. You do not re-enter these settings in separate wizard steps. Image mode accepts an image such as `nginx:stable` and one port mapping per line:
 
-Dla maszyny wskaż bridge, np. `vmbr0`, oraz **DHCP albo własny unikalny IPv4/CIDR i bramę**. DHCP przydziela adres przez serwer Twojej sieci; dodatek nie jest serwerem DHCP ani menedżerem puli IP. Dla przewidywalnego adresu użyj rezerwacji DHCP albo konfiguracji statycznej. Po instalacji adres pojawia się w logu zadania.
-
-Osobne IP otrzymuje każda **maszyna Docker**. Usługi jednego projektu Compose współdzielą IP maszyny i publikują różne porty; dodatek nie przydziela osobnych adresów LAN każdej usłudze Compose. Obraz, np. Nginx z mapowaniem powyżej, będzie dostępny pod `http://IP_MASZYNY:8080`.
-
-## Obsługa i diagnostyka
-
-Maszyny mają tag `betterdocker`. Ikona jest nadawana na podstawie tego tagu bez zmieniania natywnego typu zasobu. Nie usuwaj tagu, jeśli chcesz zachować ikonę. Konsola, zasoby, backup i pozostałe ekrany zarządzania są natywnymi ekranami LXC; osobny kreator dotyczy tworzenia maszyny.
-
-Projekt Compose znajduje się **wewnątrz gościa** w `/opt/betterdocker/compose.yaml` z uprawnieniami 0600. Polecenia wewnątrz jego konsoli:
-
-```bash
-cd /opt/betterdocker
-docker compose -p betterdocker ps
-docker compose -p betterdocker logs --tail=100
-docker compose -p betterdocker up -d
+```text
+8080:80
+5353:53/udp
 ```
 
-Tryb samego silnika nie tworzy pliku Compose. Edycja aplikacji po instalacji odbywa się przez konsolę i ten plik. Po błędzie tworzenia lub wdrożenia sprawdź log zadania. Utworzony LXC pozostaje na hoście do diagnostyki; dodatek nie usuwa jego danych automatycznie. Ponowne uruchomienie kreatora wymaga nowego wolnego VMID. Napraw istniejący projekt przez konsolę albo usuń nieudanego gościa przez standardowy interfejs Proxmox.
+## Dedicated IP and networking
 
-Backup obejmuje pliki zapisane na rootfs gościa, w tym dane Dockera i nazwane wolumeny. Zewnętrzne bind mounts i dane zdalne wymagają własnej konfiguracji backupu. Mapowania portów odnoszą się do gościa, a reguły sieciowe/firewall wymagają dostosowania do własnej sieci.
+The project IP is a `/32` alias on the selected host bridge. Docker's published ports are bound to that alias by converting the supplied Compose configuration into a canonical runtime configuration and setting every published port's `host_ip`. The original YAML is retained. Port targets and protocols remain as supplied.
 
-## Aktualizacje i usuwanie
+The application has a separate address from the Proxmox management address, while still using the host's network stack and Docker's normal forwarding/NAT. This is not macvlan or a separately isolated network namespace for the entire project. Containers keep their normal Docker internal addresses, and services in one project share its external IP through distinct published ports. Outgoing traffic uses the normal Docker/host routing path.
 
-Pakiety Proxmox mogą nadpisać dwa punkty integracji. Po aktualizacji `pve-manager` uruchom:
+The installer does not change `/etc/network/interfaces`. A systemd service restores project IP aliases after the Proxmox cluster filesystem and network are available, before Docker starts. Application startup after reboot follows the `restart` policy in your Compose YAML; image mode uses `unless-stopped`.
+
+Before assigning an IP, the backend rejects host addresses, existing project reservations and addresses outside the selected bridge subnet, then performs ARP duplicate-address detection. ARP probing cannot guarantee that an offline device or a future DHCP lease will not use that address, so choose a reserved static address. Network/firewall behavior must be verified on your actual Proxmox bridge and firewall configuration.
+
+Compose `network_mode` bypasses the managed port-binding model and is rejected. Build contexts and profile selection are not supported; supply image-based services without profiles. Use absolute host paths for bind mounts. Referenced local config/secret files must already exist on the node; the UI uploads YAML and `.env` only. Published ports must specify a published value, such as `8080:80`, rather than requesting a random host port.
+
+## Manage projects
+
+Docker resources appear under their owning node in the normal machine tree. Selecting one opens its own screen with **Start**, **Stop**, **Restart**, **Edit deployment**, **Refresh**, **Remove**, and **Logs**. Edit deployment changes the YAML/image settings and reapplies Compose while retaining the project name, bridge and IP. Removed services are stopped and removed on redeployment; named Docker volumes are retained.
+
+Project IDs are UUIDs, independent of VM/CT IDs. Public summaries are stored in `/etc/pve/betterdocker/` for cluster resource discovery. Deployment YAML, `.env` and canonical runtime configuration are root-only local files under `/var/lib/betterdocker/projects/<id>/`. A timer refreshes statuses every 15 seconds. Resource discovery does not expose YAML or environment secrets.
+
+For host-console access to a project:
 
 ```bash
-bash start.sh repair
+cd /var/lib/betterdocker/projects/PROJECT_ID
+docker compose -p bd-PROJECT_ID -f compose.runtime.json ps
+docker compose -p bd-PROJECT_ID -f compose.runtime.json logs --tail=100
 ```
 
-`repair` działa tak samo jak instalacja, z kontrolą struktury i ponownym wpięciem dodatku. Nie ma automatycznego hooka modyfikującego system podczas aktualizacji. Odinstalowanie:
+Failed deployments remain visible for inspection, editing and retrying. Removing a project runs Compose down, releases its dedicated IP and removes its managed configuration. Docker volumes are retained. This is a host Docker workload: native VM/CT backup, HA, migration, console and resource-limit controls do not apply. Configure resource limits in Compose and back up the Docker volumes and managed deployment files separately.
 
-```bash
-bash start.sh uninstall
-```
+## Upgrade from the first LXC release
 
-Usuwa oznaczone fragmenty integracji i pliki dodatku. Nie przywraca starych wersji plików pakietów i nie usuwa maszyn. Istniejące maszyny pozostają zwykłymi LXC z działającym Dockerem.
+Previously created Docker-in-LXC machines remain LXC machines with their data. Their Docker tag still supplies a white Docker icon. This release creates new projects directly on the host; it does not automatically migrate or delete earlier LXC guests.
 
-## Walidacja i ograniczenia
+## Uninstall
 
-Wykonane lokalnie: testy Python dla walidacji, generowania Compose, obsługi zadań i odwracalności patcha; kontrola składni Bash i JavaScript; próba patchowania aktualnych plików źródłowych Proxmox. **Pełny test instalacji, GUI i uruchomienia Dockera na żywym Proxmox pozostaje do wykonania.** Proxmox 8/9 to zakres wersji instalatora, a nie deklaracja przetestowania wszystkich wydań.
+`bash start.sh uninstall` removes the web/API integration and stops status refresh. It leaves Docker Engine, projects, volumes, configuration and the IP-restoration service in place so existing applications can continue running. It does not revert Proxmox package files to older backup versions. Remove unwanted projects from the Docker screen before uninstalling the integration.
+
+## Validation
+
+Local validation covers Compose-driven setup without an image field, dedicated-IP port binding, preservation of internal networks and volumes, rejection of the management IP, ARP probe failures, secret file permissions, fail-before-allocation behavior, API permissions, Docker resource discovery, reversible package patches, and ExtJS compatibility.
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -109,6 +106,6 @@ node --check frontend/betterdocker.js
 node tests/test_frontend.js
 ```
 
-Integracja używa wewnętrznych klas ExtJS i API PVE, więc duże zmiany tych klas mogą wymagać aktualizacji dodatku. Docker w LXC zależy też od zgodności kernela, LXC, AppArmor i runtime Dockera. Dodatek włącza `nesting=1,keyctl=1`, zachowując nieuprzywilejowany LXC; nie wyłącza AppArmor. Proxmox rekomenduje VM dla aplikacyjnych kontenerów wymagających mocniejszej izolacji.
+The installer supports the structure of Proxmox VE 8/9. **Full installation, GUI behavior, boot persistence and traffic forwarding still require validation on a live Proxmox node.** The integration uses internal ExtJS classes and patches `Nodes.pm`, `Cluster.pm` and `index.html.tpl`; package upgrades may require `repair` or an addon update.
 
-Źródła implementacji: [kreator LXC Proxmox](https://github.com/proxmox/pve-manager/blob/master/www/manager6/lxc/CreateWizard.js), [API węzłów](https://github.com/proxmox/pve-manager/blob/master/PVE/API2/Nodes.pm), [dokumentacja LXC](https://pve.proxmox.com/pve-docs/chapter-pct.html), [instalacja Docker na Debianie](https://docs.docker.com/engine/install/debian/).
+Sources: [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/), [Docker forwarding policy](https://docs.docker.com/engine/network/packet-filtering-firewalls/), [Docker installation on Debian](https://docs.docker.com/engine/install/debian/), [Proxmox cluster resource API](https://github.com/proxmox/pve-manager/blob/master/PVE/API2/Cluster.pm).

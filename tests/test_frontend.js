@@ -1,30 +1,46 @@
-// Check actual wizard construction against an ExtJS API stub.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-let definition;
-let override;
-const nativeTabs = [{ column1: [{ name: 'vmid' }, { name: 'unprivileged' }, { name: 'features' }] },
-    { title: 'Network' }, { onSubmit() {}, dockedItems: [{ name: 'start' }] }];
-const clone = value => Array.isArray(value) ? value.map(clone) : value && typeof value === 'object' ?
-    Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)])) : value;
-const context = {
-    console, window: null,
-    PVE: { lxc: { CreateWizard: { prototype: { items: nativeTabs } } }, StdWorkspace: {},
-        Utils: { get_object_icon_class: () => 'fa fa-cube running' } },
-    Proxmox: { UserName: 'root@pam' },
-    Ext: { clone, define: (_, value) => { definition = value; }, override: (_, value) => { override = value; } },
+const definitions = {};
+const overrides = new Map();
+function callParent() {
+    assert.ok(callParent.caller, 'ExtJS callParent must have a non-strict caller');
+    this.initialized = true;
+}
+const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => info } };
+const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; } } };
+const context = { window: null, console,
+    PVE: { window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
+        Utils: { get_object_icon_class: () => 'fa fa-cube' } },
+    Proxmox: { NodeName: 'pve', UserName: 'root@pam' },
+    Ext: { define: (name, definition) => { definitions[name] = definition; },
+        override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
 };
 context.window = context;
 vm.runInNewContext(fs.readFileSync('frontend/betterdocker.js', 'utf8'), context);
-const wizard = { callParent() { this.initialized = true; } };
-definition.initComponent.call(wizard);
+const wizard = { callParent, down: () => null, query: () => [] };
+definitions['PVE.betterdocker.CreateWizard'].initComponent.call(wizard);
 assert(wizard.initialized);
-assert.deepEqual(wizard.items.slice(-4, -1).map(tab => tab.title), ['Docker Engine', 'Porty', 'Docker Compose']);
-assert.equal(nativeTabs.length, 3); // native wizard must stay untouched
-assert.equal(nativeTabs[0].column1.length, 3);
-assert.equal(wizard.items.at(-1).dockedItems.length, 0);
-assert.equal(context.PVE.Utils.get_object_icon_class('lxc', { type: 'lxc', tags: 'other;betterdocker' }), 'fa bd-docker-icon running');
-assert.equal(context.PVE.Utils.get_object_icon_class('lxc', { type: 'lxc', tags: 'other' }), 'fa fa-cube running');
-assert(override.initComponent);
-console.log('Frontend construction and icon checks passed');
+assert.deepEqual(Array.from(wizard.items, item => item.title), ['Deployment', 'Network', 'Review']);
+const fields = wizard.items[0].items;
+assert.equal(fields.find(field => field.name === 'mode').value, 'compose');
+assert.equal(fields.find(field => field.itemId === 'imageFields').hidden, true);
+assert.equal(fields.find(field => field.itemId === 'imageFields').items[0].disabled, true);
+assert(!JSON.stringify(wizard.items).includes('ostemplate'));
+assert(!JSON.stringify(wizard.items).includes('pveLxc'));
+const inserted = [];
+const user = { ownerCt: { items: { indexOf: () => 2 }, insert: (_, button) => inserted.push(button) } };
+const workspace = { down: () => user };
+overrides.get(workspaceClass).initComponent.call(workspace);
+assert.equal(inserted[0].text, 'Create Docker');
+assert(workspace.initialized);
+overrides.get(workspaceClass).setContent.call(workspace, { pveSelNode: { data: { type: 'docker' } } });
+assert.equal(workspace.content.xtype, 'pveBetterDockerConfig');
+const groups = { composeFields: { query: () => [{ setDisabled: value => { groups.composeDisabled = value; } }], setHidden() {} },
+    imageFields: { query: () => [{ setDisabled: value => { groups.imageDisabled = value; } }], setHidden() {} } };
+const mode = fields.find(field => field.name === 'mode');
+mode.listeners.change({ up: () => ({ down: id => groups[id.slice(1)] }), getValue: () => 'compose' });
+assert.equal(groups.composeDisabled, false);
+assert.equal(groups.imageDisabled, true);
+assert(fs.readFileSync('frontend/docker.svg', 'utf8').includes('fill="#ffffff"'));
+console.log('Three-step English wizard, conditional fields, Docker resource routing and ExtJS checks passed');

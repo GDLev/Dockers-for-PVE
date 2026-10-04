@@ -11,21 +11,30 @@ use PVE::API2::BetterDocker;
 __PACKAGE__->register_method({ subclass => 'PVE::API2::BetterDocker', path => 'docker' });
 # END BETTERDOCKER
 '''
+CLUSTER_BLOCK = '''# BEGIN BETTERDOCKER
+use PVE::API2::BetterDocker;
+PVE::API2::BetterDocker::hook_resources();
+# END BETTERDOCKER
+'''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=1" />
-<script src="/pve2/js/betterdocker.js?v=1"></script>
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=3" />
+<script src="/pve2/js/betterdocker.js?v=3"></script>
 <!-- END BETTERDOCKER -->'''
 
 
 def transform(text, kind, remove=False):
-    block = NODE_BLOCK if kind == 'node' else UI_BLOCK
+    block = NODE_BLOCK if kind == 'node' else CLUSTER_BLOCK if kind == 'cluster' else UI_BLOCK
     if not remove and block in text:
         return text
-    pattern = (r'# BEGIN BETTERDOCKER\n.*?# END BETTERDOCKER\n' if kind == 'node'
+    pattern = (r'# BEGIN BETTERDOCKER\n.*?# END BETTERDOCKER\n' if kind in ('node', 'cluster')
                else r'<!-- BEGIN BETTERDOCKER -->\n.*?<!-- END BETTERDOCKER -->\n?')
     text = re.sub(pattern, '', text, flags=re.S)
     if remove:
         return text
+    if kind == 'cluster':
+        if "name => 'resources'" not in text or not re.search(r'\n1;\s*$', text):
+            raise RuntimeError('Unsupported Cluster.pm; refusing patch')
+        return re.sub(r'\n1;\s*$', '\n' + CLUSTER_BLOCK + '\n1;\n', text)
     if kind == 'node':
         if 'use PVE::API2::LXC;' not in text or "path => 'lxc'" not in text:
             raise RuntimeError('Unsupported Nodes.pm; refusing patch')
@@ -60,7 +69,8 @@ def main():
     args = parser.parse_args()
     root = Path(args.root)
     files = [(root / 'usr/share/perl5/PVE/API2/Nodes.pm', 'node'),
-             (root / 'usr/share/pve-manager/index.html.tpl', 'ui')]
+             (root / 'usr/share/pve-manager/index.html.tpl', 'ui'),
+             (root / 'usr/share/perl5/PVE/API2/Cluster.pm', 'cluster')]
     # Preflight both targets before the first mutation.
     changes = [(path, transform(path.read_text(), kind, args.action == 'remove')) for path, kind in files]
     if args.action != 'check':

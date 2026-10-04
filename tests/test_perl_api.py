@@ -1,4 +1,4 @@
-"""Load the Perl extension with schema callbacks, without requiring a PVE host."""
+"""Check host-only routes and cluster resource integration without requiring PVE."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,31 +8,47 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PerlAPITests(unittest.TestCase):
-    def test_load_and_register_without_mutating_native_schema(self):
+    def test_host_api_has_no_lxc_schema_and_resources_do_not_expose_secrets(self):
         with tempfile.TemporaryDirectory() as folder:
             base = Path(folder)
-            (base / 'PVE/API2').mkdir(parents=True)
+            (base / 'PVE').mkdir()
             (base / 'PVE/RESTHandler.pm').write_text('''
 package PVE::RESTHandler;
-sub register_method { $main::registered = $_[1]; }
+sub register_method { push @main::registered, $_[1]; }
 1;
 ''')
-            (base / 'PVE/API2/LXC.pm').write_text('''
-package PVE::API2::LXC;
-our $schema = { additionalProperties => 0, properties => {
-    node => { type => 'string', completion => sub { 'pve' } },
-    vmid => { type => 'integer' }, ostemplate => { type => 'string' },
-} };
-sub map_method_by_name { return { parameters => $schema }; }
+            (base / 'PVE/RPCEnvironment.pm').write_text('''
+package PVE::RPCEnvironment;
+sub get { bless {}, __PACKAGE__ }
+sub get_user { 'root@pam' }
 1;
 ''')
-            for name in ['RPCEnvironment', 'Tools']:
-                (base / 'PVE' / (name + '.pm')).write_text(f'package PVE::{name}; 1;')
-            subprocess.run(['perl', '-I' + folder, '-I' + str(ROOT / 'backend'),
-                            '-MPVE::API2::BetterDocker', '-e', '''
-die 'not registered' unless $main::registered->{path} eq '';
-die 'bad permission' if $main::registered->{permissions}->{user} || $main::registered->{permissions}->{check};
-die 'missing docker schema' unless $main::registered->{parameters}->{properties}->{docker};
-die 'native schema mutated' if $PVE::API2::LXC::schema->{properties}->{docker};
-die 'callback lost' unless $main::registered->{parameters}->{properties}->{node}->{completion}->() eq 'pve';
+            (base / 'PVE/Tools.pm').write_text('package PVE::Tools; 1;')
+            # Avoid relying on a locally installed Perl JSON distribution.
+            (base / 'JSON.pm').write_text('''
+package JSON;
+use Exporter 'import';
+our @EXPORT_OK = qw(decode_json);
+sub decode_json { die 'not used in this test'; }
+1;
+''')
+            subprocess.run(['perl', '-I' + folder, '-I' + str(ROOT / 'backend'), '-MPVE::API2::BetterDocker', '-e', '''
+my ($create) = grep { $_->{name} eq 'create' } @main::registered;
+die 'LXC template still required' if $create->{parameters}->{properties}->{ostemplate};
+die 'deployment missing' unless $create->{parameters}->{properties}->{deployment};
+for my $route (@main::registered) {
+    die 'non-root grant' if $route->{permissions}->{user} || $route->{permissions}->{check};
+    die 'unprotected' unless $route->{protected};
+}
+package PVE::API2::Cluster;
+our $info = { code => sub { [] }, returns => { items => { properties => { type => { enum => ['lxc', 'qemu'] } } } } };
+sub map_method_by_name { $info }
+package main;
+no warnings 'redefine';
+*PVE::API2::BetterDocker::summaries = sub { [{ id => 'a' x 32, node => 'pve', name => 'web', status => 'running', address => '192.0.2.50' }] };
+PVE::API2::BetterDocker::hook_resources();
+my $result = $PVE::API2::Cluster::info->{code}->({});
+die 'missing Docker resource' unless $result->[0]->{type} eq 'docker';
+die 'config exposed' if $result->[0]->{deployment} || $result->[0]->{compose};
+die 'schema missing Docker' unless grep { $_ eq 'docker' } @{$PVE::API2::Cluster::info->{returns}->{items}->{properties}->{type}->{enum}};
 '''], check=True)
