@@ -67,6 +67,27 @@ class WorkerTests(unittest.TestCase):
                 worker.network_preflight(BASE)
             self.assertEqual(probe.call_args.args[0][0:2], ['arping', '-D'])
 
+    def test_duplicate_display_names_allowed_without_sharing_project_or_network(self):
+        existing = dict(BASE, id='a' * 32, node='pve', hwaddr='02:00:00:00:00:01')
+        with patch.object(worker, 'bridge_addresses', return_value=(INTERFACES, [])), \
+             patch.object(worker, 'check_address') as check, \
+             patch.object(worker, 'summaries', return_value=[existing]):
+            worker.network_preflight(dict(BASE, address='192.0.2.51'))
+            check.assert_called_once_with('192.0.2.51', BASE['bridge'], probe=True)
+            with self.assertRaisesRegex(ValueError, 'MAC address is already used'):
+                worker.network_preflight(dict(BASE, address='192.0.2.51', hwaddr=existing['hwaddr']))
+        first = worker.compose_base(Path('/projects') / existing['id'], existing['id'])
+        second = worker.compose_base(Path('/projects') / ('b' * 32), 'b' * 32)
+        self.assertNotEqual(first[first.index('--project-name') + 1], second[second.index('--project-name') + 1])
+        self.assertNotEqual(first[first.index('--project-directory') + 1], second[second.index('--project-directory') + 1])
+
+    def test_duplicate_project_ip_still_rejected(self):
+        with patch.object(worker, 'capture', return_value=json.dumps(INTERFACES)), \
+             patch.object(Path, 'is_dir', return_value=True), \
+             patch.object(worker, 'summaries', return_value=[dict(BASE, id='a' * 32, node='pve')]):
+            with self.assertRaisesRegex(ValueError, 'IP is already reserved'):
+                worker.network_preflight(BASE)
+
     def test_prepare_preserves_literal_dollars_and_does_not_log_secrets(self):
         canonical = {'services': {'web': {'image': 'nginx', 'environment': {'SECRET': 'a${literal}b'},
                                          'ports': [{'published': '8080', 'target': 80}]}}}

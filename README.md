@@ -33,7 +33,7 @@ bash start.sh uninstall
 
 The wizard is in English and has three steps:
 
-1. **Deployment** — choose the node, project name and Docker Compose or Docker image. Compose is the default. Paste your YAML and optionally provide `.env` contents. Image and port fields appear only in image mode.
+1. **Deployment** — choose the node, DCT ID, project name and Docker Compose or Docker image. Leave DCT ID blank for automatic allocation. Project names are display labels and may repeat; each project has a unique DCT ID and an independent Compose project and data directory. Compose is the default. Paste your YAML and optionally provide `.env` contents. Image and port fields appear only in image mode.
 2. **Network** — an LXC-style two-column screen with Bridge, MAC address, MTU, and an IPv4 Static/DHCP selector. DHCP is the default. Static mode enables IPv4/CIDR, for example `192.0.2.50/24`. The gateway display reflects host routing; it does not change the host gateway.
 3. **Review** — review the project and address, then deploy. Progress appears in the standard Proxmox task viewer.
 

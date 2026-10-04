@@ -601,8 +601,6 @@ def network_preflight(data):
     bridge_addresses(data['bridge'])
     if data.get('ipv4mode', 'static') == 'static':
         check_address(data['address'], data['bridge'], probe=True)
-    if any(item['node'] == current_node() and item['name'] == data['name'] for item in summaries()):
-        raise ValueError('A project with this name already exists on this node')
     if data.get('hwaddr') and any(item.get('hwaddr') == data['hwaddr'] for item in summaries()):
         raise ValueError('This MAC address is already used by another project')
 
