@@ -2,6 +2,7 @@
 """Native host Docker projects. Public cluster metadata never contains deployment secrets."""
 import argparse
 import contextlib
+from datetime import datetime
 import fcntl
 import ipaddress
 import json
@@ -300,7 +301,87 @@ def container_records(identifier):
     return records
 
 
-def management(identifier, node):
+def byte_size(value):
+    match = re.fullmatch(r'\s*([0-9.]+)\s*([kmgtep]?i?b)?\s*', value, re.I)
+    if not match:
+        raise ValueError('Invalid Docker size measurement')
+    unit = (match[2] or 'b').lower()
+    power = 'bkmgtpe'.index(unit[0]) if unit[0] != 'b' else 0
+    return float(match[1]) * (1024 if 'i' in unit else 1000) ** power
+
+
+def metric_snapshot(containers, stats, services):
+    active = [item for item in containers if item['state'] == 'running']
+    pairs = lambda field: [tuple(byte_size(part) for part in row[field].split('/')) for row in stats]
+    memory, network, disk = pairs('MemUsage'), pairs('NetIO'), pairs('BlockIO')
+    cores = sum(float(row['CPUPerc'].rstrip('%')) / 100 for row in stats)
+    cpus = min(os.cpu_count() or 1, sum((item['settings']['cpus'] or (os.cpu_count() or 1)) * item.get('replicas', 1) for item in services)) or 1
+    host_memory = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+    assigned_memory = sum(item['settings']['memory'] * 1048576 * item.get('replicas', 1) for item in services)
+    maxmem = min(host_memory, assigned_memory) if services and all(item['settings']['memory'] for item in services) else host_memory
+    started = []
+    for item in active:
+        try:
+            # Docker timestamps have nanosecond precision; datetime accepts it.
+            started.append(datetime.fromisoformat(item['started'].replace('Z', '+00:00')).timestamp())
+        except (ValueError, KeyError):
+            pass
+    return {'time': int(time.time()), 'cpu': cores / cpus, 'cpus': cpus,
+            'mem': sum(pair[0] for pair in memory), 'maxmem': maxmem,
+            'netin_total': sum(pair[0] for pair in network), 'netout_total': sum(pair[1] for pair in network),
+            'diskread_total': sum(pair[0] for pair in disk), 'diskwrite_total': sum(pair[1] for pair in disk),
+            'uptime': max(0, int(time.time() - min(started))) if started else 0,
+            'instances': ','.join(sorted(item['id'] for item in active))}
+
+
+def record_metrics(info):
+    directory = ROOT / info['id']
+    path = directory / 'metrics.json'
+    history = json.loads(path.read_text()) if path.exists() else []
+    snapshot = info['metrics']
+    previous = history[-1] if history else None
+    if previous and snapshot['time'] - previous['time'] < 60:
+        return
+    elapsed = snapshot['time'] - previous['time'] if previous else 0
+    for key in ('netin', 'netout', 'diskread', 'diskwrite'):
+        snapshot[key] = max(0, (snapshot[key + '_total'] - previous[key + '_total']) / elapsed) if (
+            previous and elapsed > 0 and snapshot['instances'] == previous['instances']) else 0
+    history = [row for row in history if snapshot['time'] - row['time'] <= 7 * 86400]
+    write_json(path, history + [snapshot])
+    os.chmod(path, 0o600)
+
+
+def rrddata(identifier, node, timeframe, cf):
+    detail(identifier, node)
+    seconds = {'hour': 3600, 'day': 86400, 'week': 604800, 'month': 2592000, 'year': 31536000}
+    if timeframe not in seconds or cf not in ('AVERAGE', 'MAX'):
+        raise ValueError('Invalid chart range or consolidation function')
+    path = ROOT / identifier / 'metrics.json'
+    history = json.loads(path.read_text()) if path.exists() else []
+    cutoff = time.time() - seconds[timeframe]
+    bucket_size = max(60, seconds[timeframe] // 600)
+    buckets = {}
+    for row in history:
+        if row['time'] >= cutoff:
+            buckets.setdefault(row['time'] // bucket_size * bucket_size, []).append(row)
+    fields = ('cpu', 'mem', 'maxmem', 'netin', 'netout', 'diskread', 'diskwrite')
+    return [dict(time=stamp, **{key: (max(row[key] for row in rows) if cf == 'MAX' else
+                                     sum(row[key] for row in rows) / len(rows)) for key in fields})
+            for stamp, rows in sorted(buckets.items())]
+
+
+def notes(identifier, node, description=None):
+    detail(identifier, node)
+    path = ROOT / identifier / 'notes.txt'
+    if description is not None:
+        if len(description) > 8192:
+            raise ValueError('Notes cannot exceed 8192 characters')
+        path.write_text(description)
+        os.chmod(path, 0o600)
+    return {'description': path.read_text() if path.exists() else ''}
+
+
+def management(identifier, node, shared_stats=None):
     info = detail(identifier, node)
     directory = ROOT / identifier
     config = json.loads((directory / 'compose.runtime.json').read_text())
@@ -316,13 +397,17 @@ def management(identifier, node):
                   'dns': service.get('dns', []), 'dns_search': service.get('dns_search', []),
                   'restart': service.get('restart', 'no')}
         info['services'].append({'name': name, 'image': service.get('image', ''),
-                                 'settings': settings.get(name, values),
+                                 'settings': settings.get(name, values), 'replicas': service.get('deploy', {}).get('replicas', 1),
                                  'mounts': service.get('volumes', []), 'ports': service.get('ports', [])})
     info['containers'] = container_records(identifier)
     active = [item['id'] for item in info['containers'] if item['state'] == 'running']
     info['stats'] = []
-    if active:
+    if shared_stats is not None:
+        names = {item['name'] for item in info['containers']}
+        info['stats'] = [row for row in shared_stats if row['Name'] in names]
+    elif active:
         info['stats'] = [json.loads(line) for line in capture(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *active]).splitlines()]
+    info['metrics'] = metric_snapshot(info['containers'], info['stats'], info['services'])
     return info
 
 
@@ -650,6 +735,16 @@ def refresh(node):
             continue
         info['status'] = status
         write_json(METADATA / (info['id'] + '.json'), info)
+    due = [info for info in projects if not (ROOT / info['id'] / 'metrics.json').exists() or
+           time.time() - (ROOT / info['id'] / 'metrics.json').stat().st_mtime >= 60]
+    if due:
+        active = [entry['ID'] for entry in entries if entry['State'] == 'running']
+        try:
+            shared_stats = [json.loads(line) for line in capture(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *active]).splitlines()] if active else []
+            for info in due:
+                record_metrics(management(info['id'], node, shared_stats=shared_stats))
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
+            print(f'Metrics unavailable: {error}', file=sys.stderr)
 
 
 def action(identifier, node, operation):
@@ -726,7 +821,7 @@ def restore(node):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id'])
+    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -740,6 +835,10 @@ def main():
         update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())))
     elif args.operation in ('dhcp-client', 'dhcp-release'):
         dhcp_client(values[0], release=args.operation == 'dhcp-release')
+    elif args.operation == 'notes':
+        print(json.dumps(notes(values[0], values[1], Path(values[2]).read_text() if len(values) > 2 else None)))
+    elif args.operation == 'rrddata':
+        print(json.dumps(rrddata(*values)))
     elif args.operation == 'management':
         print(json.dumps(management(*values)))
     elif args.operation == 'settings':

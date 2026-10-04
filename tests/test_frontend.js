@@ -64,7 +64,7 @@ const configPanel = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), node
 definitions['PVE.betterdocker.Config'].initComponent.call(configPanel);
 assert.equal(definitions['PVE.betterdocker.Config'].extend, 'PVE.panel.Config');
 assert.deepEqual(Array.from(configPanel.items, card => card.title),
-    ['Summary', 'Console', 'Resources', 'Network', 'DNS', 'Options', 'Deployment', 'Logs', 'Task History']);
+    ['Summary', 'Console', 'Resources', 'Network', 'DNS', 'Options', 'Task History', 'Deployment', 'Logs']);
 assert(configPanel.items.every(card => card.itemId && card.iconCls));
 assert(configPanel.items.find(card => card.title === 'Resources').tbar.some(button => button.text === 'Edit'));
 assert.equal(configPanel.items.find(card => card.title === 'Console').xtype, 'pveBetterDockerConsole');
@@ -147,3 +147,46 @@ assert.equal(activation.suspendLayout, false, 'a failed Docker card must not lea
 context.PVE.panel.Config.prototype.activateCard = () => 'activated';
 assert.equal(dockerConfig.activateCard.call(activation, 'resources'), 'activated');
 console.log('Native Help fallback and layout recovery regression passed');
+
+const nativeStore = { startUpdate() {}, stopUpdate() {}, destroy() {} };
+context.Ext.create = () => nativeStore;
+context.Ext.state = { Manager: { getProvider: () => ({}) } };
+const summaryView = { apiUrl: '/nodes/pve/docker/' + 'a'.repeat(32), projectName: 'app',
+    pveSelNode: configPanel.pveSelNode, callParent, on() {}, mon() {} };
+definitions['PVE.betterdocker.Summary'].initComponent.call(summaryView);
+assert.equal(summaryView.tbar[1].xtype, 'proxmoxRRDTypeSelector');
+const summaryItems = summaryView.items[0].items;
+assert.equal(summaryItems[0].layout.type, 'hbox');
+assert.equal(summaryItems[0].items[1].xtype, 'pveBetterDockerNotes');
+assert(summaryItems[0].items[0].items.some(item => item.xtype === 'pmxInfoWidget' && item.itemId === 'memoryValue'));
+assert.equal(summaryItems.filter(item => item.xtype === 'proxmoxRRDChart').length, 4);
+const resourceView = configPanel.items.find(card => card.itemId === 'resources');
+assert.equal(resourceView.layout, 'fit');
+assert.equal(resourceView.items.length, 1, 'mounts and limits share the native-style resource grid');
+assert.equal(resourceView.items[0].hideHeaders, true);
+console.log('Native status widgets, Notes, RRD charts and full-size resource grid passed');
+const summaryFields = {};
+context.Proxmox.Utils.format_duration_long = value => String(value);
+context.Proxmox.Utils.render_cpu_usage = (value, cpus) => `${value * 100}% of ${cpus} CPU(s)`;
+context.Proxmox.Utils.render_size_usage = (used, max) => `${used} / ${max}`;
+const renderedSummary = { down(id) { return id === '#statusPanel' ? { setTitle: value => { summaryFields.title = value; } } :
+    { updateValue: (text, usage) => { summaryFields[id] = { text, usage }; } }; } };
+const summaryData = { name: 'app', node: 'pve', status: 'running', address: '192.0.2.32',
+    containers: [{ state: 'running' }], services: [{ name: 'app', settings: { memory: 512, swap: 0, cpus: 1, cpuunits: 0,
+        pids: 0, dns: [], dns_search: [], restart: 'always' }, mounts: [], ports: [] }],
+    deployment: { mode: 'compose', compose: 'services: {}' }, metrics: { uptime: 60, cpu: 0.25, cpus: 1, mem: 128, maxmem: 512 } };
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, summaryData);
+assert.equal(summaryFields['#memoryValue'].usage, 0.25);
+assert.equal(summaryFields['#cpuValue'].usage, 0.25);
+assert(summaryFields.title.includes('Uptime: 60'));
+// Only Summary exists initially: inactive native navigation cards are created lazily.
+const panelEvents = {};
+const lazyPanel = { pveSelNode: configPanel.pveSelNode, callParent,
+    on(event, callback) { panelEvents[event] = callback; }, query() { return []; },
+    down(id) { return id === '#summary' ? { updateSnapshot() {} } : null; } };
+context.Proxmox.Utils.setErrorMask = () => {};
+definitions['PVE.betterdocker.Config'].initComponent.call(lazyPanel);
+panelEvents.afterrender();
+assert.doesNotThrow(() => consoleRequest.success({ result: { data: summaryData } }));
+panelEvents.beforedestroy();
+console.log('Summary values and reload with inactive cards absent passed');

@@ -245,4 +245,39 @@ __PACKAGE__->register_method({
         return { port => $param->{port} };
     },
 });
+
+__PACKAGE__->register_method({
+    name => 'rrddata', path => '{id}/rrddata', method => 'GET', protected => 1, proxyto => 'node', permissions => $root,
+    description => 'Read recorded Docker metrics in the native chart format (seven-day retention).',
+    parameters => { additionalProperties => 0, properties => {
+        node => $node, id => $id, timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year'] },
+        cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1, default => 'AVERAGE' },
+    } },
+    returns => { type => 'array', items => { type => 'object' } },
+    code => sub { my ($p) = @_; return decode_json(output(['rrddata', $p->{id}, $p->{node}, $p->{timeframe}, $p->{cf} // 'AVERAGE'])); },
+});
+
+__PACKAGE__->register_method({
+    name => 'notes', path => '{id}/config', method => 'GET', protected => 1, proxyto => 'node', permissions => $root,
+    description => 'Read project notes.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+    returns => { type => 'object' },
+    code => sub { my ($p) = @_; return decode_json(output(['notes', $p->{id}, $p->{node}])); },
+});
+
+__PACKAGE__->register_method({
+    name => 'set_notes', path => '{id}/config', method => 'PUT', protected => 1, proxyto => 'node', permissions => $root,
+    description => 'Save project notes.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        description => { type => 'string', maxLength => 8192 } } },
+    returns => { type => 'null' },
+    code => sub {
+        my ($p) = @_;
+        my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
+        chmod 0600, $path; print $fh $p->{description}; close $fh;
+        eval { output(['notes', $p->{id}, $p->{node}, $path]); };
+        my $err = $@; unlink $path; die $err if $err;
+        return undef;
+    },
+});
 1;

@@ -241,6 +241,77 @@
         },
     });
 
+    Ext.define('PVE.betterdocker.Notes', {
+        extend: 'Proxmox.panel.NotesView', alias: 'widget.pveBetterDockerNotes',
+        maxLength: 8192,
+        cbindData: function () {
+            this.url = '/api2/extjs' + this.apiUrl + '/config';
+            this.pveType = 'docker';
+            this.load();
+            return {};
+        },
+    });
+
+    Ext.define('PVE.betterdocker.Summary', {
+        extend: 'Ext.panel.Panel', alias: 'widget.pveBetterDockerSummary', scrollable: true, bodyPadding: 5,
+        updateSnapshot: function (data) {
+            const me = this, metrics = data.metrics;
+            const update = (id, text, usage) => me.down('#' + id).updateValue(text, usage);
+            me.down('#statusPanel').setTitle(Ext.htmlEncode(data.name) + ' (Uptime: ' +
+                Proxmox.Utils.format_duration_long(metrics.uptime) + ')');
+            update('statusValue', Ext.htmlEncode(data.status));
+            update('nodeValue', Ext.htmlEncode(data.node));
+            update('serviceValue', data.containers.filter(item => item.state === 'running').length + ' running / ' +
+                data.containers.length + ' containers · ' + data.services.length + ' services');
+            update('cpuValue', Proxmox.Utils.render_cpu_usage(metrics.cpu, metrics.cpus), Math.min(1, metrics.cpu));
+            update('memoryValue', metrics.maxmem ? Proxmox.Utils.render_size_usage(metrics.mem, metrics.maxmem) : '0 B',
+                metrics.maxmem ? metrics.mem / metrics.maxmem : 0);
+            update('ipValue', Ext.htmlEncode(data.address || 'Waiting for DHCP'));
+        },
+        initComponent: function () {
+            const me = this;
+            const store = Ext.create('Proxmox.data.RRDStore', {
+                rrdurl: '/api2/json' + me.apiUrl + '/rrddata', model: 'pve-rrd-guest',
+            });
+            const metric = (id, title, icon, bar) => ({ xtype: 'pmxInfoWidget', itemId: id, title,
+                iconCls: icon, printBar: Boolean(bar), padding: '2 25', text: 'Loading...' });
+            const charts = [
+                ['CPU Usage', ['cpu'], ['CPU usage'], 'percent'],
+                ['Memory Usage', ['maxmem', 'mem'], ['Total', 'Used'], 'bytes'],
+                ['Network Traffic', ['netin', 'netout'], ['Incoming', 'Outgoing'], 'bytes'],
+                ['Disk IO', ['diskread', 'diskwrite'], ['Reads', 'Writes'], 'bytes'],
+            ].map(([title, fields, fieldTitles, unit]) => ({ xtype: 'proxmoxRRDChart', title,
+                pveSelNode: me.pveSelNode, store, fields, fieldTitles, unit,
+                powerOfTwo: title === 'Memory Usage' }));
+            me.tbar = ['->', { xtype: 'proxmoxRRDTypeSelector' }];
+            me.items = [{ xtype: 'container', itemId: 'itemcontainer', minWidth: 700, layout: 'column',
+                defaults: { minHeight: 350, padding: 5 }, items: [
+                    { xtype: 'container', height: 330, layout: { type: 'hbox', align: 'stretch' }, items: [
+                        { xtype: 'panel', itemId: 'statusPanel', title: me.projectName, flex: 1, padding: '0 5 0 0',
+                            layout: { type: 'vbox', align: 'stretch' }, items: [
+                                { xtype: 'box', height: 20 },
+                                metric('statusValue', 'Status', 'fa fa-info fa-fw'),
+                                metric('nodeValue', 'Node', 'fa fa-building fa-fw'),
+                                metric('serviceValue', 'Services', 'fa fa-cubes fa-fw'),
+                                { xtype: 'box', height: 10 },
+                                metric('cpuValue', 'CPU usage', 'fa fa-fw pmx-itype-icon-processor pmx-icon', true),
+                                metric('memoryValue', 'Memory usage', 'fa fa-fw pmx-itype-icon-memory pmx-icon', true),
+                                { xtype: 'box', height: 10 },
+                                metric('ipValue', 'IPs', 'fa fa-exchange fa-fw'),
+                            ] },
+                        { xtype: 'pveBetterDockerNotes', itemId: 'notesview', apiUrl: me.apiUrl,
+                            pveSelNode: me.pveSelNode, flex: 1, padding: '0 0 0 5' },
+                    ] }, ...charts,
+                ], listeners: { resize: container => Proxmox.Utils.updateColumns(container) } }];
+            me.callParent();
+            store.startUpdate();
+            me.on('destroy', () => { store.stopUpdate(); store.destroy(); });
+            me.mon(Ext.state.Manager.getProvider(), 'statechange', (_, key) => {
+                if (key === 'summarycolumns') { Proxmox.Utils.updateColumns(me.down('#itemcontainer')); }
+            });
+        },
+    });
+
     Ext.define('PVE.betterdocker.Config', {
         extend: 'PVE.panel.Config', alias: 'widget.pveBetterDockerConfig', showSearch: false,
         // The native Config panel passes this to Help on every card activation.
@@ -274,20 +345,13 @@
                 me.query('[itemId=serviceSelector]').forEach(combo => {
                     combo.getStore().loadData(current.services.map(item => ({ name: item.name })));
                     combo.setValue(selectedService);
+                    combo.setHidden(current.services.length < 2);
                 });
-                rows('summaryGrid', [
-                    { key: 'Status', value: current.status }, { key: 'Node', value: info.node },
-                    { key: 'IP address', value: current.address || 'Waiting for DHCP' },
-                    { key: 'Services', value: current.services.length },
-                    { key: 'Running containers', value: current.containers.filter(item => item.state === 'running').length },
-                ]);
-                rows('containerGrid', current.containers);
-                rows('usageGrid', current.stats);
-                rows('networkGrid', [
-                    { key: 'Bridge', value: current.bridge }, { key: 'IPv4', value: current.address || 'Waiting for DHCP' },
-                    { key: 'IPv4 mode', value: current.ipv4mode || 'static' }, { key: 'MAC address', value: current.hwaddr || '' },
-                    { key: 'MTU', value: current.mtu || 'Same as bridge' }, { key: 'Gateway', value: 'Inherited from host routing' },
-                ]);
+                const summary = me.down('#summary');
+                if (summary) { summary.updateSnapshot(current); }
+                rows('networkGrid', [{ name: 'net0', bridge: current.bridge, hwaddr: current.hwaddr || '',
+                    mtu: current.mtu || 'Same as bridge', address: current.address || 'Waiting for DHCP',
+                    mode: current.ipv4mode === 'dhcp' ? 'DHCP' : 'Static' }]);
                 rows('portGrid', current.services.flatMap(item => item.ports.map(port => Object.assign({ service: item.name }, port))));
                 const active = service();
                 if (active) {
@@ -298,8 +362,7 @@
                         { key: 'CPU limit', value: values.cpus || 'Unlimited' },
                         { key: 'CPU units', value: values.cpuunits || 'Docker default' },
                         { key: 'PID limit', value: values.pids || 'Unlimited' },
-                    ]);
-                    rows('mountGrid', active.mounts);
+                    ].concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
                     rows('dnsGrid', [{ key: 'DNS servers', value: values.dns.join(', ') || 'Docker default' },
                         { key: 'Search domains', value: values.dns_search.join(', ') || 'Docker default' }]);
                     rows('optionGrid', [{ key: 'Restart policy', value: values.restart }, { key: 'Image', value: active.image }]);
@@ -328,13 +391,14 @@
                 Ext.create('PVE.betterdocker.CreateWizard', { projectId: identifier, nodename: info.node,
                     deployment: response.result.data.deployment }).show();
             } });
-            const editSettings = group => {
+            const editSettings = (group, selectedKey) => {
                 const active = service();
                 if (!active) { return; }
+                if (selectedKey && selectedKey.startsWith('Mount Point')) { editDeployment(); return; }
                 const values = active.settings;
                 const numeric = (name, label, maximum, extra) => field(name, label, values[name] || 0,
                     Object.assign({ xtype: 'numberfield', minValue: 0, maxValue: maximum, allowDecimals: false, allowBlank: false }, extra));
-                const fields = group === 'resources' ? [
+                let fields = group === 'resources' ? [
                     numeric('memory', 'Memory (MiB)', 1048576), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1 }),
                     numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3 }),
                     numeric('cpuunits', 'CPU units', 262144), numeric('pids', 'PID limit', 4194304),
@@ -344,9 +408,14 @@
                     { xtype: 'displayfield', value: 'Separate entries with commas. Empty fields use Docker defaults.' },
                 ] : [field('restart', 'Restart policy', values.restart, { xtype: 'combobox', editable: false, queryMode: 'local',
                     store: [['no', 'No'], ['always', 'Always'], ['unless-stopped', 'Unless stopped'], ['on-failure', 'On failure']] })];
+                if (group === 'resources' && selectedKey) {
+                    const names = selectedKey === 'Memory' || selectedKey === 'Swap' ? ['memory', 'swap'] :
+                        selectedKey === 'PID limit' ? ['pids'] : ['cpus', 'cpuunits'];
+                    fields = fields.filter(item => !item.name || names.includes(item.name));
+                }
                 const win = Ext.create('Ext.window.Window', { title: 'Edit ' + group + ' — ' + active.name,
                     modal: true, width: 520, layout: 'fit', items: [{ xtype: 'form', bodyPadding: 12, items: fields }],
-                    buttons: [{ text: 'Apply', handler: () => {
+                    buttons: [{ text: 'OK', handler: () => {
                         const form = win.down('form').getForm();
                         if (!form.isValid()) { return; }
                         const changed = form.getValues();
@@ -367,64 +436,73 @@
                 store: { fields: ['name'], data: [] }, listeners: { select: combo => { selectedService = combo.getValue(); populate(); } } });
             const grid = (id, columns, fields) => ({ xtype: 'grid', itemId: id, minHeight: 150,
                 store: { fields, data: [] }, columns: columns.map(column => Object.assign({ flex: 1, renderer: Ext.htmlEncode }, column)) });
-            const properties = id => grid(id, [{ text: 'Setting', dataIndex: 'key', width: 200, flex: 0 },
-                { text: 'Value', dataIndex: 'value' }], ['key', 'value']);
+            const properties = id => Object.assign(grid(id, [{ text: 'Name', dataIndex: 'key', width: 200, flex: 0,
+                renderer: (value, meta) => {
+                    const icons = { Memory: 'pmx-itype-icon-memory', Swap: 'fa fa-refresh', 'CPU limit': 'pmx-itype-icon-processor',
+                        'CPU units': 'pmx-itype-icon-processor', 'PID limit': 'fa fa-cubes' };
+                    const icon = icons[value] || (String(value).startsWith('Mount Point') ? 'fa fa-hdd-o' : 'fa fa-cog');
+                    meta.tdCls = 'pve-itype-fa';
+                    return '<i class="pve-grid-fa fa-fw ' + icon + '"></i> ' + Ext.htmlEncode(value);
+                } }, { text: 'Value', dataIndex: 'value' }], ['key', 'value']), { hideHeaders: true });
             const card = (title, id, icon, items, tbar, extra) => Object.assign({ xtype: 'panel', title, itemId: id,
-                iconCls: 'fa fa-' + icon, layout: 'anchor', scrollable: true, bodyPadding: 10,
-                defaults: { anchor: '100%', margin: '0 0 10 0' }, items, tbar,
+                iconCls: 'fa fa-' + icon, layout: 'anchor', scrollable: true, bodyPadding: 0,
+                defaults: { anchor: '100%' }, items, tbar,
                 listeners: { afterrender: reload, activate: reload } }, extra);
             me.title = 'Docker (' + info.name + ') on node \'' + info.node + '\'';
             me.hstateid = 'betterdocker-' + identifier;
             me.tbar = [
                 { text: 'Start', itemId: 'startButton', iconCls: 'fa fa-play', handler: () => act('start') },
-                { text: 'Stop', itemId: 'stopButton', iconCls: 'fa fa-stop', handler: () => act('stop') },
-                { text: 'Restart', itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('restart') },
+                { xtype: 'splitbutton', text: 'Shutdown', itemId: 'stopButton', iconCls: 'fa fa-power-off', handler: () => act('stop'),
+                    menu: [{ text: 'Restart', itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('restart') }] },
                 { text: 'Console', iconCls: 'fa fa-terminal', handler: () => me.selectById('console') },
                 { text: 'More', menu: [{ text: 'Edit deployment', handler: editDeployment }, { text: 'Refresh', handler: reload },
                     { text: 'Remove', iconCls: 'fa fa-trash', handler: () => Ext.Msg.confirm('Remove Docker project',
                         'Remove this project? Volumes and bind-mount data are retained.', answer => { if (answer === 'yes') { act('delete'); } }) }] },
             ];
             me.items = [
-                card('Summary', 'summary', 'book', [properties('summaryGrid'),
-                    grid('containerGrid', [{ text: 'Container', dataIndex: 'name' }, { text: 'Service', dataIndex: 'service' },
-                        { text: 'Status', dataIndex: 'state' }, { text: 'Started', dataIndex: 'started' }], ['name', 'service', 'state', 'started']),
-                    grid('usageGrid', [{ text: 'Container', dataIndex: 'Name' }, { text: 'CPU usage', dataIndex: 'CPUPerc' },
-                        { text: 'Memory usage / limit', dataIndex: 'MemUsage' }, { text: 'Network I/O', dataIndex: 'NetIO' },
-                        { text: 'Disk I/O', dataIndex: 'BlockIO' }], ['Name', 'CPUPerc', 'MemUsage', 'NetIO', 'BlockIO'])]),
+                { xtype: 'pveBetterDockerSummary', title: 'Summary', itemId: 'summary', iconCls: 'fa fa-book',
+                    apiUrl: url, projectName: info.name, pveSelNode: me.pveSelNode, listeners: { afterrender: reload } },
                 { xtype: 'pveBetterDockerConsole', title: 'Console', itemId: 'console', iconCls: 'fa fa-terminal', apiUrl: url,
                     listeners: { afterrender: reload } },
-                card('Resources', 'resources', 'cube', [properties('resourceGrid'),
-                    grid('mountGrid', [{ text: 'Type', dataIndex: 'type' }, { text: 'Source', dataIndex: 'source' },
-                        { text: 'Mount point', dataIndex: 'target' }, { text: 'Read only', dataIndex: 'read_only' }], ['type', 'source', 'target', 'read_only'])],
-                    [selector(), { text: 'Edit', handler: () => editSettings('resources') }, { text: 'Edit mounts', handler: editDeployment }]),
-                card('Network', 'network', 'exchange', [properties('networkGrid'),
-                    grid('portGrid', [{ text: 'Service', dataIndex: 'service' }, { text: 'IP address', dataIndex: 'host_ip' },
+                card('Resources', 'resources', 'cube', [properties('resourceGrid')],
+                    [{ text: 'Edit', handler: () => {
+                        const grid = me.down('#resourceGrid');
+                        const selected = grid.getSelectionModel().getSelection()[0];
+                        editSettings('resources', selected && selected.get('key'));
+                    } }, '->', selector()], { layout: 'fit' }),
+                card('Network', 'network', 'exchange', [Object.assign(grid('networkGrid', [
+                    { text: 'Name', dataIndex: 'name', width: 80, flex: 0 }, { text: 'Bridge', dataIndex: 'bridge' },
+                    { text: 'MAC address', dataIndex: 'hwaddr' }, { text: 'IPv4', dataIndex: 'address' },
+                    { text: 'IPv4 mode', dataIndex: 'mode' }, { text: 'MTU', dataIndex: 'mtu' }],
+                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu']), { flex: 1 }),
+                    Object.assign(grid('portGrid', [{ text: 'Service', dataIndex: 'service' }, { text: 'IP address', dataIndex: 'host_ip' },
                         { text: 'Published port', dataIndex: 'published' }, { text: 'Container port', dataIndex: 'target' },
-                        { text: 'Protocol', dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']),
-                    { xtype: 'displayfield', value: 'Published ports use this project IP. Bridge, MAC and IP mode are fixed for this project; port mappings can be edited in Deployment.' }],
-                    [{ text: 'Edit ports', handler: editDeployment }]),
-                card('DNS', 'dns', 'globe', [properties('dnsGrid')], [selector(), { text: 'Edit', handler: () => editSettings('dns') }]),
-                card('Options', 'options', 'cog', [properties('optionGrid')], [selector(), { text: 'Edit', handler: () => editSettings('options') }]),
-                card('Deployment', 'deployment', 'file-code-o', [{ xtype: 'textarea', itemId: 'source', readOnly: true, height: 470 }],
-                    [{ text: 'Edit', handler: editDeployment }]),
-                card('Logs', 'logs', 'file-text-o', [{ xtype: 'textarea', itemId: 'logsText', readOnly: true, height: 470 }],
+                        { text: 'Protocol', dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: 'Published ports', flex: 1 })],
+                    [{ text: 'Edit ports', handler: editDeployment }], { layout: { type: 'vbox', align: 'stretch' } }),
+                card('DNS', 'dns', 'globe', [properties('dnsGrid')], [{ text: 'Edit', handler: () => editSettings('dns') }, '->', selector()], { layout: 'fit' }),
+                card('Options', 'options', 'cog', [properties('optionGrid')], [{ text: 'Edit', handler: () => editSettings('options') }, '->', selector()], { layout: 'fit' }),
+                card('Deployment', 'deployment', 'file-code-o', [{ xtype: 'textarea', itemId: 'source', readOnly: true, fieldStyle: 'font-family:monospace' }],
+                    [{ text: 'Edit', handler: editDeployment }], { layout: 'fit' }),
+                card('Logs', 'logs', 'file-text-o', [{ xtype: 'textarea', itemId: 'logsText', readOnly: true, fieldStyle: 'font-family:monospace' }],
                     [{ text: 'Refresh', handler: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) }],
-                    { listeners: { afterrender: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) } }),
+                    { layout: 'fit', listeners: { afterrender: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) } }),
                 card('Task History', 'tasks', 'list-alt', [grid('taskGrid', [{ text: 'Start time', dataIndex: 'starttime',
                     renderer: value => new Date(value * 1000).toLocaleString() }, { text: 'Type', dataIndex: 'type' },
                     { text: 'User', dataIndex: 'user' }, { text: 'Status', dataIndex: 'status' }], ['upid', 'starttime', 'type', 'user', 'status'])],
                     [{ text: 'Refresh', handler: () => me.loadDockerTasks() }],
-                    { listeners: { afterrender: panel => {
+                    { layout: 'fit', listeners: { afterrender: panel => {
                         panel.down('grid').on('itemdblclick', (_, record) => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: record.get('upid') }));
                         me.loadDockerTasks();
                     } } }),
             ];
+            const history = me.items.splice(me.items.findIndex(item => item.itemId === 'tasks'), 1)[0];
+            me.items.splice(6, 0, history);
             me.loadDockerTasks = () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/tasks', method: 'GET',
                 params: { limit: 200 }, success: response => rows('taskGrid', response.result.data.filter(item =>
                     (item.type === 'betterdocker' || item.type === 'betterdockerconsole') && item.id === identifier)) });
             ['resources', 'dns', 'options'].forEach(group => {
                 const entry = me.items.find(item => item.itemId === group);
-                entry.items[0].listeners = { itemdblclick: () => editSettings(group) };
+                entry.items[0].listeners = { itemdblclick: (_, record) => editSettings(group, record.get('key')) };
             });
             me.callParent();
             me.on('afterrender', () => { reload(); me.poll = setInterval(reload, 10000); }, me, { single: true });
