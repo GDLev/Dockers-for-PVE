@@ -110,7 +110,7 @@ class WorkerTests(unittest.TestCase):
         with patch.object(worker, 'locked', tempfile.TemporaryDirectory), \
              patch.object(worker, 'summaries', return_value=records), patch.object(worker, 'ensure_address') as add:
             worker.restore('pve')
-            add.assert_called_once_with(records[0])
+            add.assert_called_once_with(records[0], wait=False)
 
     def test_patch_is_idempotent_and_removable(self):
         for kind, source in [('node', "use PVE::API2::LXC;\n__PACKAGE__->register_method({ path => 'lxc' });\n1;\n"),

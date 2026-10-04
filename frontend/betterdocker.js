@@ -12,7 +12,8 @@
     const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
     const deployment = values => {
         const common = { name: values.name, mode: values.mode, environment: values.environment || '',
-            bridge: values.bridge, address: values.address };
+            bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
+            hwaddr: values.hwaddr || '', mtu: values.mtu || '' };
         return Object.assign(common, values.mode === 'compose' ? { compose: values.compose } :
             { image: values.image, ports: values.ports || '' });
     };
@@ -26,6 +27,12 @@
             group.setHidden(!active);
             group.query('field').forEach(item => item.setDisabled(!active));
         });
+    }
+    function updateNetwork(group) {
+        const wizard = group.up('window');
+        if (!wizard) { return; }
+        const address = wizard.down('[name=address]');
+        if (address) { address.setDisabled(group.getValue().ipv4mode !== 'static'); }
     }
     PVE.tree.ResourceTree.typeDefaults.docker = { iconCls: 'fa bd-docker-icon', text: 'Docker' };
     const originalIcon = PVE.Utils.get_object_icon_class;
@@ -78,12 +85,30 @@
                 ],
             }, {
                 xtype: 'inputpanel', title: 'Network',
-                items: [
+                column1: [
                     field('bridge', 'Bridge', defaults.bridge || 'vmbr0', { xtype: 'PVE.form.BridgeSelector',
                         nodename: me.nodename || Proxmox.NodeName, bridgeType: 'bridge', allowBlank: false, readOnly: Boolean(me.projectId) }),
-                    field('address', 'Dedicated IPv4', defaults.address || '', { allowBlank: false, readOnly: Boolean(me.projectId), emptyText: '192.0.2.50' }),
-                    { xtype: 'displayfield', value: 'Choose an unused address in the bridge subnet, outside your DHCP pool. All published ports will bind to this address. The Proxmox management IP is not used.' },
-                    { xtype: 'displayfield', value: 'For Compose, ports, images, volumes and service settings come from your YAML. Services in one project share the dedicated IP through their published ports.' },
+                    field('hwaddr', 'MAC address', defaults.hwaddr || '', { readOnly: Boolean(me.projectId),
+                        emptyText: 'auto', validator: value => !value || /^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(value) || 'Invalid MAC address' }),
+                    field('mtu', 'MTU', defaults.mtu || '', { xtype: 'numberfield', readOnly: Boolean(me.projectId),
+                        minValue: 576, maxValue: 9216, allowDecimals: false, emptyText: 'Same as bridge' }),
+                ],
+                column2: [
+                    { xtype: 'radiogroup', fieldLabel: 'IPv4', columns: 2,
+                        items: [
+                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: 'Static',
+                                checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'static', readOnly: Boolean(me.projectId) },
+                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: 'DHCP',
+                                checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp', readOnly: Boolean(me.projectId) },
+                        ], listeners: { change: updateNetwork, afterrender: updateNetwork } },
+                    field('address', 'IPv4/CIDR', defaults.cidr || defaults.address || '', { allowBlank: false,
+                        disabled: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp',
+                        readOnly: Boolean(me.projectId), emptyText: '192.0.2.50/24' }),
+                    { xtype: 'displayfield', fieldLabel: 'Gateway (IPv4)', value: 'Inherited from host routing' },
+                ],
+                columnB: [
+                    { xtype: 'displayfield', value: 'DHCP requests an address for the project MAC on a separate interface. Static IPv4 must be unused and within the bridge subnet. Host gateway and DNS settings remain unchanged.' },
+                    { xtype: 'displayfield', value: 'All ports from Compose will bind to the project IP. Services in one project share this IP through their published ports.' },
                 ],
             }, {
                 title: 'Review', layout: 'fit', items: [{ xtype: 'grid',
@@ -95,7 +120,8 @@
                     const values = this.up('window').getValues();
                     const data = [{ key: 'Node', value: values.nodename }, { key: 'Project', value: values.name },
                         { key: 'Deployment', value: values.mode === 'compose' ? 'Docker Compose' : values.image },
-                        { key: 'Bridge', value: values.bridge }, { key: 'Dedicated IP', value: values.address },
+                        { key: 'Bridge', value: values.bridge }, { key: 'IPv4', value: values.ipv4mode === 'dhcp' ? 'Assigned by DHCP' : values.address },
+                        { key: 'MAC address', value: values.hwaddr || 'Auto-generated' },
                         { key: 'Published ports', value: values.mode === 'compose' ? 'Read from Compose YAML' : values.ports || 'None' }];
                     this.down('grid').getStore().loadData(data);
                 } },
@@ -145,7 +171,7 @@
                         deployment: response.result.data.deployment }).show();
                 } }) }, '->',
                 { text: 'Remove', iconCls: 'fa fa-trash', handler: () => Ext.Msg.confirm('Remove Docker project',
-                    'Remove this project? Docker volumes are retained.', answer => { if (answer === 'yes') { act('delete'); } }) },
+                    'Remove this project? Volumes and bind-mount data are retained.', answer => { if (answer === 'yes') { act('delete'); } }) },
             ];
             me.items = [{ xtype: 'tabpanel', items: [{ title: 'Deployment', xtype: 'panel', bodyPadding: 12,
                 layout: 'anchor', items: [

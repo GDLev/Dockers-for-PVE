@@ -74,7 +74,7 @@ def summaries():
 def validate(data):
     if not isinstance(data, dict):
         raise ValueError('Deployment must be an object')
-    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address'}
+    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu'}
     if set(data) - allowed:
         raise ValueError('Unknown deployment setting')
     name = data.get('name', '')
@@ -98,10 +98,29 @@ def validate(data):
     bridge = data.get('bridge', '')
     if not isinstance(bridge, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', bridge):
         raise ValueError('Select a Linux bridge')
-    address = ipaddress.IPv4Address(data.get('address', ''))
-    if address.is_multicast or address.is_unspecified or address.is_loopback or address.is_link_local:
-        raise ValueError('Choose a usable LAN IPv4 address')
-    return dict(data, mode=mode, environment=environment, address=str(address))
+    ipv4mode = data.get('ipv4mode', 'static')
+    if ipv4mode not in ('static', 'dhcp'):
+        raise ValueError('Choose static IPv4 or DHCP')
+    address, cidr = '', ''
+    if ipv4mode == 'static':
+        interface = ipaddress.IPv4Interface(data.get('cidr') or data.get('address', ''))
+        address, cidr = str(interface.ip), str(interface)
+        if interface.ip.is_multicast or interface.ip.is_unspecified or interface.ip.is_loopback or interface.ip.is_link_local:
+            raise ValueError('Choose a usable LAN IPv4 address')
+    if not isinstance(data.get('hwaddr', ''), str):
+        raise ValueError('MAC address must be text')
+    hwaddr = data.get('hwaddr', '').strip().lower()
+    if hwaddr and (not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', hwaddr) or
+                   int(hwaddr[:2], 16) & 1 or hwaddr == '00:00:00:00:00:00'):
+        raise ValueError('MAC address must be a valid unicast Ethernet address')
+    raw_mtu = data.get('mtu')
+    if isinstance(raw_mtu, bool):
+        raise ValueError('Invalid MTU')
+    mtu = int(raw_mtu) if raw_mtu not in (None, '') else 0
+    if mtu and not 576 <= mtu <= 9216:
+        raise ValueError('MTU must be between 576 and 9216')
+    return dict(data, mode=mode, environment=environment, address=address, cidr=cidr,
+                ipv4mode=ipv4mode, hwaddr=hwaddr, mtu=mtu)
 
 
 def parse_ports(text):
@@ -165,7 +184,8 @@ def compose_base(directory, identifier, filename='compose.runtime.json'):
             '-f', str(directory / filename)]
 
 
-def prepare(data, identifier, directory):
+def prepare(data, identifier, directory, project_directory=None):
+    project_directory = project_directory or directory
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
     source = data['compose'] if data['mode'] == 'compose' else image_compose(data)
@@ -173,17 +193,14 @@ def prepare(data, identifier, directory):
     (directory / '.env').write_text(data.get('environment', ''))
     for name in ('compose.source.yaml', '.env'):
         os.chmod(directory / name, 0o600)
-    # Relative bind mounts would resolve into managed project/staging directories.
-    command = compose_base(directory, identifier, 'compose.source.yaml') + ['config', '--format', 'json']
+    command = compose_base(directory, identifier, 'compose.source.yaml') + ['config', '--no-env-resolution', '--format', 'json']
+    # Use the permanent project directory even when validating an edit in staging.
+    command[command.index('--project-directory') + 1] = str(project_directory)
     # Canonical config may contain passwords; never send it to the task log.
     try:
         config = json.loads(capture(command))
     except subprocess.CalledProcessError:
         raise ValueError('Invalid Compose configuration. Check YAML, .env and referenced files.') from None
-    for service in config.get('services', {}).values():
-        for volume in service.get('volumes', []):
-            if volume.get('type') == 'bind' and str(volume.get('source', '')).startswith(str(directory) + '/'):
-                raise ValueError('Use absolute host paths for bind mounts; project files are not uploaded')
     config = bind_ports(config, data['address'], identifier)
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
     def escape(value):
@@ -199,34 +216,226 @@ def prepare(data, identifier, directory):
     return config
 
 
-def network_preflight(data):
-    address = ipaddress.IPv4Address(data['address'])
+def bridge_addresses(bridge):
     interfaces = json.loads(capture(['ip', '-j', '-4', 'address', 'show']))
-    selected = next((interface for interface in interfaces if interface['ifname'] == data['bridge']), None)
-    if not selected or not Path('/sys/class/net', data['bridge'], 'bridge').is_dir():
+    selected = next((interface for interface in interfaces if interface['ifname'] == bridge), None)
+    if not selected or not Path('/sys/class/net', bridge, 'bridge').is_dir():
         raise ValueError('The selected interface is not a Linux bridge')
-    if any(str(address) == entry.get('local') for interface in interfaces for entry in interface.get('addr_info', [])):
-        raise ValueError('This address already belongs to the host; choose a separate unused IP')
     networks = [ipaddress.IPv4Network(f"{entry['local']}/{entry['prefixlen']}", strict=False)
                 for entry in selected.get('addr_info', []) if entry.get('prefixlen', 32) < 31]
-    if not any(address in network and address not in (network.network_address, network.broadcast_address)
-               for network in networks):
+    if not networks:
+        raise ValueError('Select a bridge with a connected IPv4 subnet; project routing is inherited from the host')
+    return interfaces, networks
+
+
+def check_address(address, bridge, identifier=None, owned_interface=None, probe=False):
+    address = ipaddress.IPv4Address(address)
+    interfaces, networks = bridge_addresses(bridge)
+    if any(str(address) == entry.get('local') for interface in interfaces
+           if interface['ifname'] != owned_interface for entry in interface.get('addr_info', [])):
+        raise ValueError('This address already belongs to the host; choose a separate unused IP')
+    if not any(address in network and address not in (network.network_address, network.broadcast_address) for network in networks):
         raise ValueError('The project IP must belong to a connected IPv4 subnet on this bridge')
-    if any(item['address'] == data['address'] for item in summaries()):
+    if any(item.get('address') == str(address) and item.get('id') != identifier for item in summaries()):
         raise ValueError('This IP is already reserved by another Docker project')
+    already_owned = any(interface['ifname'] == owned_interface and
+                        any(entry.get('local') == str(address) for entry in interface.get('addr_info', []))
+                        for interface in interfaces)
+    if probe and not already_owned:
+        result = subprocess.run(['arping', '-D', '-I', bridge, '-c', '3', '-w', '4', str(address)],
+                                text=True, capture_output=True, timeout=10)
+        if result.returncode != 0:
+            raise ValueError('The IP responded to duplicate-address detection; choose an unused address')
+
+
+def network_preflight(data):
+    bridge_addresses(data['bridge'])
+    if data.get('ipv4mode', 'static') == 'static':
+        check_address(data['address'], data['bridge'], probe=True)
     if any(item['node'] == current_node() and item['name'] == data['name'] for item in summaries()):
         raise ValueError('A project with this name already exists on this node')
-    probe = subprocess.run(['arping', '-D', '-I', data['bridge'], '-c', '3', '-w', '4', data['address']],
-                           text=True, capture_output=True, timeout=10)
-    if probe.returncode != 0:
-        raise ValueError('The IP responded to duplicate-address detection; choose an unused address')
+    if data.get('hwaddr') and any(item.get('hwaddr') == data['hwaddr'] for item in summaries()):
+        raise ValueError('This MAC address is already used by another project')
 
 
-def ensure_address(info):
-    existing = json.loads(capture(['ip', '-j', '-4', 'address', 'show', 'dev', info['bridge']]))
-    if any(entry.get('local') == info['address'] for interface in existing for entry in interface.get('addr_info', [])):
+def ensure_link(info):
+    interface = info['interface']
+    links = json.loads(capture(['ip', '-j', '-d', 'link', 'show']))
+    existing = next((link for link in links if link['ifname'] == interface), None)
+    owner = 'betterdocker:' + info['id']
+    if existing:
+        if existing.get('ifalias') != owner or existing.get('linkinfo', {}).get('info_kind') != 'macvlan':
+            raise ValueError('Project interface name is already used by another network device')
+    else:
+        run(['ip', 'link', 'add', 'link', info['bridge'], 'name', interface, 'address', info['hwaddr'],
+             'type', 'macvlan', 'mode', 'bridge'])
+        run(['ip', 'link', 'set', 'dev', interface, 'alias', owner])
+    # This is an IPv4 endpoint. Prevent RA from installing an unintended host IPv6 route.
+    ipv6 = Path('/proc/sys/net/ipv6/conf') / interface / 'disable_ipv6'
+    if ipv6.exists() and ipv6.read_text().strip() != '1':
+        run(['sysctl', '-q', '-w', 'net.ipv6.conf.' + interface + '.disable_ipv6=1'])
+    if info.get('mtu'):
+        run(['ip', 'link', 'set', 'dev', interface, 'mtu', str(info['mtu'])])
+    run(['ip', 'link', 'set', 'dev', interface, 'up'])
+
+
+def add_address(interface, address):
+    existing = json.loads(capture(['ip', '-j', '-4', 'address', 'show', 'dev', interface]))
+    if any(entry.get('local') == address for item in existing for entry in item.get('addr_info', [])):
         return
-    run(['ip', 'address', 'add', info['address'] + '/32', 'dev', info['bridge']])
+    # No connected routes, default routes or DNS settings on the management interface are changed.
+    run(['ip', 'address', 'add', address + '/32', 'dev', interface])
+
+
+def dhcp_paths(info):
+    directory = ROOT / project_id(info['id'])
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory / 'dhcp-address.json', Path('/run') / ('betterdocker-dhcp-' + info['id'] + '.pid')
+
+
+def lease(info):
+    path, _ = dhcp_paths(info)
+    try:
+        data = json.loads(path.read_text())
+        if data.get('expires', 0) > time.time() and data.get('interface') == info['interface']:
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def dhcp_command(info):
+    directory = ROOT / info['id']
+    _, pid = dhcp_paths(info)
+    config = directory / 'dhclient.conf'
+    config.write_text('timeout 60;\nretry 10;\n' +
+                      'send host-name "' + info['name'] + '";\n' +
+                      'send dhcp-client-identifier 1:' + info['hwaddr'] + ';\n' +
+                      'request subnet-mask, dhcp-lease-time;\n')
+    return ['dhclient', '-4', '-pf', str(pid), '-lf', str(directory / 'dhclient.leases'),
+            '-cf', str(config), '-sf', '/usr/local/lib/betterdocker/dhcp-hook.py']
+
+
+def start_dhcp(info):
+    # A dedicated systemd unit survives pvedaemon restarts and oneshot refresh jobs.
+    run(['systemctl', 'start', 'betterdocker-dhcp@' + project_id(info['id']) + '.service'])
+
+
+def dhcp_client(identifier, release=False):
+    identifier = project_id(identifier)
+    info = json.loads((METADATA / (identifier + '.json')).read_text())
+    if info['node'] != current_node() or info.get('ipv4mode') != 'dhcp' or info.get('interface') != 'bd' + identifier[:12]:
+        raise ValueError('Invalid DHCP project')
+    command = dhcp_command(info) + (['-r'] if release else ['-d']) + [info['interface']]
+    if release:
+        run(command)
+    else:
+        os.execvpe(command[0], command, {'PATH': os.environ.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin'), 'HOME': '/root'})
+
+
+def ensure_address(info, wait=True):
+    # Existing projects from the alias-only release keep their network and address.
+    if not info.get('interface'):
+        add_address(info['bridge'], info['address'])
+        return info['address']
+    ensure_link(info)
+    if info.get('ipv4mode', 'static') == 'static':
+        add_address(info['interface'], info['address'])
+        return info['address']
+    start_dhcp(info)
+    deadline = time.monotonic() + (60 if wait else 0)
+    while True:
+        assigned = lease(info)
+        if assigned:
+            check_address(assigned['address'], info['bridge'], info['id'], info['interface'])
+            add_address(info['interface'], assigned['address'])
+            info['address'] = assigned['address']
+            return info['address']
+        if not wait:
+            return None
+        if time.monotonic() >= deadline:
+            raise ValueError('No DHCP lease received within 60 seconds. Check the bridge, DHCP server and MAC filtering.')
+        time.sleep(1)
+
+
+def dhcp_event(environment):
+    interface = environment.get('interface', '')
+    info = next((item for item in summaries() if item.get('interface') == interface and
+                 item['node'] == current_node() and item.get('ipv4mode') == 'dhcp'), None)
+    if not info:
+        raise ValueError('DHCP hook was called for an unmanaged interface')
+    reason = environment.get('reason', '')
+    path, _ = dhcp_paths(info)
+    if reason == 'TIMEOUT':
+        raise ValueError('Waiting for a valid DHCP offer; an expired fallback lease is not accepted')
+    if reason in ('BOUND', 'RENEW', 'REBIND', 'REBOOT'):
+        address = str(ipaddress.IPv4Address(environment.get('new_ip_address', '')))
+        check_address(address, info['bridge'], info['id'], interface)
+        previous = lease(info)
+        if not previous or previous['address'] != address:
+            check_address(address, info['bridge'], info['id'], interface, probe=True)
+        add_address(interface, address)
+        seconds = int(environment.get('new_dhcp_lease_time', '3600'))
+        write_json(path, {'address': address, 'interface': interface, 'expires': time.time() + max(1, seconds)})
+        if previous and previous['address'] != address:
+            run(['ip', 'address', 'del', previous['address'] + '/32', 'dev', interface])
+    elif reason in ('EXPIRE', 'FAIL', 'STOP', 'RELEASE'):
+        addresses = json.loads(capture(['ip', '-j', '-4', 'address', 'show', 'dev', interface]))
+        for item in addresses:
+            for entry in item.get('addr_info', []):
+                run(['ip', 'address', 'del', f"{entry['local']}/{entry['prefixlen']}", 'dev', interface])
+        path.unlink(missing_ok=True)
+    # PREINIT and other advisory events do not touch routes or resolv.conf.
+
+
+def rebind_runtime(directory, address):
+    if not address or address == '0.0.0.0':
+        raise ValueError('A dedicated address must be acquired before deployment')
+    path = directory / 'compose.runtime.json'
+    config = json.loads(path.read_text())
+    for service in config['services'].values():
+        for port in service.get('ports', []):
+            port['host_ip'] = address
+    write_json(path, config)
+
+
+def sync_dhcp(info):
+    if info.get('ipv4mode') != 'dhcp':
+        return True
+    directory = ROOT / info['id']
+    ensure_link(info)
+    start_dhcp(info)
+    assigned = lease(info)
+    if not assigned:
+        if info['status'] in ('running', 'partial', 'creating'):
+            if (directory / 'compose.runtime.json').exists():
+                run(compose_base(directory, info['id']) + ['stop'], timeout=1800)
+            info['network_resume'] = True
+            info['status'] = 'network-error'
+            write_json(METADATA / (info['id'] + '.json'), info)
+        return False
+    changed = info.get('address') != assigned['address']
+    if changed or info.get('network_resume'):
+        rebind_runtime(directory, assigned['address'])
+        info['address'] = assigned['address']
+        if info['status'] in ('running', 'partial', 'creating') or info.get('network_resume'):
+            run(compose_base(directory, info['id']) + ['up', '-d'], timeout=1800)
+        info.pop('network_resume', None)
+        if info['status'] == 'network-error':
+            info['status'] = 'creating'
+        write_json(METADATA / (info['id'] + '.json'), info)
+    return True
+
+
+def remove_network(info):
+    if not info.get('interface'):
+        run(['ip', 'address', 'del', info['address'] + '/32', 'dev', info['bridge']])
+        return
+    if info.get('ipv4mode') == 'dhcp':
+        run(['systemctl', 'stop', 'betterdocker-dhcp@' + info['id'] + '.service'])
+    links = json.loads(capture(['ip', '-j', '-d', 'link', 'show']))
+    if any(link['ifname'] == info['interface'] and link.get('ifalias') == 'betterdocker:' + info['id'] for link in links):
+        run(['ip', 'link', 'del', 'dev', info['interface']])
 
 
 def current_node():
@@ -241,17 +450,22 @@ def create(data, node):
         network_preflight(data)
         directory = ROOT / identifier
         try:
-            config = prepare(data, identifier, directory)
+            config = prepare(dict(data, address=data.get('address') or '0.0.0.0'), identifier, directory)
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             raise
         write_json(directory / 'request.json', data)
         info = {'id': identifier, 'node': node, 'name': data['name'], 'bridge': data['bridge'],
                 'address': data['address'], 'status': 'creating', 'created': int(time.time()),
-                'expected': sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values())}
+                'expected': sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values()),
+                'ipv4mode': data.get('ipv4mode', 'static'), 'cidr': data.get('cidr', ''),
+                'interface': 'bd' + identifier[:12], 'mtu': data.get('mtu', 0),
+                'hwaddr': data.get('hwaddr') or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2))}
         write_json(METADATA / (identifier + '.json'), info)
         try:
             ensure_address(info)
+            rebind_runtime(directory, info['address'])
+            write_json(METADATA / (identifier + '.json'), info)
             run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
             refresh(node)
         except Exception:
@@ -259,7 +473,7 @@ def create(data, node):
             write_json(METADATA / (identifier + '.json'), info)
             print(f'Project {identifier} retained for diagnosis; open its Docker screen.', file=sys.stderr)
             raise
-    print(f"Created {data['name']} at {data['address']}")
+    print(f"Created {data['name']} at {info['address']}")
 
 
 def detail(identifier, node):
@@ -271,10 +485,14 @@ def detail(identifier, node):
 
 
 def refresh(node):
+    # Rebinding may recreate containers, so refresh the state list afterwards.
+    projects = [info for info in summaries() if info['node'] == node]
+    for info in projects:
+        sync_dhcp(info)
     entries = json.loads('[' + ','.join(capture(['docker', 'ps', '-a', '--filter', 'label=betterdocker.id',
                                               '--format', '{{json .}}']).splitlines()) + ']')
-    for info in summaries():
-        if info['node'] != node:
+    for info in projects:
+        if info['status'] == 'network-error':
             continue
         states = [entry['State'] for entry in entries
                   if ('betterdocker.id=' + info['id']) in entry.get('Labels', '').split(',')]
@@ -291,21 +509,26 @@ def action(identifier, node, operation):
     with locked():
         info = detail(identifier, node)
         directory = ROOT / identifier
-        commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['restart'], 'delete': ['down']}
+        commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['up', '-d', '--force-recreate'], 'delete': ['down']}
         if operation not in commands:
             raise ValueError('Unsupported operation')
         if operation in ('start', 'restart'):
             ensure_address(info)
+            rebind_runtime(directory, info['address'])
+            info.pop('deployment', None)
+            info.pop('network_resume', None)
+            info['status'] = 'creating'
+            write_json(METADATA / (identifier + '.json'), info)
         run(compose_base(directory, identifier) + commands[operation], timeout=1800)
         if operation == 'delete':
             # Reserve the metadata until the owned alias is successfully released.
-            run(['ip', 'address', 'del', info['address'] + '/32', 'dev', info['bridge']])
+            remove_network(info)
             (METADATA / (identifier + '.json')).unlink()
-            shutil.rmtree(directory)
-            print('Project removed. Docker volumes are retained.')
+            print(f'Project removed. Volumes and bind-mount data are retained at {directory}.')
         else:
             info.pop('deployment', None)
             if operation == 'stop':
+                info.pop('network_resume', None)
                 info['status'] = 'stopped'
                 write_json(METADATA / (identifier + '.json'), info)
             refresh(node)
@@ -314,15 +537,20 @@ def action(identifier, node, operation):
 def update(identifier, node, data):
     with locked():
         existing = detail(identifier, node)
-        for key in ('bridge', 'address', 'name'):
+        previous = existing['deployment']
+        for key in ('bridge', 'name', 'ipv4mode', 'hwaddr', 'mtu'):
+            default = 'static' if key == 'ipv4mode' else 0 if key == 'mtu' else ''
+            if data.get(key, default) != previous.get(key, default):
+                raise ValueError('Network settings cannot be changed during redeployment')
+        for key in ('bridge', 'name'):
             if data[key] != existing[key]:
                 raise ValueError('Project name, bridge and IP cannot be changed during redeployment')
+        if data.get('ipv4mode', 'static') == 'static' and data['address'] != existing['address']:
+            raise ValueError('The project IP cannot be changed during redeployment')
         directory = ROOT / identifier
         with tempfile.TemporaryDirectory(prefix='betterdocker-update-', dir=ROOT) as folder:
             staging = Path(folder)
-            config = prepare(data, identifier, staging)
-            # Compose resolves relative bind paths against staging. Reject relative bind mounts
-            # in both creation and editing; uploaded build/config files are not available.
+            config = prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory)
             for filename in ('compose.source.yaml', '.env', 'compose.runtime.json'):
                 os.replace(staging / filename, directory / filename)
         write_json(directory / 'request.json', data)
@@ -332,6 +560,8 @@ def update(identifier, node, data):
         write_json(METADATA / (identifier + '.json'), info)
         try:
             ensure_address(info)
+            rebind_runtime(directory, info['address'])
+            write_json(METADATA / (identifier + '.json'), info)
             run(compose_base(directory, identifier) + ['up', '-d', '--remove-orphans'], timeout=1800)
             refresh(node)
         except Exception:
@@ -344,12 +574,12 @@ def restore(node):
     with locked():
         for info in summaries():
             if info['node'] == node:
-                ensure_address(info)
+                ensure_address(info, wait=False)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update'])
+    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -359,6 +589,8 @@ def main():
             create(data, values[1])
     elif args.operation == 'update':
         update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())))
+    elif args.operation in ('dhcp-client', 'dhcp-release'):
+        dhcp_client(values[0], release=args.operation == 'dhcp-release')
     elif args.operation == 'detail':
         print(json.dumps(detail(*values)))
     elif args.operation == 'action':

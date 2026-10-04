@@ -24,15 +24,14 @@ case "$ACTION" in
         systemctl restart pvedaemon pveproxy
         rm -f /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
             /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg
-        systemctl disable --now betterdocker-refresh.timer
-        echo 'UI integration removed. Docker projects, volumes and address restoration are retained.'
+        echo 'UI integration removed. Docker projects, volumes and network/lease maintenance are retained.'
         exit 0 ;;
     install|repair) ;;
     *) echo 'Usage: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
 esac
 echo 'Updating the package index and installing BetterDocker dependencies.'
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates curl iputils-arping
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates curl iputils-arping isc-dhcp-client
 python3 "$PROJECT_DIR/scripts/patch.py" check
 BACKUP_DIR="/var/backups/betterdocker/$(date +%Y%m%d-%H%M%S)-$$"
 install -d -m 0700 "$BACKUP_DIR"
@@ -49,6 +48,8 @@ TARGETS=(
     /etc/systemd/system/betterdocker-addresses.service
     /etc/systemd/system/betterdocker-refresh.service
     /etc/systemd/system/betterdocker-refresh.timer
+    /usr/local/lib/betterdocker/dhcp-hook.py
+    /etc/systemd/system/betterdocker-dhcp@.service
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -83,6 +84,8 @@ install -m 0644 "$PROJECT_DIR/frontend/docker.svg" "${TARGETS[5]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-addresses.service" "${TARGETS[6]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-refresh.service" "${TARGETS[7]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-refresh.timer" "${TARGETS[8]}"
+install -m 0755 "$PROJECT_DIR/scripts/dhcp-hook.py" "${TARGETS[9]}"
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-dhcp@.service" "${TARGETS[10]}"
 bash /usr/local/lib/betterdocker/docker-install.sh
 systemctl daemon-reload
 systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer

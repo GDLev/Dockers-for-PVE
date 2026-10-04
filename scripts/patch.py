@@ -17,8 +17,8 @@ PVE::API2::BetterDocker::hook_resources();
 # END BETTERDOCKER
 '''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=3" />
-<script src="/pve2/js/betterdocker.js?v=3"></script>
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=4" />
+<script src="/pve2/js/betterdocker.js?v=4"></script>
 <!-- END BETTERDOCKER -->'''
 
 
