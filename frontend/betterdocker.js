@@ -566,6 +566,20 @@
         },
     });
 
+    const originalNodeMenuInit = PVE.node.CmdMenu.prototype.initComponent;
+    Ext.override(PVE.node.CmdMenu, {
+        initComponent: function () {
+            originalNodeMenuInit.apply(this, arguments);
+            const nodename = this.nodename;
+            const createCT = this.getComponent('createct');
+            this.insert(createCT ? this.items.indexOf(createCT) + 1 : 2, {
+                text: 'Create DCT', itemId: 'createdct', iconCls: 'fa bd-docker-icon',
+                disabled: Proxmox.UserName !== 'root@pam',
+                handler: () => Ext.create('PVE.betterdocker.CreateWizard', { nodename }).show(),
+            });
+        },
+    });
+
     const originalCmdMenu = PVE.Utils.createCmdMenu;
     PVE.Utils.createCmdMenu = function (view, record, item, index, event) {
         if (!record || record.data.type !== 'docker') { return originalCmdMenu.apply(this, arguments); }
@@ -575,7 +589,9 @@
         const menu = Ext.create('PVE.betterdocker.CmdMenu', {
             pveSelNode: record, workspace: view.up('pveStdWorkspace'),
         });
-        menu.on('hide', () => menu.destroy(), menu, { single: true });
+        // ExtJS hides the menu before calling the clicked item's handler.
+        // Destroying it synchronously clears that handler before it can run.
+        menu.on('hide', () => Ext.defer(() => menu.destroy(), 1), menu, { single: true });
         menu.showAt(event.getXY());
         return menu;
     };

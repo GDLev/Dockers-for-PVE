@@ -11,8 +11,9 @@ const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => in
     getTypeOrder: type => ({ lxc: 0, qemu: 1, node: 2, storage: 4 })[type] ?? 9,
     nodeSortFn: (a, b) => a.data.vmid - b.data.vmid } };
 const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; } } };
+const nodeMenuClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const context = { window: null, console,
-    PVE: { panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
+    PVE: { node: { CmdMenu: nodeMenuClass }, panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam' },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
@@ -226,16 +227,79 @@ context.Ext.tree = { View: class {} };
 const treeView = new context.Ext.tree.View();
 treeView.up = () => menuWorkspace;
 let shownAt, menuArguments, suppressed = false;
-context.Ext.create = (name, options) => { menuArguments = { name, options }; return { on() {}, showAt(xy) { shownAt = xy; } }; };
-context.PVE.Utils.createCmdMenu(treeView, clickedRecord, null, 0, { stopEvent() { suppressed = true; }, getXY() { return [100, 200]; } });
+const deferredMenuCleanup = [];
+context.Ext.defer = (callback, delay) => {
+    assert(delay > 0, 'Ext.defer with zero delay executes synchronously');
+    deferredMenuCleanup.push(callback);
+};
+context.Ext.create = (name, options) => {
+    menuArguments = { name, options };
+    const menu = Object.assign({
+        callParent,
+        on(event, callback) { assert.equal(event, 'hide'); this.onHide = callback; },
+        showAt(xy) { shownAt = xy; },
+        destroy() {
+            this.destroyed = true;
+            this.items.forEach(item => { item.handler = null; });
+            this.workspace = null;
+        },
+    }, options);
+    definitions[name].initComponent.call(menu);
+    return menu;
+};
+const openedMenu = context.PVE.Utils.createCmdMenu(treeView, clickedRecord, null, 0, { stopEvent() { suppressed = true; }, getXY() { return [100, 200]; } });
 assert(suppressed);
 assert.deepEqual(shownAt, [100, 200]);
 assert.equal(menuArguments.name, 'PVE.betterdocker.CmdMenu');
 assert.equal(menuArguments.options.pveSelNode, clickedRecord);
+// Ext.menu.Item hides its parent before it reads and invokes its handler.
+for (const label of ['Start', 'Shutdown', 'Restart', 'Console', 'Edit deployment', 'Remove']) {
+    const record = { data: Object.assign({}, clickedRecord.data, { status: label === 'Start' ? 'stopped' : 'running' }) };
+    const menu = context.PVE.Utils.createCmdMenu(treeView, record, null, 0, { stopEvent() {}, getXY() { return [100, 200]; } });
+    const item = menu.items.find(entry => entry.text === label);
+    assert.equal(item.disabled, false);
+    menu.onHide();
+    assert(!menu.destroyed, `${label}: hide must leave the item alive until its click handler runs`);
+    assert.equal(typeof item.handler, 'function');
+    let confirmed = false;
+    context.Ext.Msg = { confirm() { confirmed = true; } };
+    item.handler();
+    if (label === 'Remove') { assert(confirmed); }
+    else if (label === 'Console') { assert.equal(navigation.at(-1), 'console'); }
+    else if (label === 'Edit deployment') { assert.equal(consoleRequest.method, 'GET'); }
+    else { assert.equal(consoleRequest.params.action, { Start: 'start', Shutdown: 'stop', Restart: 'restart' }[label]); }
+    deferredMenuCleanup.shift()();
+    assert(menu.destroyed, `${label}: the hidden menu must be cleaned up after the handler`);
+}
+openedMenu.onHide();
+deferredMenuCleanup.shift()();
 assert.equal(context.PVE.Utils.createCmdMenu(treeView, { data: { type: 'lxc' } }), 'native-menu');
 context.Proxmox.UserName = 'user@pve';
 const restrictedMenu = { pveSelNode: clickedRecord, workspace: menuWorkspace, callParent };
 definitions['PVE.betterdocker.CmdMenu'].initComponent.call(restrictedMenu);
 assert(restrictedMenu.items.filter(item => item.handler).every(item => item.disabled));
 context.Proxmox.UserName = 'root@pam';
+const createCT = { itemId: 'createct' };
+let nodeMenuInsert;
+const nodeMenu = { nodename: 'pve-selected', items: { indexOf: item => item === createCT ? 1 : -1 },
+    getComponent: id => id === 'createct' ? createCT : undefined,
+    insert: (index, item) => { nodeMenuInsert = { index, item }; } };
+overrides.get(nodeMenuClass).initComponent.call(nodeMenu);
+assert(nodeMenu.nativeInitialized);
+assert.equal(nodeMenuInsert.index, 2, 'Create DCT must follow Create CT');
+assert.equal(nodeMenuInsert.item.text, 'Create DCT');
+assert.equal(nodeMenuInsert.item.disabled, false);
+let wizardShown = false;
+context.Ext.create = (name, options) => {
+    assert.equal(name, 'PVE.betterdocker.CreateWizard');
+    assert.equal(options.nodename, 'pve-selected');
+    return { show() { wizardShown = true; } };
+};
+nodeMenuInsert.item.handler();
+assert(wizardShown);
+context.Proxmox.UserName = 'user@pve';
+overrides.get(nodeMenuClass).initComponent.call(nodeMenu);
+assert.equal(nodeMenuInsert.item.disabled, true);
+context.Proxmox.UserName = 'root@pam';
 console.log('Silent shutdown/restart and project-scoped native context menu passed');
+console.log('Node context menu Create DCT ordering, permissions and selected-node wizard passed');
