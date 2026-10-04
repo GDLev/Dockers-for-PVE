@@ -22,12 +22,26 @@ sub output {
     return $text;
 }
 
+sub worker_id {
+    my ($value) = @_;
+    # Metadata and subprocess output are tainted under pvedaemon's perl -T.
+    # Only validated captures may become part of the worker's task-log path.
+    if (defined($value) && $value =~ /\A([1-9][0-9]{2,8})\z/) {
+        return $1;
+    }
+    if (defined($value) && $value =~ /\A([0-9a-f]{32})\z/) {
+        return $1; # Existing projects without a numeric ID.
+    }
+    die "Invalid Docker worker ID\n";
+}
+
 sub summaries {
     my $directory = '/etc/pve/betterdocker';
     my @items;
     if (opendir(my $dh, $directory)) {
         while (my $file = readdir($dh)) {
-            next unless $file =~ /^[0-9a-f]{32}\.json$/;
+            next unless $file =~ /\A([0-9a-f]{32}\.json)\z/;
+            $file = $1;
             eval {
                 open(my $fh, '<', "$directory/$file") or die $!;
                 local $/;
@@ -54,7 +68,7 @@ sub reserve_guest_id {
         $vmid = output($args); chomp $vmid;
     });
     die $@ if $@;
-    return $vmid;
+    return worker_id($vmid);
 }
 
 sub migrate_ids {
@@ -68,7 +82,7 @@ sub task_id {
     my ($identifier, $node) = @_;
     for my $item (@{summaries()}) {
         if ($item->{id} eq $identifier && $item->{node} eq $node) {
-            return $item->{vmid} // $identifier;
+            return worker_id($item->{vmid} // $identifier);
         }
     }
     die "Docker project does not exist on this node\n";
@@ -144,6 +158,7 @@ __PACKAGE__->register_method({
         if (my $err = $@) { unlink $path; die $err; }
         my $rpcenv = PVE::RPCEnvironment::get();
         my $identifier = output(['new-id']); chomp $identifier;
+        $identifier = worker_id($identifier);
         my $data = decode_json($param->{deployment});
         my $vmid = eval { reserve_guest_id($identifier, $param->{node}, $data->{vmid}); };
         if (my $err = $@) { unlink $path; die $err; }
@@ -200,8 +215,10 @@ __PACKAGE__->register_method({
     code => sub {
         my ($param) = @_;
         my $rpcenv = PVE::RPCEnvironment::get();
-        return $rpcenv->fork_worker('betterdocker' . $param->{action}, task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
-            PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $param->{action}]);
+        $param->{action} =~ /\A(start|stop|restart|delete)\z/ or die "Invalid Docker action\n";
+        my $action = $1;
+        return $rpcenv->fork_worker('betterdocker' . $action, task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $action]);
         });
     },
 });
