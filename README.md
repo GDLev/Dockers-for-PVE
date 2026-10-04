@@ -6,14 +6,24 @@ Każda maszyna Docker to **osobny nieuprzywilejowany LXC z Debianem, Docker Engi
 
 ## Instalacja
 
-Skopiuj cały projekt na host Proxmox VE i uruchom z tego katalogu:
+Uruchom jako **root na hoście Proxmox VE** — instalacja jedną komendą:
+
+```bash
+curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash
+```
+
+Skrypt `install.sh` pobiera archiwum domyślnej gałęzi do katalogu tymczasowego i uruchamia `start.sh`, który wykonuje `apt-get update` oraz instaluje zależności (`python3`, `ca-certificates`). Po zakończeniu usuwa pobraną kopię projektu. Git nie jest wymagany; do pobrania potrzebne są `curl` i `tar`. Ponowne uruchomienie tej samej komendy pobiera aktualny projekt i ponownie instaluje integrację.
+
+Adres skryptu i archiwum musi być dostępny bez logowania. Dla prywatnego repozytorium pobierz projekt po uwierzytelnieniu i uruchom lokalne `bash start.sh install`.
+
+Jeśli masz już kopię projektu, uruchom z jego katalogu:
 
 ```bash
 bash start.sh check
 bash start.sh install
 ```
 
-Wymagane: Proxmox VE 8 lub 9, Python 3 i standardowe narzędzia PVE. Instalator sprawdza strukturę plików konkretnej wersji. W klastrze zainstaluj dodatek **na każdym węźle**, również na węźle udostępniającym interfejs WWW.
+Wymagane: Proxmox VE 8 lub 9 i standardowe narzędzia PVE. Python 3 jest instalowany automatycznie; tryb `check` wymaga jego wcześniejszej dostępności. Instalator sprawdza strukturę plików konkretnej wersji. W klastrze zainstaluj dodatek **na każdym węźle**, również na węźle udostępniającym interfejs WWW.
 
 Instalacja restartuje `pvedaemon` i `pveproxy`. Nie restartuje maszyn. Kopie zmienianych plików trafiają do `/var/backups/betterdocker/`. Po instalacji odśwież przeglądarkę przez Ctrl+Shift+R i zaloguj się jako **root@pam**. Tworzenie przez dodatek jest obecnie dostępne wyłącznie dla root@pam; własny endpoint nie udostępnia wykonywania poleceń innym użytkownikom.
 
@@ -94,7 +104,7 @@ Wykonane lokalnie: testy Python dla walidacji, generowania Compose, obsługi zad
 
 ```bash
 python3 -m unittest discover -s tests -v
-bash -n start.sh scripts/docker-install.sh
+bash -n install.sh start.sh scripts/docker-install.sh
 node --check frontend/betterdocker.js
 node tests/test_frontend.js
 ```

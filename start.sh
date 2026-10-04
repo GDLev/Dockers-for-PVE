@@ -4,7 +4,7 @@ set -Eeuo pipefail
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ACTION=${1:-install}
 [[ $EUID -eq 0 ]] || { echo 'Uruchom jako root na hoście Proxmox VE.' >&2; exit 1; }
-for command in pveversion pct pvesh python3 perl systemctl flock; do
+for command in pveversion pct pvesh perl systemctl flock; do
     command -v "$command" >/dev/null || { echo "Brak: $command" >&2; exit 1; }
 done
 exec 9>/run/lock/betterdocker-install.lock
@@ -13,10 +13,12 @@ VERSION=$(pveversion)
 [[ "$VERSION" =~ pve-manager/(8|9)\. ]] || { echo "Nieobsługiwana wersja: $VERSION" >&2; exit 1; }
 case "$ACTION" in
     check)
+        command -v python3 >/dev/null || { echo 'Brak Python 3. Uruchom najpierw instalację.' >&2; exit 1; }
         python3 "$PROJECT_DIR/scripts/patch.py" check
         echo 'Struktura plików Proxmox jest zgodna. Test runtime wymaga instalacji.'
         exit 0 ;;
     uninstall)
+        command -v python3 >/dev/null || { echo 'Brak Python 3 wymaganego do odinstalowania.' >&2; exit 1; }
         python3 "$PROJECT_DIR/scripts/patch.py" remove
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
         systemctl restart pvedaemon pveproxy
@@ -28,6 +30,9 @@ case "$ACTION" in
     install|repair) ;;
     *) echo 'Użycie: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
 esac
+echo 'Aktualizuję indeks pakietów i instaluję zależności BetterDocker.'
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates
 python3 "$PROJECT_DIR/scripts/patch.py" check
 BACKUP_DIR="/var/backups/betterdocker/$(date +%Y%m%d-%H%M%S)-$$"
 install -d -m 0700 "$BACKUP_DIR"
