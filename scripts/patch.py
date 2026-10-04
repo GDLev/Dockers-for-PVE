@@ -16,24 +16,36 @@ use PVE::API2::BetterDocker;
 PVE::API2::BetterDocker::hook_resources();
 # END BETTERDOCKER
 '''
+VMID_BLOCK = '''# BEGIN BETTERDOCKER
+    if (-e "/etc/pve/betterdocker/ids/$vmid.json") {
+        return undef if $noerr;
+        die "DCT $vmid already exists\\n";
+    }
+# END BETTERDOCKER
+'''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=14" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=15" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker.js?v=14"></script>
+<script src="/pve2/js/betterdocker.js?v=15"></script>
 <!-- END BETTERDOCKER -->'''
 
 
 def transform(text, kind, remove=False):
-    block = NODE_BLOCK if kind == 'node' else CLUSTER_BLOCK if kind == 'cluster' else UI_BLOCK
+    block = NODE_BLOCK if kind == 'node' else CLUSTER_BLOCK if kind == 'cluster' else VMID_BLOCK if kind == 'vmid' else UI_BLOCK
     if not remove and block in text:
         return text
-    pattern = (r'# BEGIN BETTERDOCKER\n.*?# END BETTERDOCKER\n' if kind in ('node', 'cluster')
+    pattern = (r'# BEGIN BETTERDOCKER\n.*?# END BETTERDOCKER\n' if kind in ('node', 'cluster', 'vmid')
                else r'<!-- BEGIN BETTERDOCKER -->\n.*?<!-- END BETTERDOCKER -->\n?')
     text = re.sub(pattern, '', text, flags=re.S)
     if remove:
         return text
+    if kind == 'vmid':
+        anchor = re.search(r'sub check_vmid_unused \{\s*my \(\$vmid, \$noerr\) = @_;\n', text)
+        if not anchor:
+            raise RuntimeError('Unsupported Cluster library; refusing ID patch')
+        return text[:anchor.end()] + block + text[anchor.end():]
     if kind == 'cluster':
         if "name => 'resources'" not in text or not re.search(r'\n1;\s*$', text):
             raise RuntimeError('Unsupported Cluster.pm; refusing patch')
@@ -73,7 +85,8 @@ def main():
     root = Path(args.root)
     files = [(root / 'usr/share/perl5/PVE/API2/Nodes.pm', 'node'),
              (root / 'usr/share/pve-manager/index.html.tpl', 'ui'),
-             (root / 'usr/share/perl5/PVE/API2/Cluster.pm', 'cluster')]
+             (root / 'usr/share/perl5/PVE/API2/Cluster.pm', 'cluster'),
+             (root / 'usr/share/perl5/PVE/Cluster.pm', 'vmid')]
     # Preflight both targets before the first mutation.
     changes = [(path, transform(path.read_text(), kind, args.action == 'remove')) for path, kind in files]
     if args.action != 'check':

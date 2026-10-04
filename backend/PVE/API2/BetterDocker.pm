@@ -6,6 +6,7 @@ use File::Temp qw(tempfile);
 use JSON qw(decode_json);
 use PVE::RPCEnvironment;
 use PVE::Tools;
+use PVE::Cluster;
 use PVE::AccessControl;
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 
@@ -40,8 +41,60 @@ sub summaries {
     return \@items;
 }
 
+sub reserve_guest_id {
+    my ($identifier, $node, $preferred) = @_;
+    my $vmid;
+    PVE::Cluster::cfs_lock_file('datacenter.cfg', 10, sub {
+        if (!defined($preferred) || $preferred eq '') {
+            my $next = PVE::API2::Cluster->map_method_by_name('nextid');
+            $preferred = $next->{code}->({});
+        }
+        my $args = ['reserve-id', $identifier, $node];
+        push @$args, $preferred if defined($preferred) && $preferred ne '';
+        $vmid = output($args); chomp $vmid;
+    });
+    die $@ if $@;
+    return $vmid;
+}
+
+sub migrate_ids {
+    for my $item (@{summaries()}) {
+        next if $item->{vmid};
+        reserve_guest_id($item->{id}, $item->{node});
+    }
+}
+
+sub task_id {
+    my ($identifier, $node) = @_;
+    for my $item (@{summaries()}) {
+        if ($item->{id} eq $identifier && $item->{node} eq $node) {
+            return $item->{vmid} // $identifier;
+        }
+    }
+    die "Docker project does not exist on this node\n";
+}
+
 # Called after Cluster.pm has registered its resource method. No new daemon is exposed.
 sub hook_resources {
+    my $next = PVE::API2::Cluster->map_method_by_name('nextid');
+    if ($next) {
+        my $original_next = $next->{code};
+        $next->{code} = sub {
+            my ($param) = @_;
+            if ($param->{vmid}) {
+                PVE::Cluster::check_vmid_unused($param->{vmid});
+                return $original_next->($param);
+            }
+            my $candidate = $original_next->($param);
+            my $conf = PVE::Cluster::cfs_read_file('datacenter.cfg');
+            my $upper = $conf->{'next-id'}->{upper} // 1000000;
+            while ($candidate < $upper) {
+                return $candidate if PVE::Cluster::check_vmid_unused($candidate, 1);
+                $candidate++;
+            }
+            die "No free guest ID available\n";
+        };
+    }
     my $info = PVE::API2::Cluster->map_method_by_name('resources');
     my $original = $info->{code};
     $info->{returns}->{items}->{properties}->{text} = { type => 'string', optional => 1 };
@@ -56,7 +109,8 @@ sub hook_resources {
             my $status = $item->{status};
             $status = 'unknown' if exists($nodes{$item->{node}}) && $nodes{$item->{node}} ne 'online';
             push @$resources, {
-                id => "docker/$item->{id}", type => 'docker', name => $item->{name}, text => $item->{name},
+                id => "docker/$item->{id}", vmid => $item->{vmid}, type => 'docker', name => $item->{name},
+                text => $item->{vmid} ? "$item->{vmid} ($item->{name})" : $item->{name},
                 node => $item->{node}, status => $status, uptime => $status eq 'running' ? 1 : 0,
                 hastate => 'unmanaged',
             };
@@ -90,11 +144,16 @@ __PACKAGE__->register_method({
         if (my $err = $@) { unlink $path; die $err; }
         my $rpcenv = PVE::RPCEnvironment::get();
         my $identifier = output(['new-id']); chomp $identifier;
-        my $upid = eval { $rpcenv->fork_worker('betterdocker', $identifier, $rpcenv->get_user(), sub {
-            eval { PVE::Tools::run_command([$helper, 'create', $path, $param->{node}, $identifier]); };
-            my $err = $@; unlink $path; die $err if $err;
-        }); };
+        my $data = decode_json($param->{deployment});
+        my $vmid = eval { reserve_guest_id($identifier, $param->{node}, $data->{vmid}); };
         if (my $err = $@) { unlink $path; die $err; }
+        my $upid = eval { $rpcenv->fork_worker('betterdockercreate', $vmid, $rpcenv->get_user(), sub {
+            eval { PVE::Tools::run_command([$helper, 'create', $path, $param->{node}, $identifier]); };
+            my $err = $@; unlink $path;
+            output(['release-id', $identifier]) if $err;
+            die $err if $err;
+        }); };
+        if (my $err = $@) { unlink $path; output(['release-id', $identifier]); die $err; }
         return $upid;
     },
 });
@@ -114,7 +173,7 @@ __PACKAGE__->register_method({
         eval { PVE::Tools::run_command([$helper, 'validate', $path]); };
         if (my $err = $@) { unlink $path; die $err; }
         my $rpcenv = PVE::RPCEnvironment::get();
-        my $upid = eval { $rpcenv->fork_worker('betterdocker', $param->{id}, $rpcenv->get_user(), sub {
+        my $upid = eval { $rpcenv->fork_worker('betterdockerupdate', task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
             eval { PVE::Tools::run_command([$helper, 'update', $param->{id}, $param->{node}, $path]); };
             my $err = $@; unlink $path; die $err if $err;
         }); };
@@ -141,7 +200,7 @@ __PACKAGE__->register_method({
     code => sub {
         my ($param) = @_;
         my $rpcenv = PVE::RPCEnvironment::get();
-        return $rpcenv->fork_worker('betterdocker', $param->{id}, $rpcenv->get_user(), sub {
+        return $rpcenv->fork_worker('betterdocker' . $param->{action}, task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
             PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $param->{action}]);
         });
     },
@@ -177,7 +236,7 @@ __PACKAGE__->register_method({
         chmod 0600, $path;
         print $fh $param->{settings}; close $fh;
         my $rpcenv = PVE::RPCEnvironment::get();
-        my $upid = eval { $rpcenv->fork_worker('betterdocker', $param->{id}, $rpcenv->get_user(), sub {
+        my $upid = eval { $rpcenv->fork_worker('betterdockersettings', task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
             eval { PVE::Tools::run_command([$helper, 'settings', $param->{id}, $param->{node}, $param->{service}, $path]); };
             my $err = $@; unlink $path; die $err if $err;
         }); };
@@ -209,7 +268,7 @@ __PACKAGE__->register_method({
         PVE::Tools::run_command(['/usr/bin/termproxy', '--help'], outfunc => sub { $help .= $_[0]; });
         my $modern = $help =~ /--ticket-fd/;
         my $ticket = PVE::AccessControl::assemble_vnc_ticket($user, $authpath, $modern ? $port : undef);
-        my $upid = $rpcenv->fork_worker('betterdockerconsole', $param->{id}, $user, sub {
+        my $upid = $rpcenv->fork_worker('betterdockerconsole', task_id($param->{id}, $param->{node}), $user, sub {
             my $cmd = ['/usr/bin/termproxy', $port, '--path', $authpath, '--perm', 'Sys.Console'];
             if ($modern) {
                 pipe(my $rd, my $wr) or die "ticket pipe: $!";

@@ -21,6 +21,51 @@ METADATA = Path('/etc/pve/betterdocker')
 LOCK = Path('/run/lock/betterdocker-projects.lock')
 PROC = Path('/proc')
 CGROUP = Path('/sys/fs/cgroup')
+PVE_NODES = Path('/etc/pve/nodes')
+
+
+def reserved_ids():
+    registry = METADATA / 'ids'
+    return {int(path.stem): json.loads(path.read_text()) for path in registry.glob('*.json')}
+
+
+def reserve_id(identifier, node, preferred=None):
+    """Called under the cluster datacenter.cfg lock by the API/installer."""
+    project_id(identifier)
+    registry = reserved_ids()
+    for vmid, entry in registry.items():
+        if entry['id'] == identifier:
+            path = METADATA / (identifier + '.json')
+            if path.exists():
+                info = json.loads(path.read_text())
+                info['vmid'] = vmid
+                write_json(path, info)
+            return vmid
+    occupied = set(registry)
+    occupied.update(int(path.stem) for kind in ('qemu-server', 'lxc')
+                    for path in PVE_NODES.glob('*/' + kind + '/*.conf') if path.stem.isdigit())
+    occupied.update(int(info['vmid']) for info in summaries() if info.get('vmid'))
+    if preferred not in (None, ''):
+        vmid = int(preferred)
+        if not 100 <= vmid <= 999999999:
+            raise ValueError('DCT ID must be between 100 and 999999999')
+        if vmid in occupied:
+            raise ValueError(f'Guest ID {vmid} is already in use')
+    else:
+        vmid = next(value for value in range(100, 1000000) if value not in occupied)
+    write_json(METADATA / 'ids' / f'{vmid}.json', {'id': identifier, 'node': node})
+    path = METADATA / (identifier + '.json')
+    if path.exists():
+        info = json.loads(path.read_text())
+        info['vmid'] = vmid
+        write_json(path, info)
+    return vmid
+
+
+def release_id(identifier):
+    for vmid, entry in reserved_ids().items():
+        if entry['id'] == identifier:
+            (METADATA / 'ids' / f'{vmid}.json').unlink()
 
 
 def run(args, **kwargs):
@@ -34,6 +79,11 @@ def capture(args):
 
 
 def write_json(path, value):
+    # A refresh that started before migration must not overwrite the assigned ID.
+    if path.parent == METADATA and isinstance(value, dict) and value.get('id') and not value.get('vmid'):
+        vmid = next((number for number, entry in reserved_ids().items() if entry['id'] == value['id']), None)
+        if vmid:
+            value = dict(value, vmid=vmid)
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(value, indent=2) + '\n'
     if path.exists() and path.read_text() == content:
@@ -77,9 +127,12 @@ def summaries():
 def validate(data):
     if not isinstance(data, dict):
         raise ValueError('Deployment must be an object')
-    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu'}
+    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid'}
     if set(data) - allowed:
         raise ValueError('Unknown deployment setting')
+    vmid = data.get('vmid')
+    if vmid not in (None, '') and (isinstance(vmid, bool) or not isinstance(vmid, int) or not 100 <= vmid <= 999999999):
+        raise ValueError('DCT ID must be an integer between 100 and 999999999')
     name = data.get('name', '')
     if not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}', name):
         raise ValueError('Name must contain 1–63 letters, numbers, dots, underscores or hyphens')
@@ -745,6 +798,12 @@ def create(data, node, identifier=None):
     with locked():
         if (METADATA / (identifier + ".json")).exists() or (ROOT / identifier).exists():
             raise ValueError("Project ID already exists")
+        vmid = next((vmid for vmid, entry in reserved_ids().items() if entry['id'] == identifier), None)
+        if vmid is None:
+            raise ValueError('DCT ID must be reserved through the Proxmox API before deployment')
+        if any((PVE_NODES / host.name / kind / f'{vmid}.conf').exists()
+               for host in PVE_NODES.iterdir() for kind in ('qemu-server', 'lxc')):
+            raise ValueError(f'Guest ID {vmid} is already in use by VM or LXC')
         network_preflight(data)
         directory = ROOT / identifier
         try:
@@ -753,7 +812,7 @@ def create(data, node, identifier=None):
             shutil.rmtree(directory, ignore_errors=True)
             raise
         write_json(directory / 'request.json', data)
-        info = {'id': identifier, 'node': node, 'name': data['name'], 'bridge': data['bridge'],
+        info = {'id': identifier, 'vmid': vmid, 'node': node, 'name': data['name'], 'bridge': data['bridge'],
                 'address': data['address'], 'status': 'creating', 'created': int(time.time()),
                 'expected': sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values()),
                 'ipv4mode': data.get('ipv4mode', 'static'), 'cidr': data.get('cidr', ''),
@@ -832,6 +891,7 @@ def action(identifier, node, operation):
             # Reserve the metadata until the owned alias is successfully released.
             remove_network(info)
             (METADATA / (identifier + '.json')).unlink()
+            release_id(identifier)
             print(f'Project removed. Volumes and bind-mount data are retained at {directory}.')
         else:
             info.pop('deployment', None)
@@ -845,6 +905,8 @@ def action(identifier, node, operation):
 def update(identifier, node, data):
     with locked():
         existing = detail(identifier, node)
+        if data.get('vmid') and data['vmid'] != existing.get('vmid'):
+            raise ValueError('DCT ID cannot be changed during deployment edits')
         previous = existing['deployment']
         for key in ('bridge', 'name', 'ipv4mode', 'hwaddr', 'mtu'):
             default = 'static' if key == 'ipv4mode' else 0 if key == 'mtu' else ''
@@ -887,11 +949,16 @@ def restore(node):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata'])
+    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
-    if args.operation == 'new-id':
+    if args.operation == 'reserve-id':
+        print(reserve_id(values[0], values[1], values[2] if len(values) > 2 else None))
+    elif args.operation == 'release-id':
+        if not (METADATA / (project_id(values[0]) + '.json')).exists():
+            release_id(values[0])
+    elif args.operation == 'new-id':
         print(uuid.uuid4().hex)
     elif args.operation in ('validate', 'create'):
         data = validate(json.loads(Path(values[0]).read_text()))

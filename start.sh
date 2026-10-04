@@ -38,6 +38,7 @@ install -d -m 0700 "$BACKUP_DIR"
 cp -a /usr/share/perl5/PVE/API2/Nodes.pm "$BACKUP_DIR/Nodes.pm"
 cp -a /usr/share/pve-manager/index.html.tpl "$BACKUP_DIR/index.html.tpl"
 cp -a /usr/share/perl5/PVE/API2/Cluster.pm "$BACKUP_DIR/Cluster.pm"
+cp -a /usr/share/perl5/PVE/Cluster.pm "$BACKUP_DIR/Cluster-lib.pm"
 TARGETS=(
     /usr/local/lib/betterdocker/provision.py
     /usr/local/lib/betterdocker/docker-install.sh
@@ -61,6 +62,7 @@ rollback() {
     cp -a "$BACKUP_DIR/Nodes.pm" /usr/share/perl5/PVE/API2/Nodes.pm
     cp -a "$BACKUP_DIR/index.html.tpl" /usr/share/pve-manager/index.html.tpl
     cp -a "$BACKUP_DIR/Cluster.pm" /usr/share/perl5/PVE/API2/Cluster.pm
+    cp -a "$BACKUP_DIR/Cluster-lib.pm" /usr/share/perl5/PVE/Cluster.pm
     for index in "${!TARGETS[@]}"; do
         if [[ -e "$BACKUP_DIR/addon-$index" ]]; then
             cp -a "$BACKUP_DIR/addon-$index" "${TARGETS[$index]}"
@@ -90,6 +92,7 @@ bash /usr/local/lib/betterdocker/docker-install.sh
 systemctl daemon-reload
 systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer
 python3 "$PROJECT_DIR/scripts/patch.py" apply
+perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
 systemctl restart pvedaemon pveproxy
 systemctl is-active --quiet pvedaemon pveproxy

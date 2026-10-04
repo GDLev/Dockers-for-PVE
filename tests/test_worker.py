@@ -82,10 +82,12 @@ class WorkerTests(unittest.TestCase):
     def test_failed_compose_validation_does_not_allocate_host_ip(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), \
              patch.object(worker, 'locked', tempfile.TemporaryDirectory), patch.object(worker, 'current_node', return_value='pve'), \
+             patch.object(worker, 'reserved_ids', return_value={101: {'id': 'a' * 32, 'node': 'pve'}}), \
+             patch.object(worker, 'PVE_NODES', Path(folder)), \
              patch.object(worker, 'network_preflight'), patch.object(worker, 'prepare', side_effect=ValueError('Invalid YAML')), \
              patch.object(worker, 'ensure_address') as address:
             with self.assertRaisesRegex(ValueError, 'Invalid YAML'):
-                worker.create(BASE, 'pve')
+                worker.create(BASE, 'pve', 'a' * 32)
             address.assert_not_called()
             self.assertEqual(list(Path(folder).iterdir()), [])
 
@@ -114,6 +116,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_patch_is_idempotent_and_removable(self):
         for kind, source in [('node', "use PVE::API2::LXC;\n__PACKAGE__->register_method({ path => 'lxc' });\n1;\n"),
+                             ('vmid', 'sub check_vmid_unused {\n    my ($vmid, $noerr) = @_;\n    return 1;\n}\n'),
                              ('cluster', "__PACKAGE__->register_method({ name => 'resources' });\n1;\n"),
                              ('ui', '<head>\n<script src="/pve2/js/pvemanagerlib.js?ver=9"></script>\n</head>')]:
             modified = patcher.transform(source, kind)
@@ -122,7 +125,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(restored.split(), source.split())
 
     def test_unsupported_package_refused(self):
-        for kind in ['node', 'ui', 'cluster']:
+        for kind in ['node', 'ui', 'cluster', 'vmid']:
             with self.assertRaises(RuntimeError):
                 patcher.transform('unexpected package layout', kind)
 

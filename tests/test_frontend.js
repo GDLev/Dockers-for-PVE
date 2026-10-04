@@ -15,7 +15,7 @@ const nodeMenuClass = { prototype: { initComponent() { this.nativeInitialized = 
 const context = { window: null, console,
     PVE: { node: { CmdMenu: nodeMenuClass }, panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
-    Proxmox: { NodeName: 'pve', UserName: 'root@pam' },
+    Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
         override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
 };
@@ -303,3 +303,11 @@ assert.equal(nodeMenuInsert.item.disabled, true);
 context.Proxmox.UserName = 'root@pam';
 console.log('Silent shutdown/restart and project-scoped native context menu passed');
 console.log('Node context menu Create DCT ordering, permissions and selected-node wizard passed');
+
+for (const [operation, label] of Object.entries({ create: 'Deploy', start: 'Start', stop: 'Shutdown', restart: 'Restart', delete: 'Remove', console: 'Console' })) {
+    assert.equal(context.taskDescriptions['betterdocker' + operation]('', '101'), 'DCT 101 - ' + label);
+}
+assert(!context.taskDescriptions.betterdocker('', 'a'.repeat(32)).includes('a'.repeat(32)));
+assert(!context.taskDescriptions.betterdockerconsole('', 'a'.repeat(32)).includes('a'.repeat(32)));
+assert.equal(wizard.items[0].items.find(item => item.name === 'vmid').emptyText, 'Next available guest ID');
+console.log('Readable DCT task descriptions and numeric ID wizard passed');

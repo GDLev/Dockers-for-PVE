@@ -24,6 +24,7 @@ sub get_user { 'root@pam' }
 1;
 ''')
             (base / 'PVE/AccessControl.pm').write_text('package PVE::AccessControl; 1;')
+            (base / 'PVE/Cluster.pm').write_text('package PVE::Cluster; sub check_vmid_unused { 1 } 1;')
             (base / 'PVE/Tools.pm').write_text('package PVE::Tools; 1;')
             # Avoid relying on a locally installed Perl JSON distribution.
             (base / 'JSON.pm').write_text('''
@@ -43,12 +44,14 @@ for my $route (@main::registered) {
 }
 package PVE::API2::Cluster;
 our $info = { code => sub { [] }, returns => { items => { properties => { type => { enum => ['lxc', 'qemu'] } } } } };
-sub map_method_by_name { $info }
+sub map_method_by_name { $_[1] eq 'resources' ? $info : undef }
 package main;
 no warnings 'redefine';
-*PVE::API2::BetterDocker::summaries = sub { [{ id => 'a' x 32, node => 'pve', name => 'web', status => 'running', address => '192.0.2.50' }] };
+*PVE::API2::BetterDocker::summaries = sub { [{ id => 'a' x 32, vmid => 101, node => 'pve', name => 'web', status => 'running', address => '192.0.2.50' }] };
 PVE::API2::BetterDocker::hook_resources();
 my $result = $PVE::API2::Cluster::info->{code}->({});
+die 'numeric ID missing' unless $result->[0]->{vmid} == 101;
+die 'numeric task ID missing' unless PVE::API2::BetterDocker::task_id('a' x 32, 'pve') == 101;
 die 'missing Docker resource' unless $result->[0]->{type} eq 'docker';
 die 'config exposed' if $result->[0]->{deployment} || $result->[0]->{compose};
 die 'schema missing Docker' unless grep { $_ eq 'docker' } @{$PVE::API2::Cluster::info->{returns}->{items}->{properties}->{type}->{enum}};

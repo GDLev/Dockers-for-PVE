@@ -10,6 +10,14 @@
         failure: response => Ext.Msg.alert('Docker', response.htmlStatus),
     }, options));
     const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
+    const dockerTaskLabels = { create: 'Deploy', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
+        restart: 'Restart', delete: 'Remove', settings: 'Edit resources / options', console: 'Console' };
+    const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
+    Object.entries(dockerTaskLabels).forEach(([action, label]) => {
+        dockerTaskDescriptions['betterdocker' + action] = (type, id) =>
+            (/^\d+$/.test(String(id)) ? 'DCT ' + id : 'Docker') + ' - ' + label;
+    });
+    Proxmox.Utils.override_task_descriptions(dockerTaskDescriptions);
     const dockerAction = (info, operation, target) => request({
         url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1] + '/action',
         method: 'POST', params: { action: operation }, waitMsgTarget: target,
@@ -19,6 +27,7 @@
         const common = { name: values.name, mode: values.mode, environment: values.environment || '',
             bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
             hwaddr: values.hwaddr || '', mtu: values.mtu || '' };
+        if (values.vmid) { common.vmid = Number(values.vmid); }
         return Object.assign(common, values.mode === 'compose' ? { compose: values.compose } :
             { image: values.image, ports: values.ports || '' });
     };
@@ -67,6 +76,7 @@
             if (!a.groupbyid === !b.groupbyid && typeA in guestOrder && typeB in guestOrder) {
                 if (typeA !== typeB) { return guestOrder[typeA] - guestOrder[typeB]; }
                 if (typeA === 'docker') {
+                    if (a.vmid && b.vmid && a.vmid !== b.vmid) { return a.vmid - b.vmid; }
                     return String(a.name || a.text || '').localeCompare(String(b.name || b.text || '')) ||
                         String(a.id).localeCompare(String(b.id));
                 }
@@ -74,7 +84,7 @@
             return originalSort.call(this, node1, node2);
         },
         addChildSorted: function (node, info) {
-            if (info.type === 'docker') { info.text = info.name; }
+            if (info.type === 'docker') { info.text = info.vmid ? info.vmid + ' (' + info.name + ')' : info.name; }
             return originalAdd.apply(this, arguments);
         },
     });
@@ -95,6 +105,9 @@
                             if (bridge) { bridge.setNodename(value); }
                         } } }),
                     field('name', 'Project name', defaults.name || '', { allowBlank: false, readOnly: Boolean(me.projectId) }),
+                    field('vmid', 'DCT ID', defaults.vmid || me.vmid || '', { xtype: 'numberfield',
+                        minValue: 100, maxValue: 999999999, allowDecimals: false, readOnly: Boolean(me.projectId),
+                        emptyText: 'Next available guest ID' }),
                     field('mode', 'Deploy from', defaults.mode || 'compose', { xtype: 'combobox', editable: false,
                         queryMode: 'local', allowBlank: false,
                         store: [['compose', 'Docker Compose'], ['image', 'Docker image']],
@@ -146,7 +159,7 @@
                 }],
                 listeners: { show: function () {
                     const values = this.up('window').getValues();
-                    const data = [{ key: 'Node', value: values.nodename }, { key: 'Project', value: values.name },
+                    const data = [{ key: 'Node', value: values.nodename }, { key: 'DCT ID', value: values.vmid || 'Next available guest ID' }, { key: 'Project', value: values.name },
                         { key: 'Deployment', value: values.mode === 'compose' ? 'Docker Compose' : values.image },
                         { key: 'Bridge', value: values.bridge }, { key: 'IPv4', value: values.ipv4mode === 'dhcp' ? 'Assigned by DHCP' : values.address },
                         { key: 'MAC address', value: values.hwaddr || 'Auto-generated' },
@@ -408,7 +421,7 @@
             };
             const act = operation => dockerAction(info, operation, me);
             const editDeployment = () => request({ url, method: 'GET', success: response => {
-                Ext.create('PVE.betterdocker.CreateWizard', { projectId: identifier, nodename: info.node,
+                Ext.create('PVE.betterdocker.CreateWizard', { projectId: identifier, vmid: info.vmid, nodename: info.node,
                     deployment: response.result.data.deployment }).show();
             } });
             const editSettings = (group, selectedKey) => {
@@ -468,7 +481,7 @@
                 iconCls: 'fa fa-' + icon, layout: 'anchor', scrollable: true, bodyPadding: 0,
                 defaults: { anchor: '100%' }, items, tbar,
                 listeners: { afterrender: reload, activate: reload } }, extra);
-            me.title = 'Docker (' + info.name + ') on node \'' + info.node + '\'';
+            me.title = 'Docker ' + (info.vmid ? info.vmid + ' ' : '') + '(' + info.name + ') on node \'' + info.node + '\'';
             me.hstateid = 'betterdocker-' + identifier;
             me.tbar = [
                 { text: 'Start', itemId: 'startButton', iconCls: 'fa fa-play', handler: () => act('start') },
@@ -507,8 +520,9 @@
                     [{ text: 'Refresh', handler: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) }],
                     { layout: 'fit', listeners: { afterrender: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) } }),
                 card('Task History', 'tasks', 'list-alt', [grid('taskGrid', [{ text: 'Start time', dataIndex: 'starttime',
-                    renderer: value => new Date(value * 1000).toLocaleString() }, { text: 'Type', dataIndex: 'type' },
-                    { text: 'User', dataIndex: 'user' }, { text: 'Status', dataIndex: 'status' }], ['upid', 'starttime', 'type', 'user', 'status'])],
+                    renderer: value => new Date(value * 1000).toLocaleString() }, { text: 'Description', dataIndex: 'type',
+                        renderer: (value, metadata, record) => Ext.htmlEncode(Proxmox.Utils.format_task_description(value, record.get('id'))) },
+                    { text: 'User', dataIndex: 'user' }, { text: 'Status', dataIndex: 'status' }], ['upid', 'starttime', 'type', 'id', 'user', 'status'])],
                     [{ text: 'Refresh', handler: () => me.loadDockerTasks() }],
                     { layout: 'fit', listeners: { afterrender: panel => {
                         panel.down('grid').on('itemdblclick', (_, record) => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: record.get('upid') }));
@@ -519,7 +533,7 @@
             me.items.splice(6, 0, history);
             me.loadDockerTasks = () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/tasks', method: 'GET',
                 params: { limit: 200 }, success: response => rows('taskGrid', response.result.data.filter(item =>
-                    (item.type === 'betterdocker' || item.type === 'betterdockerconsole') && item.id === identifier)) });
+                    item.type.startsWith('betterdocker') && (item.id === identifier || String(item.id) === String(info.vmid)))) });
             ['resources', 'dns', 'options'].forEach(group => {
                 const entry = me.items.find(item => item.itemId === group);
                 entry.items[0].listeners = { itemdblclick: (_, record) => editSettings(group, record.get('key')) };
@@ -553,7 +567,7 @@
                 { text: 'Edit deployment', iconCls: 'fa fa-fw fa-pencil', disabled: !allowed,
                     handler: () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1],
                         method: 'GET', success: response => Ext.create('PVE.betterdocker.CreateWizard', {
-                            projectId: info.id.split('/')[1], nodename: info.node, deployment: response.result.data.deployment,
+                            projectId: info.id.split('/')[1], vmid: info.vmid, nodename: info.node, deployment: response.result.data.deployment,
                         }).show() }) },
                 { xtype: 'menuseparator' },
                 { text: 'Remove', iconCls: 'fa fa-fw fa-trash', disabled: !allowed,
