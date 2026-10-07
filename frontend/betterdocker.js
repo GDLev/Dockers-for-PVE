@@ -32,7 +32,7 @@
         const url = URL.createObjectURL(new Blob([value], { type: 'text/plain;charset=utf-8' }));
         link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
     };
-    const importFile = (label, name, maximum) => ({ xtype: 'filefield', buttonOnly: true, buttonText: translate(label),
+    const importFile = (label, name, maximum) => ({ xtype: 'filefield', buttonOnly: true, hideLabel: true, buttonText: translate(label),
         listeners: { change: async function () {
             const file = this.fileInputEl.dom.files[0];
             if (!file) { return; }
@@ -46,7 +46,7 @@
                 if (!this.destroyed) { this.reset(); }
             }
         } } });
-    const importRow = (label, name, maximum) => ({ xtype: 'container', layout: 'hbox', margin: '0 0 5 105',
+    const importRow = (label, name, maximum) => ({ xtype: 'container', layout: 'hbox', margin: '0 0 5 0',
         items: [importFile(label, name, maximum)] });
     const statusText = value => translate(({ running: 'Running', stopped: 'Stopped', partial: 'Partially running',
         creating: 'Deploying', error: 'Deployment failed', 'network-error': 'Network error', unknown: 'Unknown' })[value] || value);
@@ -599,10 +599,10 @@
                 field('mode', 'Deploy from', defaults.mode, { xtype: 'combobox', editable: false, queryMode: 'local',
                     store: [['compose', 'Docker Compose'], ['image', 'Docker image']], listeners: { change: updateMode, afterrender: updateMode } }),
                 { xtype: 'container', itemId: 'composeFields', layout: 'anchor', items: [
-                    field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false })] },
+                    field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false }),
+                    importRow('Load YAML', 'compose', 240000)] },
                 { xtype: 'container', itemId: 'imageFields', layout: 'anchor', items: [field('image', 'Image', defaults.image || ''),
                     field('ports', 'Published ports', defaults.ports || '', { xtype: 'textarea', height: 120 })] },
-                importRow('Load YAML', 'compose', 240000),
             ], advancedItems: [
                 field('environment', '.env', defaults.environment || '', { xtype: 'textarea', height: 65, fieldCls: 'bd-source' }),
                 importRow('Load .env', 'environment', 16000),
