@@ -24,11 +24,11 @@ VMID_BLOCK = '''# BEGIN BETTERDOCKER
 # END BETTERDOCKER
 '''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=17" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.11" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker.js?v=17"></script>
+<script src="/pve2/js/betterdocker.js?v=19.11"></script>
 <!-- END BETTERDOCKER -->'''
 
 
@@ -79,7 +79,7 @@ def atomic_write(path, text):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['check', 'apply', 'remove'])
+    parser.add_argument('action', choices=['check', 'status', 'apply', 'remove'])
     parser.add_argument('--root', default='/')
     args = parser.parse_args()
     root = Path(args.root)
@@ -89,6 +89,11 @@ def main():
              (root / 'usr/share/perl5/PVE/Cluster.pm', 'vmid')]
     # Preflight both targets before the first mutation.
     changes = [(path, transform(path.read_text(), kind, args.action == 'remove')) for path, kind in files]
+    if args.action == 'status':
+        if any(path.read_text() != text for path, text in changes):
+            raise RuntimeError('BetterDocker integration requires repair: run start.sh repair')
+        print('BetterDocker integration is current')
+        return
     if args.action != 'check':
         for path, text in changes:
             atomic_write(path, text)

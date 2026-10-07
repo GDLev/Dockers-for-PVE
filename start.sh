@@ -19,6 +19,7 @@ case "$ACTION" in
         exit 0 ;;
     uninstall)
         command -v python3 >/dev/null || { echo 'Python 3 is required for uninstall.' >&2; exit 1; }
+        systemctl disable --now betterdocker-integration.timer 2>/dev/null || true
         python3 "$PROJECT_DIR/scripts/patch.py" remove
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
         systemctl restart pvedaemon pveproxy
@@ -29,9 +30,15 @@ case "$ACTION" in
     install|repair) ;;
     *) echo 'Usage: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
 esac
-echo 'Updating the package index and installing BetterDocker dependencies.'
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs
+if [[ "$ACTION" == install ]]; then
+    echo 'Updating the package index and installing BetterDocker dependencies.'
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs
+else
+    for command in python3 curl arping dhclient; do
+        command -v "$command" >/dev/null || { echo "Missing $command; run start.sh install." >&2; exit 1; }
+    done
+fi
 python3 "$PROJECT_DIR/scripts/patch.py" check
 BACKUP_DIR="/var/backups/betterdocker/$(date +%Y%m%d-%H%M%S)-$$"
 install -d -m 0700 "$BACKUP_DIR"
@@ -51,6 +58,9 @@ TARGETS=(
     /etc/systemd/system/betterdocker-refresh.timer
     /usr/local/lib/betterdocker/dhcp-hook.py
     /etc/systemd/system/betterdocker-dhcp@.service
+    /usr/local/lib/betterdocker/patch.py
+    /etc/systemd/system/betterdocker-integration.service
+    /etc/systemd/system/betterdocker-integration.timer
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -71,6 +81,7 @@ rollback() {
         fi
     done
     if [[ ! -e "$BACKUP_DIR/addon-8" ]]; then systemctl disable --now betterdocker-refresh.timer || true; fi
+    if [[ ! -e "$BACKUP_DIR/addon-13" ]]; then systemctl disable --now betterdocker-integration.timer || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-6" ]]; then systemctl disable --now betterdocker-addresses.service || true; fi
     systemctl daemon-reload || true
     systemctl restart pvedaemon pveproxy || true
@@ -88,9 +99,12 @@ install -m 0644 "$PROJECT_DIR/systemd/betterdocker-refresh.service" "${TARGETS[7
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-refresh.timer" "${TARGETS[8]}"
 install -m 0755 "$PROJECT_DIR/scripts/dhcp-hook.py" "${TARGETS[9]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-dhcp@.service" "${TARGETS[10]}"
+install -m 0755 "$PROJECT_DIR/scripts/patch.py" "${TARGETS[11]}"
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-integration.service" "${TARGETS[12]}"
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-integration.timer" "${TARGETS[13]}"
 bash /usr/local/lib/betterdocker/docker-install.sh
 systemctl daemon-reload
-systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer
+systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'

@@ -10,10 +10,11 @@ function callParent() {
 const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => info,
     getTypeOrder: type => ({ lxc: 0, qemu: 1, node: 2, storage: 4 })[type] ?? 9,
     nodeSortFn: (a, b) => a.data.vmid - b.data.vmid } };
-const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; } } };
+const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; }, selectById(id) { return id; } } };
 const nodeMenuClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
+const nodeConfigClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const context = { window: null, console,
-    PVE: { node: { CmdMenu: nodeMenuClass }, panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
+    PVE: { node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
@@ -24,14 +25,14 @@ vm.runInNewContext(fs.readFileSync('frontend/betterdocker.js', 'utf8'), context)
 const wizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(wizard);
 assert(wizard.initialized);
-assert.deepEqual(Array.from(wizard.items, item => item.title), ['Deployment', 'Network', 'Review']);
-const fields = wizard.items[0].items;
+assert.deepEqual(Array.from(wizard.items, item => item.title), ['General', 'Deployment', 'Network', 'Confirm']);
+const fields = [...wizard.items[0].column1, ...wizard.items[0].column2, ...wizard.items[1].items];
 assert.equal(fields.find(field => field.name === 'mode').value, 'compose');
 assert.equal(fields.find(field => field.itemId === 'imageFields').hidden, true);
 assert.equal(fields.find(field => field.itemId === 'imageFields').items[0].disabled, true);
 assert(!JSON.stringify(wizard.items).includes('ostemplate'));
 assert(!JSON.stringify(wizard.items).includes('pveLxc'));
-const network = wizard.items[1];
+const network = wizard.items[2];
 assert.equal(network.column1.find(field => field.name === 'bridge').fieldLabel, 'Bridge');
 assert(network.column1.find(field => field.name === 'hwaddr'));
 assert(network.column1.find(field => field.name === 'mtu'));
@@ -48,7 +49,7 @@ const inserted = [];
 const user = { ownerCt: { items: { indexOf: () => 2 }, insert: (_, button) => inserted.push(button) } };
 const workspace = { down: () => user };
 overrides.get(workspaceClass).initComponent.call(workspace);
-assert.equal(inserted[0].text, 'Create Docker');
+assert.equal(inserted[0].text, 'Create DCT');
 assert(workspace.initialized);
 overrides.get(workspaceClass).setContent.call(workspace, { pveSelNode: { data: { type: 'docker' } } });
 assert.equal(workspace.content.xtype, 'pveBetterDockerConfig');
@@ -60,12 +61,13 @@ assert.equal(groups.composeDisabled, false);
 assert.equal(groups.imageDisabled, true);
 assert(fs.readFileSync('frontend/docker.svg', 'utf8').includes('fill="#ffffff"'));
 console.log('English wizard, LXC-style IPv4/DHCP controls, Docker resource routing and ExtJS checks passed');
+context.Ext.state = { Manager: { get: () => ({}) } };
 const configPanel = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), node: 'pve', name: 'web' } },
     callParent, on() {}, down() { return null; } };
 definitions['PVE.betterdocker.Config'].initComponent.call(configPanel);
 assert.equal(definitions['PVE.betterdocker.Config'].extend, 'PVE.panel.Config');
 assert.deepEqual(Array.from(configPanel.items, card => card.title),
-    ['Summary', 'Console', 'Resources', 'Network', 'DNS', 'Options', 'Task History', 'Deployment', 'Logs']);
+    ['Summary', 'Console', 'Services', 'Resources', 'Network', 'DNS', 'Options', 'Task History', 'Snapshots', 'Deployment', 'Logs', 'Permissions']);
 assert(configPanel.items.every(card => card.itemId && card.iconCls));
 assert(configPanel.items.find(card => card.title === 'Resources').tbar.some(button => button.text === 'Edit'));
 assert.equal(configPanel.items.find(card => card.title === 'Console').xtype, 'pveBetterDockerConsole');
@@ -99,7 +101,7 @@ context.WebSocket = class {
 const events = {};
 const consolePanel = { apiUrl: '/nodes/pve/docker/' + 'a'.repeat(32), callParent,
     down(id) { return id === '#terminal' ? { getEl: () => ({ dom: {} }) } :
-        { getValue: () => id === '#container' ? 'b'.repeat(64) : '/bin/sh' }; },
+        { getValue: () => id === '#consoleContainer' ? 'b'.repeat(64) : '/bin/sh' }; },
     on(event, callback) { events[event] = callback; } };
 definitions['PVE.betterdocker.Console'].initComponent.call(consolePanel);
 consolePanel.tbar.find(button => button.text === 'Connect').handler();
@@ -151,11 +153,11 @@ console.log('Native Help fallback and layout recovery regression passed');
 
 const nativeStore = { startUpdate() {}, stopUpdate() {}, destroy() {} };
 context.Ext.create = () => nativeStore;
-context.Ext.state = { Manager: { getProvider: () => ({}) } };
+context.Ext.state = { Manager: { get: () => ({}), getProvider: () => ({}) } };
 const summaryView = { apiUrl: '/nodes/pve/docker/' + 'a'.repeat(32), projectName: 'app',
     pveSelNode: configPanel.pveSelNode, callParent, on() {}, mon() {} };
 definitions['PVE.betterdocker.Summary'].initComponent.call(summaryView);
-assert.equal(summaryView.tbar[1].xtype, 'proxmoxRRDTypeSelector');
+assert(summaryView.tbar.some(item => item.xtype === 'proxmoxRRDTypeSelector'));
 const summaryItems = summaryView.items[0].items;
 assert.equal(summaryItems[0].layout.type, 'hbox');
 assert.equal(summaryItems[0].items[1].xtype, 'pveBetterDockerNotes');
@@ -171,7 +173,7 @@ context.Proxmox.Utils.format_duration_long = value => String(value);
 context.Proxmox.Utils.render_cpu_usage = (value, cpus) => `${value * 100}% of ${cpus} CPU(s)`;
 context.Proxmox.Utils.render_size_usage = (used, max) => `${used} / ${max}`;
 const renderedSummary = { down(id) { return id === '#statusPanel' ? { setTitle: value => { summaryFields.title = value; } } :
-    { updateValue: (text, usage) => { summaryFields[id] = { text, usage }; }, setPrintBar() {} }; } };
+    { setText: text => { summaryFields[id] = { text }; }, updateValue: (text, usage) => { summaryFields[id] = { text, usage }; }, setPrintBar() {} }; } };
 const summaryData = { name: 'app', node: 'pve', status: 'running', address: '192.0.2.32',
     containers: [{ state: 'running' }], services: [{ name: 'app', settings: { memory: 512, swap: 0, cpus: 1, cpuunits: 0,
         pids: 0, dns: [], dns_search: [], restart: 'always' }, mounts: [], ports: [] }],
@@ -184,7 +186,7 @@ assert(summaryFields.title.includes('Uptime: 60'));
 const panelEvents = {};
 const lazyPanel = { pveSelNode: configPanel.pveSelNode, callParent,
     on(event, callback) { panelEvents[event] = callback; }, query() { return []; },
-    down(id) { return id === '#summary' ? { updateSnapshot() {} } : null; } };
+    down(id) { return id === '#summary' ? { updateSnapshot() {}, down() { return null; } } : null; } };
 context.Proxmox.Utils.setErrorMask = () => {};
 definitions['PVE.betterdocker.Config'].initComponent.call(lazyPanel);
 panelEvents.afterrender();
@@ -198,17 +200,22 @@ console.log('SWAP usage and Bootdisk size status rows passed');
 
 const createdWindows = [];
 context.Ext.Msg = { confirm: (title, message, callback) => callback('yes') };
+configPanel.query = () => [];
 context.Ext.create = (name, options) => { createdWindows.push({ name, options }); return {}; };
+configPanel.reloadDocker = () => {};
 const shutdownButton = configPanel.tbar.find(button => button.itemId === 'stopButton');
 shutdownButton.handler();
 assert.equal(consoleRequest.params.action, 'stop');
 consoleRequest.success({ result: { data: 'UPID:stop' } });
+configPanel.pendingTask = null;
 shutdownButton.menu[0].handler();
 assert.equal(consoleRequest.params.action, 'restart');
 consoleRequest.success({ result: { data: 'UPID:restart' } });
+configPanel.pendingTask = null;
 assert.equal(createdWindows.length, 0, 'shutdown and restart must not open TaskViewer');
 configPanel.tbar.find(button => button.itemId === 'startButton').handler();
 consoleRequest.success({ result: { data: 'UPID:start' } });
+configPanel.pendingTask = null;
 assert.equal(createdWindows.length, 0, 'start must not open TaskViewer');
 const clickedRecord = { data: { id: 'docker/' + 'c'.repeat(32), type: 'docker', node: 'pve-other', name: 'other-project', status: 'running' } };
 const navigation = [];
@@ -313,7 +320,7 @@ for (const [operation, label] of Object.entries({ create: 'Deploy', start: 'Star
 }
 assert(!context.taskDescriptions.betterdocker('', 'a'.repeat(32)).includes('a'.repeat(32)));
 assert(!context.taskDescriptions.betterdockerconsole('', 'a'.repeat(32)).includes('a'.repeat(32)));
-assert.equal(wizard.items[0].items.find(item => item.name === 'vmid').emptyText, 'Next available guest ID');
+assert.equal(wizard.items[0].column1.find(item => item.name === 'vmid').emptyText, 'Next available guest ID');
 console.log('Readable DCT task descriptions and numeric ID wizard passed');
 
 for (const [handler, operation] of [
@@ -337,9 +344,116 @@ for (const [handler, operation] of [
     assert.equal(consoleRequest.params.action, operation);
     const windowsBefore = createdWindows.length;
     consoleRequest.success({ result: { data: 'UPID:confirmed-action' } });
+    configPanel.pendingTask = null;
     assert.equal(createdWindows.length, windowsBefore, 'Confirmed action must not open task output');
 }
 context.Ext.Msg.confirm = () => { throw new Error('Start must not ask for confirmation'); };
 configPanel.tbar.find(button => button.itemId === 'startButton').handler();
 assert.equal(consoleRequest.params.action, 'start');
 console.log('Shutdown/restart confirmation and cancellation in toolbar and context menu passed');
+
+// Authentication is applied after workspace initialization on a fresh sign-in.
+let createDisabled = true;
+const signedIn = { down: () => ({ setDisabled(value) { createDisabled = value; } }) };
+context.Proxmox.UserName = 'root@pam';
+overrides.get(workspaceClass).onLogin.call(signedIn, { cap: {} });
+assert.equal(createDisabled, false);
+overrides.get(workspaceClass).onLogin.call(signedIn, null);
+assert.equal(createDisabled, true);
+console.log('Create DCT updates after sign-in and sign-out passed');
+
+// A running task blocks conflicting requests until the native task endpoint completes.
+let taskTick;
+context.setInterval = fn => { taskTick = fn; return 2; };
+context.Ext.Msg.confirm = (_title, _message, callback) => callback('yes');
+configPanel.pendingTask = null;
+configPanel.tbar.find(button => button.itemId === 'startButton').handler();
+consoleRequest.success({ result: { data: 'UPID:pending' } });
+const pendingRequest = consoleRequest;
+shutdownButton.handler();
+assert.equal(consoleRequest, pendingRequest);
+taskTick();
+assert(consoleRequest.url.includes('/tasks/UPID%3Apending/status'));
+consoleRequest.success({ result: { data: { status: 'stopped', exitstatus: 'OK' } } });
+assert.equal(configPanel.pendingTask, null);
+console.log('Task completion refresh and conflicting operation exclusion passed');
+
+assert.equal(configPanel.items.find(card => card.itemId === 'tasks').xtype, 'proxmoxNodeTasks');
+assert.equal(configPanel.items.find(card => card.itemId === 'tasks').preFilter.vmid, configPanel.pveSelNode.data.vmid);
+assert.equal(configPanel.tbar.filter(button => button.text === 'Help').length, 0, 'native Config supplies Help');
+assert.equal(definitions['PVE.betterdocker.DeploymentEdit'].extend, 'Proxmox.window.Edit');
+assert.equal(definitions['PVE.betterdocker.CodeArea'].extend, 'Ext.form.field.TextArea');
+assert(fs.readFileSync('frontend/betterdocker.css', 'utf8').includes('background-color: currentColor'));
+console.log('Native task filtering, single Help, native editor and theme-aware icons passed');
+
+// Native Tag View refresh must resolve all tagged clones to the original record.
+const sourceRecord = { data: { id: 'docker/' + 'a'.repeat(32), tags: 'prod;ui-smoke' } };
+const unrelatedRecord = { data: { id: 'lxc/100' } };
+const collection = { get(key) { return key === sourceRecord.data.id ? sourceRecord : key === 'lxc/100' ? unrelatedRecord : undefined; } };
+context.PVE.data = { ResourceStore: { data: collection } };
+overrides.get(workspaceClass).initComponent.call({ down() { return null; } });
+assert.equal(collection.get(sourceRecord.data.id + '-ui-smoke'), sourceRecord);
+assert.equal(collection.get(sourceRecord.data.id + '-prod'), sourceRecord);
+assert.equal(collection.get('lxc/100'), unrelatedRecord);
+assert.equal(collection.get('docker/' + 'b'.repeat(32) + '-prod'), undefined);
+const wrappedLookup = collection.get;
+overrides.get(workspaceClass).initComponent.call({ down() { return null; } });
+assert.equal(collection.get, wrappedLookup, 'install once when workspaces are recreated');
+console.log('Tag View refresh retains DCT clones and leaves unrelated lookups unchanged');
+
+const tagClone = { data: { id: sourceRecord.data.id + '-ui-smoke', realId: sourceRecord.data.id } };
+const taggedWorkspace = { down() { return { getStore() { return { getRootNode() { return { findChildBy(predicate) { return predicate(tagClone) ? tagClone : undefined; } }; } }; } }; } };
+assert.equal(overrides.get(workspaceClass).selectById.call(taggedWorkspace, sourceRecord.data.id), tagClone.data.id);
+assert.equal(overrides.get(workspaceClass).selectById.call(taggedWorkspace, 'lxc/100'), 'lxc/100');
+console.log('Global resource navigation resolves tagged DCT IDs without changing VM/CT routes');
+
+const diagnosticsMenu = { pveSelNode: { data: { node: "pve" } }, insertNodes(items) { this.menuItems = items; }, add() { throw new Error("Config cards must register native navigation"); } };
+overrides.get(nodeConfigClass).initComponent.call(diagnosticsMenu);
+assert(diagnosticsMenu.nativeInitialized);
+assert.equal(diagnosticsMenu.menuItems[0].itemId, "betterdocker");
+assert.equal(diagnosticsMenu.menuItems[0].xtype, "pveBetterDockerDiagnostics");
+console.log("Node diagnostics registers a native navigation item and lazy card");
+
+context.Proxmox.Utils.override_task_descriptions = descriptions => { context.taskDescriptions = descriptions; };
+context.gettext = value => ({ Summary: 'Podsumowanie', Network: 'Sieć' })[value] || value;
+vm.runInNewContext(fs.readFileSync('frontend/betterdocker.js', 'utf8'), context);
+const polishWizard = { callParent, down: () => null, query: () => [] };
+definitions['PVE.betterdocker.CreateWizard'].initComponent.call(polishWizard);
+assert.deepEqual(Array.from(polishWizard.items, item => item.title), ['Główne', 'Wdrożenie', 'Sieć', 'Potwierdź']);
+const polishPanel = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), node: 'pve', name: 'web', vmid: 103 } }, callParent, on() {}, down() { return null; } };
+definitions['PVE.betterdocker.Config'].initComponent.call(polishPanel);
+assert.equal(polishPanel.title, "DCT 103 (web) na węźle 'pve'");
+assert.equal(context.taskDescriptions.betterdockersettings('betterdockersettings', '103'), 'DCT 103 - Edytuj zasoby / opcje');
+console.log('Polish wizard, node heading and settings task description passed');
+
+assert(!fs.readFileSync("frontend/betterdocker.js", "utf8").includes("background-image"));
+assert(!fs.readFileSync("frontend/betterdocker.css", "utf8").includes("bd-code"));
+console.log("Compose fields have no decorative line-number background");
+
+assert.equal(definitions['PVE.betterdocker.CreateWizard'].width, 760);
+assert.equal(definitions['PVE.betterdocker.CreateWizard'].height, 570);
+assert.equal(definitions['PVE.betterdocker.DeploymentEdit'].width, 600);
+assert(wizard.items[0].column1 && wizard.items[0].column2);
+assert.equal(wizard.items[1].advancedItems[0].name, 'environment');
+assert(!JSON.stringify(wizard.items).includes('sourceLines'));
+console.log('Native LXC wizard dimensions, columns and advanced environment passed');
+
+// The native Snapshot window's value hook is not used by every PVE toolkit version.
+// DCT submission must send its action explicitly and keep saved snapshots immutable.
+let snapshotRequest;
+context.Proxmox.Utils.API2Request = options => { snapshotRequest = options; };
+const snapshotWindow = { isCreate: true, url: '/nodes/pve/docker/project/snapshot',
+    formPanel: { getForm: () => ({ isValid: () => true, getValues: () => ({ snapname: 'after', description: 'second', vmstate: 1 }) }) } };
+definitions['PVE.betterdocker.SnapshotEdit'].submit.call(snapshotWindow);
+assert.equal(snapshotRequest.method, 'POST');
+assert.deepEqual(JSON.parse(JSON.stringify(snapshotRequest.params)), { action: 'create', snapname: 'after', description: 'second' });
+snapshotWindow.isCreate = false;
+snapshotWindow.url += '/after/config';
+definitions['PVE.betterdocker.SnapshotEdit'].submit.call(snapshotWindow);
+assert.equal(snapshotRequest.method, 'PUT');
+assert.deepEqual(JSON.parse(JSON.stringify(snapshotRequest.params)), { description: 'second' });
+snapshotWindow.viewonly = true;
+snapshotRequest = null;
+definitions['PVE.betterdocker.SnapshotEdit'].submit.call(snapshotWindow);
+assert.equal(snapshotRequest, null);
+console.log('Native snapshot submission, immutable names and view-only access passed');

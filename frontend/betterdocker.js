@@ -3,31 +3,225 @@
     if (!window.PVE || !PVE.window || !PVE.window.Wizard || !PVE.StdWorkspace) {
         console.error('BetterDocker: unsupported Proxmox UI'); return;
     }
+
+    PVE.betterdockerTranslations = {
+    "Remove Snapshot": "Usuń migawkę",
+    "Snapshots": "Migawki", "Take Snapshot": "Utwórz migawkę", "Rollback": "Przywróć",
+    "Invalid snapshot name": "Nieprawidłowa nazwa migawki",
+    "Restore this snapshot? Current changes will be replaced. A recovery snapshot will be created first.": "Przywrócić tę migawkę? Bieżące zmiany zostaną zastąpione. Najpierw powstanie migawka ratunkowa.",
+    "Remove this snapshot?": "Usunąć tę migawkę?",
+    "Snapshots include configuration, container filesystems and owned writable data. Running services are frozen while data is captured, then resumed. RAM, external writable mounts and shared volumes are not supported. Rollback stops DCT and restores only the selected snapshot.": "Migawki obejmują konfigurację, systemy plików kontenerów i własne zapisywalne dane. Działające usługi są zamrażane na czas zapisu danych i następnie wznawiane. RAM, zewnętrzne zapisywalne mounty i współdzielone wolumeny nie są obsługiwane. Przywracanie zatrzymuje DCT i odtwarza wyłącznie wskazaną migawkę.",
+    "General": "Główne", "Confirm": "Potwierdź", "Project": "Projekt", "Service": "Usługa",
+    "Same as bridge": "Jak dla mostka",
+    "Next available guest ID": "Następny wolny ID",
+    "Container disk (MiB)": "Dysk kontenera (MiB)",
+    "Container disk limit": "Limit dysku kontenera",
+    "Project data disk": "Dysk danych projektu",
+    "Data disk (MiB)": "Dysk danych (MiB)",
+    "Edit data disk": "Edytuj dysk danych",
+    "Data disk includes writable project directories and owned local volumes. Stop all services first. Original data is retained as a recovery copy. Disks can only grow.": "Dysk danych obejmuje zapisywalne katalogi projektu i własne lokalne wolumeny. Najpierw zatrzymaj wszystkie usługi. Oryginalne dane pozostaną jako kopia odzyskiwania. Dysk można tylko powiększać.",
+    "Container disk limit excludes volumes and bind mounts. This host must support overlay2 on XFS with project quotas.": "Limit dysku kontenera nie obejmuje wolumenów ani bind mounts. Host musi obsługiwać overlay2 na XFS z project quotas.",
+    "Not supported by host": "Nieobsługiwane przez host",
+    "A data disk mount failure prevents Docker from starting on this node. Images and Docker logs are not part of this data disk.": "Błąd montowania dysku danych wstrzyma uruchomienie Dockera na tym węźle. Obrazy i logi Dockera nie są objęte tym dyskiem danych.",
+    "Create DCT": "Utwórz DCT",
+    "Review": "Przegląd",
+    "Edit resources / options": "Edytuj zasoby / opcje",
+    "on node": "na węźle",
+    "Docker help": "Pomoc Docker",
+    "Deploy from": "Źródło wdrożenia",
+    "Deployment": "Wdrożenie",
+    "Deploy": "Wdróż",
+    "Project name": "Nazwa projektu",
+    "DCT ID": "ID DCT",
+    "Compose YAML": "Compose YAML",
+    ".env (optional)": ".env (opcjonalnie)",
+    "Published ports": "Publikowane porty",
+    "Load YAML": "Wczytaj YAML",
+    "Load .env": "Wczytaj .env",
+    "Lines": "Wiersze",
+    "instances": "instancje",
+    "Validate Compose": "Sprawdź Compose",
+    "Edit deployment": "Edytuj wdrożenie",
+    "Partially running": "Częściowo uruchomiony",
+    "Deploying": "Wdrażanie",
+    "Deployment failed": "Wdrożenie nie powiodło się",
+    "Network error": "Błąd sieci",
+    "Services": "Usługi",
+    "Service": "Usługa",
+    "Instance": "Instancja",
+    "Health": "Stan aplikacji",
+    "Restarts": "Restarty",
+    "Exit code": "Kod zakończenia",
+    "No healthcheck": "Brak healthchecka",
+    "healthy": "sprawna",
+    "unhealthy": "niesprawna",
+    "starting": "uruchamianie",
+    "exited": "zakończona",
+    "restarting": "restartowanie",
+    "paused": "wstrzymana",
+    "dead": "usunięta",
+    "created": "utworzona",
+    "Live": "Na żywo",
+    "Follow": "Przewijaj",
+    "Restore Compose": "Przywróć Compose",
+    "Settings source": "Źródło ustawień",
+    "GUI override": "Nadpisane w GUI",
+    "Docker default": "Domyślne Docker",
+    "CPU limit": "Limit CPU",
+    "CPU units": "Waga CPU",
+    "PID limit": "Limit PID",
+    "DNS servers": "Serwery DNS",
+    "Search domains": "Domeny wyszukiwania",
+    "Restart policy": "Polityka restartu",
+    "Image": "Obraz",
+    "Container root filesystems": "Systemy plików kontenerów",
+    "Operation in progress": "Operacja w toku",
+    "Operation failed. Open Task History.": "Operacja nie powiodła się. Otwórz historię zadań.",
+    "Operation interrupted. Open Task History.": "Operacja przerwana. Otwórz historię zadań.",
+    "Interface settings are read-only": "Ustawienia interfejsu tylko do odczytu",
+    "Download YAML": "Pobierz YAML",
+    "Download": "Pobierz",
+    "File is too large": "Plik jest za duży",
+    "Waiting for DHCP": "Oczekiwanie na DHCP",
+    "Same as bridge": "Jak dla mostu",
+    "Next available guest ID": "Następny wolny ID zasobu",
+    "Auto-generated": "Generowany automatycznie",
+    "Assigned by DHCP": "Przydzielany przez DHCP",
+    "Read from Compose YAML": "Z Compose YAML",
+    "Project": "Projekt",
+    "MTU": "MTU",
+    "Gateway (IPv4)": "Brama (IPv4)",
+    "Inherited from host routing": "Z routingu hosta",
+    "All services": "Wszystkie usługi",
+    "All instances": "Wszystkie instancje",
+    "BetterDockers version": "Wersja BetterDockers",
+    "Proxmox version": "Wersja Proxmox",
+    "Integration": "Integracja",
+    "Maintenance timer": "Harmonogram utrzymania",
+    "Network restoration": "Odtwarzanie sieci",
+    "Projects": "Projekty",
+    "Docker storage": "Przestrzeń Docker",
+    "Storage usage": "Użycie przestrzeni",
+    "Repair required": "Wymagana naprawa",
+    "resources": "zasoby",
+    "dns": "DNS",
+    "options": "opcje",
+    "Uptime": "Czas działania",
+    "Container": "Kontener",
+    "Each DCT is a Compose project running on the Proxmox host.": "Każdy DCT to projekt Compose działający na hoście Proxmox.",
+    "Resources apply to each container of the selected service. GUI overrides persist across deployments. Restore Compose removes these overrides.": "Limity dotyczą każdego kontenera wybranej usługi. Ustawienia GUI obowiązują po ponownym wdrożeniu. Przywróć Compose usuwa te nadpisania.",
+    "Network settings are fixed after creation. Published ports use the dedicated project IP.": "Ustawienia sieci są stałe po utworzeniu projektu. Publikowane porty korzystają z oddzielnego adresu IP projektu.",
+    "Removal retains volumes, bind mounts and deployment files. VM/CT backup, HA and migration do not apply.": "Usunięcie zachowuje wolumeny, bind mounts i pliki wdrożenia. Backup VM/CT, HA i migracja nie obejmują DCT.",
+    "Health is reported only for services with a Docker healthcheck.": "Stan aplikacji jest dostępny tylko dla usług z Docker healthcheck.",
+    "Limits apply to each container of this service. Zero CPU, memory or PID limit means unlimited. With a memory limit, zero swap disables swap; -1 allows unlimited swap.": "Limity dotyczą każdego kontenera tej usługi. Limit CPU, pamięci lub PID równy zero oznacza brak limitu. Przy limicie pamięci swap=0 wyłącza swap, a -1 usuwa jego limit.",
+    "Separate entries with commas. Empty fields use Docker defaults.": "Oddziel wpisy przecinkami. Puste pola używają ustawień domyślnych Docker.",
+    "Choose a running container.": "Wybierz działający kontener.",
+    "Remove Docker project": "Usuń projekt Docker",
+    "Remove this project? Volumes and bind-mount data are retained.": "Usunąć projekt? Wolumeny i dane bind mounts zostaną zachowane.",
+    "Deployment action (legacy)": "Operacja wdrożenia (starsza wersja)",
+    "CPU usage": "Użycie CPU",
+    "Memory usage": "Użycie pamięci",
+    "Static": "Statyczny",
+    "Connect": "Połącz",
+    "Disconnect": "Rozłącz",
+    "Unavailable": "Niedostępne",
+    "containers": "kontenery", "services": "usługi", "running": "uruchomione",
+    "Published port": "Port publikowany", "Container port": "Port kontenera",
+    "Published ports": "Publikowane porty", "Edit ports": "Edytuj porty",
+    "Memory (MiB)": "Pamięć (MiB)", "Swap (MiB)": "Swap (MiB)",
+    "Unless stopped": "Dopóki nie zatrzymano", "On failure": "Po błędzie",
+    "No": "Nie", "Always": "Zawsze", "Update integration check": "Kontrola integracji po aktualizacji"
+};
+    const translate = value => {
+        const native = typeof gettext === 'function' ? gettext(value) : value;
+        if (native !== value) { return native; }
+        const polish = typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie';
+        return polish && PVE.betterdockerTranslations ? PVE.betterdockerTranslations[value] || value : value;
+    };
+    const help = () => Ext.create('Ext.window.Window', { title: translate('Docker help'), modal: true,
+        width: 660, height: 460, layout: 'fit', items: [{ xtype: 'component', scrollable: true, padding: 15,
+            html: '<h3>BetterDockers</h3><p>' + Ext.htmlEncode(translate('Each DCT is a Compose project running on the Proxmox host.')) + '</p>' +
+                '<p>' + Ext.htmlEncode(translate('Resources apply to each container of the selected service. GUI overrides persist across deployments. Restore Compose removes these overrides.')) + '</p>' +
+                '<p>' + Ext.htmlEncode(translate('Network settings are fixed after creation. Published ports use the dedicated project IP.')) + '</p>' +
+                '<p>' + Ext.htmlEncode(translate('Removal retains volumes, bind mounts and deployment files. VM/CT backup, HA and migration do not apply.')) + '</p>' +
+                ['Limits apply to each container of this service. Zero CPU, memory or PID limit means unlimited. With a memory limit, zero swap disables swap; -1 allows unlimited swap.',
+                    'Snapshots include configuration, container filesystems and owned writable data. Running services are frozen while data is captured, then resumed. RAM, external writable mounts and shared volumes are not supported. Rollback stops DCT and restores only the selected snapshot.',
+                    'Separate entries with commas. Empty fields use Docker defaults.',
+                    'Container disk limit excludes volumes and bind mounts. This host must support overlay2 on XFS with project quotas.',
+                    'Data disk includes writable project directories and owned local volumes. Stop all services first. Original data is retained as a recovery copy. Disks can only grow.',
+                    'A data disk mount failure prevents Docker from starting on this node. Images and Docker logs are not part of this data disk.'
+                ].map(text => '<p>' + Ext.htmlEncode(translate(text)) + '</p>').join('') +
+                '<p><a href="https://github.com/GDLev/Proxmox-BetterDockers" target="_blank" rel="noopener">' + Ext.htmlEncode(translate('Documentation')) + '</a></p>',
+        }] }).show();
+    function configureHelp(win) {
+        const button = win.down('proxmoxHelpButton');
+        if (button) { button.setHandler(help); }
+    }
+    const download = (name, value) => {
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(new Blob([value], { type: 'text/plain;charset=utf-8' }));
+        link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
+    };
+    const importFile = (label, name, maximum) => ({ xtype: 'filefield', buttonOnly: true, buttonText: translate(label),
+        listeners: { change: async function () {
+            const file = this.fileInputEl.dom.files[0];
+            if (!file) { return; }
+            if (file.size > maximum) { Ext.Msg.alert(translate('Error'), translate('File is too large')); this.reset(); return; }
+            const content = await file.text();
+            if (!this.destroyed) { this.up('window').down('[name=' + name + ']').setValue(content); this.reset(); }
+        } } });
+    const importRow = (label, name, maximum) => ({ xtype: 'container', layout: 'hbox', margin: '0 0 5 105',
+        items: [importFile(label, name, maximum)] });
+    const statusText = value => translate(({ running: 'Running', stopped: 'Stopped', partial: 'Partially running',
+        creating: 'Deploying', error: 'Deployment failed', 'network-error': 'Network error', unknown: 'Unknown' })[value] || value);
+    const trackTask = (response, target) => {
+        const upid = response.result.data;
+        if (!target || !target.on || !upid) { return; }
+        target.pendingTask = upid;
+        const node = target.pveSelNode && target.pveSelNode.data.node;
+        if (!node) { return; }
+        const poll = () => {
+            if (target.destroyed) { clearInterval(timer); return; }
+            request({ url: '/nodes/' + encodeURIComponent(node) + '/tasks/' + encodeURIComponent(upid) + '/status',
+                method: 'GET', failure: () => {}, success: result => {
+                    if (target.destroyed) { return; }
+                    if (result.result.data.status === 'stopped') {
+                        clearInterval(timer); target.pendingTask = null;
+                        if (target.reloadDocker) { target.reloadDocker(); }
+                        if (result.result.data.exitstatus !== 'OK') { task(response); }
+                    }
+                } });
+        };
+        const timer = setInterval(poll, 1500);
+        target.on('beforedestroy', () => clearInterval(timer), target, { single: true });
+        if (target.reloadDocker) { target.reloadDocker(); }
+    };
+
     const field = (name, label, value, extra) => Object.assign({
-        xtype: 'textfield', name, fieldLabel: label, value, labelWidth: 125, anchor: '100%',
+        xtype: 'textfield', name, fieldLabel: translate(label), value, labelWidth: 100, anchor: '100%',
     }, extra || {});
     const request = options => Proxmox.Utils.API2Request(Object.assign({
         failure: response => Ext.Msg.alert('Docker', response.htmlStatus),
     }, options));
     const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
     const dockerTaskLabels = { create: 'Deploy', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
-        restart: 'Restart', delete: 'Remove', settings: 'Edit resources / options', console: 'Console' };
+        restart: 'Restart', delete: 'Remove', settings: 'Edit resources / options', console: 'Console', snapshotcreate: 'Take Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Remove Snapshot' };
     const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
     Object.entries(dockerTaskLabels).forEach(([action, label]) => {
         dockerTaskDescriptions['betterdocker' + action] = (type, id) =>
-            (/^\d+$/.test(String(id)) ? 'DCT ' + id : 'Docker') + ' - ' + label;
+            (/^\d+$/.test(String(id)) ? 'DCT ' + id : 'Docker') + ' - ' + translate(label);
     });
     Proxmox.Utils.override_task_descriptions(dockerTaskDescriptions);
     const dockerAction = (info, operation, target) => {
         const execute = () => request({
-            url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1] + '/action',
+            url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1] + '/action',
             method: 'POST', params: { action: operation }, waitMsgTarget: target,
-            success: response => { if (operation === 'delete') { task(response); } },
+            success: response => { trackTask(response, target); if (operation === 'delete') { task(response); } },
         });
         if (operation === 'stop' || operation === 'restart') {
-            const label = operation === 'stop' ? 'Shutdown' : 'Restart';
+            const label = operation === 'stop' ? translate('Shutdown') : translate('Restart');
             const guest = (info.vmid ? 'DCT ' + info.vmid : 'Docker') + ' (' + info.name + ')';
-            Ext.Msg.confirm('Confirm', Ext.htmlEncode(label + ' ' + guest + '?'), answer => {
+            Ext.Msg.confirm(translate('Confirm'), Ext.htmlEncode(label + ' ' + guest + '?'), answer => {
                 if (answer === 'yes') { execute(); }
             });
             return;
@@ -59,10 +253,10 @@
         const address = wizard.down('[name=address]');
         if (address) { address.setDisabled(group.getValue().ipv4mode !== 'static'); }
     }
-    PVE.tree.ResourceTree.typeDefaults.docker = { iconCls: 'fa bd-docker-icon', text: 'Docker' };
+    PVE.tree.ResourceTree.typeDefaults.docker = { iconCls: 'fa bd-docker-icon', text: translate('Docker') };
     const originalIcon = PVE.Utils.get_object_icon_class;
     PVE.Utils.get_object_icon_class = function (type, record) {
-        if (type === 'docker') { return 'fa bd-docker-icon ' + (record.status || ''); }
+        if (type === 'docker') { return 'fa bd-docker-icon ' + (['running', 'stopped'].includes(record.status) ? record.status : 'unknown'); }
         const icon = originalIcon.apply(this, arguments);
         // Existing LXC guests from the first release remain manageable as LXC.
         return record && record.type === 'lxc' && String(record.tags || '').split(';').includes('betterdocker') &&
@@ -100,73 +294,90 @@
         },
     });
 
+
+    Ext.define('PVE.betterdocker.CodeArea', {
+        extend: 'Ext.form.field.TextArea', alias: 'widget.pveBetterDockerCodeArea', fieldCls: 'bd-source',
+        initComponent: function () {
+            const me = this;
+            me.callParent();
+            me.on('afterrender', () => { me.inputEl.dom.spellcheck = false; });
+        },
+    });
     Ext.define('PVE.betterdocker.CreateWizard', {
-        extend: 'PVE.window.Wizard', subject: 'Docker', title: 'Create Docker', width: 880, height: 700,
+        extend: 'PVE.window.Wizard', subject: 'Docker', title: translate('Create DCT'), width: 760, height: 570, resizable: false, constrain: true,
         initComponent: function () {
             const me = this;
             const defaults = me.deployment || {};
+            if (typeof window.innerHeight === 'number') { if (typeof me.height === 'number') { me.height = Math.min(me.height, window.innerHeight - 40); } me.width = Math.min(me.width, window.innerWidth - 40); }
             if (me.projectId) { me.title = 'Edit Docker deployment'; }
             me.items = [{
-                xtype: 'inputpanel', title: 'Deployment',
-                items: [
+                xtype: 'inputpanel', title: translate('General'), onlineHelp: 'chapter_system_administration',
+                column1: [
                     field('nodename', 'Node', me.nodename || Proxmox.NodeName, { xtype: 'pveNodeSelector', allowBlank: false, readOnly: Boolean(me.projectId),
                         listeners: { change: function (_, value) {
                             const wizard = this.up('window');
                             const bridge = wizard && wizard.down('[name=bridge]');
                             if (bridge) { bridge.setNodename(value); }
                         } } }),
-                    field('name', 'Project name', defaults.name || '', { allowBlank: false, readOnly: Boolean(me.projectId) }),
                     field('vmid', 'DCT ID', defaults.vmid || me.vmid || '', { xtype: 'numberfield',
                         minValue: 100, maxValue: 999999999, allowDecimals: false, readOnly: Boolean(me.projectId),
-                        emptyText: 'Next available guest ID' }),
+                        emptyText: translate('Next available guest ID') }),
+                    field('name', 'Project name', defaults.name || '', { allowBlank: false, readOnly: Boolean(me.projectId) }),
+                ],
+                column2: [
                     field('mode', 'Deploy from', defaults.mode || 'compose', { xtype: 'combobox', editable: false,
                         queryMode: 'local', allowBlank: false,
                         store: [['compose', 'Docker Compose'], ['image', 'Docker image']],
                         listeners: { change: updateMode, afterrender: updateMode } }),
+                ],
+            }, {
+                xtype: 'inputpanel', title: translate('Deployment'), onlineHelp: 'chapter_system_administration', scrollable: true,
+                items: [
                     { xtype: 'container', itemId: 'composeFields', layout: 'anchor', items: [
-                        field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'textarea', height: 285, allowBlank: false,
-                            emptyText: 'services:\n  web:\n    image: nginx:stable\n    restart: unless-stopped\n    ports:\n      - "8080:80"' }),
+                        field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false,
+                            emptyText: 'services:\n  web:\n    image: nginx:stable' }),
+                        importRow('Load YAML', 'compose', 240000),
                     ] },
                     { xtype: 'container', itemId: 'imageFields', hidden: true, layout: 'anchor', items: [
                         field('image', 'Image', defaults.image || '', { disabled: true, allowBlank: false, emptyText: 'nginx:stable' }),
                         field('ports', 'Published ports', defaults.ports || '', { xtype: 'textarea', disabled: true, height: 110,
                             emptyText: '8080:80\n5353:53/udp' }),
                     ] },
-                    field('environment', '.env (optional)', defaults.environment || '', { xtype: 'textarea', height: 75,
-                        emptyText: 'APP_PASSWORD=your-value' }),
+                ],
+                advancedItems: [
+                    field('environment', '.env', defaults.environment || '', { xtype: 'textarea', height: 65, fieldCls: 'bd-source' }),
+                    importRow('Load .env', 'environment', 16000),
                 ],
             }, {
-                xtype: 'inputpanel', title: 'Network',
+                xtype: 'inputpanel', title: translate('Network'), onlineHelp: 'chapter_system_administration',
                 column1: [
                     field('bridge', 'Bridge', defaults.bridge || 'vmbr0', { xtype: 'PVE.form.BridgeSelector',
                         nodename: me.nodename || Proxmox.NodeName, bridgeType: 'bridge', allowBlank: false, readOnly: Boolean(me.projectId) }),
                     field('hwaddr', 'MAC address', defaults.hwaddr || '', { readOnly: Boolean(me.projectId),
                         emptyText: 'auto', validator: value => !value || /^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(value) || 'Invalid MAC address' }),
                     field('mtu', 'MTU', defaults.mtu || '', { xtype: 'numberfield', readOnly: Boolean(me.projectId),
-                        minValue: 576, maxValue: 9216, allowDecimals: false, emptyText: 'Same as bridge' }),
+                        minValue: 576, maxValue: 9216, allowDecimals: false, emptyText: translate('Same as bridge') }),
                 ],
                 column2: [
-                    { xtype: 'radiogroup', fieldLabel: 'IPv4', columns: 2,
+                    { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 2,
                         items: [
-                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: 'Static',
+                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'),
                                 checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'static', readOnly: Boolean(me.projectId) },
-                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: 'DHCP',
+                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: translate('DHCP'),
                                 checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp', readOnly: Boolean(me.projectId) },
                         ], listeners: { change: updateNetwork, afterrender: updateNetwork } },
                     field('address', 'IPv4/CIDR', defaults.cidr || defaults.address || '', { allowBlank: false,
                         disabled: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp',
                         readOnly: Boolean(me.projectId), emptyText: '192.0.2.50/24' }),
-                    { xtype: 'displayfield', fieldLabel: 'Gateway (IPv4)', value: 'Inherited from host routing' },
-                ],
-                columnB: [
-                    { xtype: 'displayfield', value: 'DHCP requests an address for the project MAC on a separate interface. Static IPv4 must be unused and within the bridge subnet. Host gateway and DNS settings remain unchanged.' },
-                    { xtype: 'displayfield', value: 'All ports from Compose will bind to the project IP. Services in one project share this IP through their published ports.' },
+                    { xtype: 'displayfield', fieldLabel: translate('Gateway (IPv4)'), value: translate('Inherited from host routing') },
                 ],
             }, {
-                title: 'Review', layout: 'fit', items: [{ xtype: 'grid',
+                title: translate('Confirm'), onlineHelp: 'chapter_system_administration', layout: 'fit',
+                validator: function () { const wizard = this.up('window'); return wizard.validatedDeployment === JSON.stringify(deployment(wizard.getValues())); }, tbar: [{ text: translate('Validate Compose'), handler: function () { this.up('window').validateDeployment(); } }], items: [{ xtype: 'grid', itemId: 'reviewGrid',
                     store: { fields: ['key', 'value'], data: [] },
-                    columns: [{ text: 'Setting', dataIndex: 'key', width: 170 },
-                        { text: 'Value', dataIndex: 'value', flex: 1, renderer: Ext.htmlEncode }],
+                    columns: [{ text: translate('Name'), dataIndex: 'key', width: 170,
+                        renderer: value => Ext.htmlEncode(value.startsWith('Service: ') ? translate('Service') + ': ' + value.slice(9) : translate(value)) },
+                        { text: translate('Value'), dataIndex: 'value', flex: 1, renderer: value => Ext.htmlEncode(translate(value)) }],
                 }],
                 listeners: { show: function () {
                     const values = this.up('window').getValues();
@@ -174,25 +385,47 @@
                         { key: 'Deployment', value: values.mode === 'compose' ? 'Docker Compose' : values.image },
                         { key: 'Bridge', value: values.bridge }, { key: 'IPv4', value: values.ipv4mode === 'dhcp' ? 'Assigned by DHCP' : values.address },
                         { key: 'MAC address', value: values.hwaddr || 'Auto-generated' },
-                        { key: 'Published ports', value: values.mode === 'compose' ? 'Read from Compose YAML' : values.ports || 'None' }];
+                        { key: 'Published ports', value: values.mode === 'compose' ? translate('Read from Compose YAML') : values.ports || translate('None') }];
                     this.down('grid').getStore().loadData(data);
+                    this.up('window').validateDeployment();
                 } },
                 onSubmit: function () {
                     const wizard = this.up('window');
                     const values = wizard.getValues();
+                    if (wizard.validatedDeployment !== JSON.stringify(deployment(values))) {
+                        wizard.validateDeployment(); return;
+                    }
                     request({ url: '/nodes/' + encodeURIComponent(values.nodename) + '/docker' + (wizard.projectId ? '/' + wizard.projectId : ''),
                         method: wizard.projectId ? 'PUT' : 'POST',
                         params: { deployment: JSON.stringify(deployment(values)) }, waitMsgTarget: wizard,
                         success: response => { task(response); wizard.close(); } });
                 },
             }];
+            me.validateDeployment = () => {
+                const values = me.getValues();
+                const payload = JSON.stringify(deployment(values));
+                me.validatedDeployment = null;
+                const submit = me.down('#submit'); if (submit) { submit.setDisabled(true); }
+                request({ url: '/nodes/' + encodeURIComponent(values.nodename) + '/docker', method: 'PUT',
+                    params: Object.assign({ deployment: payload }, me.projectId ? { id: me.projectId } : {}), waitMsgTarget: me,
+                    success: response => {
+                        if (me.destroyed || JSON.stringify(deployment(me.getValues())) !== payload) { return; }
+                        me.validatedDeployment = payload;
+                        const review = me.down('#reviewGrid').getStore();
+                        const submit = me.down('#submit'); if (submit) { submit.setDisabled(false); }
+                        review.remove(review.getRange().filter(record => record.get('key').startsWith('Service: ')));
+                        response.result.data.forEach(service => review.add({ key: 'Service: ' + service.service,
+                            value: [service.image, service.replicas + ' ' + translate('instances'),
+                                service.ports.map(port => port.published + ':' + port.target + '/' + port.protocol).join(', '),
+                                service.mounts.map(mount => mount.target).join(', ')].filter(Boolean).join(' · ') }));
+                    } });
+            };
             me.callParent();
-            const help = me.down('#help');
-            if (help) { help.hide(); }
-            me.query('proxmoxcheckbox').forEach(item => item.hide());
-            [['next', 'Next'], ['back', 'Back'], ['submit', 'Deploy']].forEach(([id, text]) => {
+            const helpButton = me.down('#help');
+            if (helpButton) { helpButton.setHandler(help); }
+            [['next', 'Next'], ['back', 'Back'], ['submit', me.projectId ? 'Apply' : 'Deploy']].forEach(([id, text]) => {
                 const button = me.down('#' + id);
-                if (button) { button.setText(text); }
+                if (button) { button.setText(translate(text)); }
             });
         },
     });
@@ -210,8 +443,8 @@
             };
             const resize = () => { if (me.fit) { me.fit.fit(); } };
             const connect = () => {
-                const container = me.down('#container').getValue();
-                if (!container) { Ext.Msg.alert('Console', 'Choose a running container.'); return; }
+                const container = me.down('#consoleContainer').getValue();
+                if (!container) { Ext.Msg.alert(translate('Console'), translate('Choose a running container.')); return; }
                 disconnect();
                 const generation = me.generation;
                 request({ url: me.apiUrl + '/termproxy', method: 'POST',
@@ -256,15 +489,24 @@
                 });
             };
             me.tbar = [
-                { xtype: 'combobox', itemId: 'container', fieldLabel: 'Container', labelWidth: 65, width: 350,
+                { xtype: 'combobox', itemId: 'consoleContainer', fieldLabel: translate('Container'), labelWidth: 65, width: 350,
                     queryMode: 'local', editable: false, displayField: 'name', valueField: 'id',
                     store: { fields: ['id', 'name'], data: [] } },
                 { xtype: 'combobox', itemId: 'shell', width: 110, value: '/bin/sh', editable: false,
                     queryMode: 'local', store: [['/bin/sh', '/bin/sh'], ['/bin/bash', '/bin/bash']] },
-                { text: 'Connect', handler: connect }, { text: 'Disconnect', handler: disconnect },
+                { text: translate('Connect'), handler: connect }, { text: translate('Disconnect'), handler: disconnect },
             ];
             me.items = [{ xtype: 'component', itemId: 'terminal' }];
             me.callParent();
+            const targets = () => request({ url: me.apiUrl + '/management', method: 'GET', success: response => {
+                if (me.destroyed) { return; }
+                const combo = me.down('#consoleContainer'), selected = combo.getValue();
+                const containers = response.result.data.containers.filter(container => container.state === 'running');
+                combo.getStore().loadData(containers);
+                combo.setValue(containers.some(container => container.id === selected) ? selected : (containers[0] || {}).id);
+            } });
+            me.on('afterrender', targets, me, { single: true });
+            me.on('activate', targets);
             me.on('resize', resize);
             me.on('beforedestroy', disconnect);
         },
@@ -286,39 +528,39 @@
         updateSnapshot: function (data) {
             const me = this, metrics = data.metrics;
             const update = (id, text, usage) => me.down('#' + id).updateValue(text, usage);
-            me.down('#statusPanel').setTitle(Ext.htmlEncode(data.name) + ' (Uptime: ' +
+            me.down('#statusPanel').setTitle(Ext.htmlEncode(data.name) + ' (' + translate('Uptime') + ': ' +
                 Proxmox.Utils.format_duration_long(metrics.uptime) + ')');
-            update('statusValue', Ext.htmlEncode(data.status));
+            update('statusValue', Ext.htmlEncode(statusText(data.status)));
             update('nodeValue', Ext.htmlEncode(data.node));
-            update('serviceValue', data.containers.filter(item => item.state === 'running').length + ' running / ' +
-                data.containers.length + ' containers · ' + data.services.length + ' services');
+            update('serviceValue', data.containers.filter(item => item.state === 'running').length + ' ' + translate('running') + ' / ' +
+                data.containers.length + ' ' + translate('containers') + ' · ' + data.services.length + ' ' + translate('services'));
             update('cpuValue', Proxmox.Utils.render_cpu_usage(metrics.cpu, metrics.cpus), Math.min(1, metrics.cpu));
             update('memoryValue', metrics.maxmem ? Proxmox.Utils.render_size_usage(metrics.mem, metrics.maxmem) : '0 B',
                 metrics.maxmem ? metrics.mem / metrics.maxmem : 0);
             ['swap', 'disk'].forEach(key => {
                 const used = metrics[key], maximum = metrics['max' + key];
                 const available = typeof used === 'number' && typeof maximum === 'number';
-                const text = !available ? 'Unavailable' : maximum > 0 ? Proxmox.Utils.render_size_usage(used, maximum) :
+                const text = !available ? translate('Unavailable') : maximum > 0 ? Proxmox.Utils.render_size_usage(used, maximum) :
                     '0.00% (' + Proxmox.Utils.format_size(used) + ' of 0 B)';
                 update(key + 'Value', text, available && maximum > 0 ? Math.min(1, used / maximum) : 0);
                 me.down('#' + key + 'Value').setPrintBar(available);
             });
-            update('ipValue', Ext.htmlEncode(data.address || 'Waiting for DHCP'));
+            update('ipValue', Ext.htmlEncode(data.address || translate('Waiting for DHCP')));
         },
         initComponent: function () {
             const me = this;
             const store = Ext.create('Proxmox.data.RRDStore', {
                 rrdurl: '/api2/json' + me.apiUrl + '/rrddata', model: 'pve-rrd-guest',
             });
-            const metric = (id, title, icon, bar) => ({ xtype: 'pmxInfoWidget', itemId: id, title,
-                iconCls: icon, printBar: Boolean(bar), padding: '2 25', text: 'Loading...' });
+            const metric = (id, title, icon, bar) => ({ xtype: 'pmxInfoWidget', itemId: id, title: translate(title),
+                iconCls: icon, printBar: Boolean(bar), padding: '2 25', text: translate('Loading...') });
             const charts = [
                 ['CPU Usage', ['cpu'], ['CPU usage'], 'percent'],
                 ['Memory Usage', ['maxmem', 'mem'], ['Total', 'Used'], 'bytes'],
                 ['Network Traffic', ['netin', 'netout'], ['Incoming', 'Outgoing'], 'bytes'],
                 ['Disk IO', ['diskread', 'diskwrite'], ['Reads', 'Writes'], 'bytes'],
-            ].map(([title, fields, fieldTitles, unit]) => ({ xtype: 'proxmoxRRDChart', title,
-                pveSelNode: me.pveSelNode, store, fields, fieldTitles, unit,
+            ].map(([title, fields, fieldTitles, unit]) => ({ xtype: 'proxmoxRRDChart', title: translate(title),
+                pveSelNode: me.pveSelNode, store, fields, fieldTitles: fieldTitles.map(translate), unit,
                 powerOfTwo: title === 'Memory Usage' }));
             me.tbar = ['->', { xtype: 'proxmoxRRDTypeSelector' }];
             me.items = [{ xtype: 'container', itemId: 'itemcontainer', minWidth: 700, layout: 'column',
@@ -334,7 +576,7 @@
                                 metric('cpuValue', 'CPU usage', 'fa fa-fw pmx-itype-icon-processor pmx-icon', true),
                                 metric('memoryValue', 'Memory usage', 'fa fa-fw pmx-itype-icon-memory pmx-icon', true),
                                 metric('swapValue', 'SWAP usage', 'fa fa-refresh fa-fw', true),
-                                Object.assign(metric('diskValue', 'Bootdisk size', 'fa fa-hdd-o fa-fw', true), {
+                                Object.assign(metric('diskValue', 'Container root filesystems', 'fa fa-hdd-o fa-fw', true), {
                                     listeners: { afterrender: widget => { widget.diskTooltip = Ext.create('Ext.tip.ToolTip', { target: widget.getEl(),
                                         html: 'Total size of container root filesystems, including images and writable layers. Capacity is shared Docker storage. Volumes and bind mounts are excluded; shared image blocks may be counted for each container.',
                                     }); }, destroy: widget => {
@@ -357,6 +599,268 @@
         },
     });
 
+    Ext.define('PVE.betterdocker.Logs', {
+        extend: 'Ext.panel.Panel', alias: 'widget.pveBetterDockerLogs', layout: 'fit',
+        setTarget: function (service, container) {
+            this.down('#logService').setValue(service || '');
+            this.down('#logContainer').setValue(container || ''); this.reloadLogs();
+        },
+        initComponent: function () {
+            const me = this;
+            let content = '', loading = false;
+            const render = () => {
+                const query = String(me.down('#logSearch').getValue() || '').toLowerCase();
+                const area = me.down('#logOutput');
+                const el = area.inputEl && area.inputEl.dom;
+                const scroll = el ? el.scrollTop : 0;
+                const follow = me.down('#logFollow').getValue();
+                area.setValue(query ? content.split('\n').filter(line => line.toLowerCase().includes(query)).join('\n') : content);
+                if (el) { el.scrollTop = follow ? el.scrollHeight : scroll; }
+            };
+            me.reloadLogs = () => {
+                if (loading || me.destroyed) { return; }
+                loading = true;
+                const params = { tail: me.down('#logTail').getValue() || 200 };
+                const service = me.down('#logService').getValue(), container = me.down('#logContainer').getValue();
+                if (service) { params.service = service; }
+                if (container) { params.container = container; }
+                request({ url: me.apiUrl + '/logs', method: 'GET', params,
+                    failure: response => { loading = false; if (!me.destroyed) { Proxmox.Utils.setErrorMask(me, response.htmlStatus); } },
+                    success: response => { loading = false; if (!me.destroyed) {
+                        Proxmox.Utils.setErrorMask(me, false); content = response.result.data; render();
+                    } } });
+            };
+            const targets = () => request({ url: me.apiUrl + '/management', method: 'GET', success: response => {
+                if (me.destroyed) { return; }
+                me.down('#logService').getStore().loadData([{ name: '', label: translate('All services') },
+                    ...response.result.data.services.map(s => ({ name: s.name, label: s.name }))]);
+                me.down('#logContainer').getStore().loadData([{ id: '', name: translate('All instances') }, ...response.result.data.containers]);
+            } });
+            me.tbar = [
+                { xtype: 'combobox', itemId: 'logService', emptyText: translate('All services'), width: 160, editable: false, queryMode: 'local',
+                    value: '', displayField: 'label', valueField: 'name', store: { fields: ['name', 'label'], data: [] },
+                    listeners: { select: () => { me.down('#logContainer').setValue(''); me.reloadLogs(); } } },
+                { xtype: 'combobox', itemId: 'logContainer', emptyText: translate('All instances'), width: 180, editable: false, queryMode: 'local',
+                    value: '', displayField: 'name', valueField: 'id', store: { fields: ['id', 'name'], data: [] },
+                    listeners: { select: me.reloadLogs } },
+                { xtype: 'numberfield', itemId: 'logTail', fieldLabel: translate('Lines'), labelWidth: 40, width: 120,
+                    minValue: 1, maxValue: 5000, value: 200, allowDecimals: false },
+                { text: translate('Refresh'), handler: me.reloadLogs },
+                { xtype: 'checkbox', itemId: 'logAuto', boxLabel: translate('Live'), checked: true },
+                { xtype: 'checkbox', itemId: 'logFollow', boxLabel: translate('Follow'), checked: true },
+                '->', { text: translate('Download'), handler: () => download('docker.log', content) },
+            ];
+            me.items = [{ xtype: 'textarea', itemId: 'logOutput', readOnly: true, fieldCls: 'bd-source' }];
+            me.bbar = [{ xtype: 'textfield', itemId: 'logSearch', fieldLabel: translate('Search'), labelWidth: 55,
+                width: 400, enableKeyEvents: true, listeners: { change: render } }];
+            me.callParent();
+            me.on('afterrender', () => { targets(); me.reloadLogs(); me.logPoll = setInterval(() => {
+                if (!me.destroyed && me.isVisible(true) && me.down('#logAuto').getValue()) { me.reloadLogs(); }
+            }, 3000); }, me, { single: true });
+            me.on('activate', () => { targets(); me.reloadLogs(); });
+            me.on('beforedestroy', () => clearInterval(me.logPoll));
+        },
+    });
+
+    Ext.define('PVE.betterdocker.Diagnostics', {
+        extend: 'Ext.grid.Panel', alias: 'widget.pveBetterDockerDiagnostics', hideHeaders: true,
+        initComponent: function () {
+            const me = this;
+            me.store = { fields: ['key', 'value'], data: [] };
+            me.columns = [{ text: translate('Name'), dataIndex: 'key', width: 230, renderer: value => Ext.htmlEncode(translate(value)) },
+                { text: translate('Value'), dataIndex: 'value', flex: 1, renderer: Ext.htmlEncode }];
+            const reload = () => request({ url: '/nodes/' + encodeURIComponent(me.pveSelNode.data.node) + '/docker', method: 'GET', params: { diagnostics: 1 },
+                failure: response => { if (!me.destroyed) { Proxmox.Utils.setErrorMask(me, response.htmlStatus); } },
+                success: response => {
+                    if (me.destroyed) { return; }
+                    Proxmox.Utils.setErrorMask(me, false);
+                    const info = response.result.data[0];
+                    me.getStore().loadData([
+                        { key: 'BetterDockers version', value: info.addon }, { key: 'Proxmox version', value: info.pve },
+                        { key: 'Docker Engine', value: info.engine }, { key: 'Docker Compose', value: info.compose },
+                        { key: 'Integration', value: info.integration }, { key: 'Maintenance timer', value: info.timer },
+                        { key: 'Network restoration', value: info.addresses }, { key: 'Update integration check', value: info.integration_check }, { key: 'Projects', value: info.projects },
+                        { key: 'Docker storage', value: info.storage.path || translate('Unavailable') },
+                        { key: 'Storage usage', value: info.storage.total ? Proxmox.Utils.render_size_usage(info.storage.used, info.storage.total) : translate('Unavailable') },
+                        ...info.dhcp.map(item => ({ key: 'DHCP — DCT ' + item.vmid, value: item.state })),
+                    ]);
+                } });
+            me.tbar = [{ text: translate('Refresh'), handler: reload }, '->', { text: translate('Help'), handler: help }];
+            me.callParent(); me.on('activate', reload); me.on('afterrender', reload, me, { single: true });
+        },
+    });
+    if (PVE.node.Config) {
+        const nodeInit = PVE.node.Config.prototype.initComponent;
+        Ext.override(PVE.node.Config, {
+            initComponent: function () {
+                nodeInit.apply(this, arguments);
+                this.insertNodes([{ xtype: 'pveBetterDockerDiagnostics', title: 'Docker', itemId: 'betterdocker',
+                    iconCls: 'fa bd-docker-icon', pveSelNode: this.pveSelNode }]);
+            },
+        });
+    }
+
+    Ext.define('PVE.betterdocker.DeploymentEdit', {
+        extend: 'Proxmox.window.Edit', width: 600, resizable: false, constrain: true, onlineHelp: 'chapter_system_administration',
+        initComponent: function () {
+            const me = this, defaults = me.deployment;
+            if (typeof window.innerHeight === 'number') { if (typeof me.height === 'number') { me.height = Math.min(me.height, window.innerHeight - 40); } me.width = Math.min(me.width, window.innerWidth - 40); }
+            me.title = translate('Edit deployment') + ': DCT ' + me.vmid;
+            me.url = '/nodes/' + encodeURIComponent(me.nodename) + '/docker/' + me.projectId;
+            me.items = [{ xtype: 'inputpanel', items: [
+                field('mode', 'Deploy from', defaults.mode, { xtype: 'combobox', editable: false, queryMode: 'local',
+                    store: [['compose', 'Docker Compose'], ['image', 'Docker image']], listeners: { change: updateMode, afterrender: updateMode } }),
+                { xtype: 'container', itemId: 'composeFields', layout: 'anchor', items: [
+                    field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false })] },
+                { xtype: 'container', itemId: 'imageFields', layout: 'anchor', items: [field('image', 'Image', defaults.image || ''),
+                    field('ports', 'Published ports', defaults.ports || '', { xtype: 'textarea', height: 120 })] },
+                importRow('Load YAML', 'compose', 240000),
+            ], advancedItems: [
+                field('environment', '.env', defaults.environment || '', { xtype: 'textarea', height: 65, fieldCls: 'bd-source' }),
+                importRow('Load .env', 'environment', 16000),
+            ] }];
+            me.submit = () => {
+                if (!me.formPanel.getForm().isValid()) { return; }
+                const changed = me.getValues();
+                const payload = JSON.stringify(deployment(Object.assign({}, defaults, changed, { vmid: me.vmid })));
+                request({ url: '/nodes/' + encodeURIComponent(me.nodename) + '/docker', method: 'PUT',
+                    params: { id: me.projectId, deployment: payload }, waitMsgTarget: me,
+                    success: () => request({ url: me.url, method: 'PUT', params: { deployment: payload }, waitMsgTarget: me,
+                        success: response => { trackTask(response, me.ownerPanel); task(response); me.close(); } }) });
+            };
+            me.callParent();
+            configureHelp(me);
+        },
+    });
+
+    Ext.define('PVE.betterdocker.SnapshotEdit', {
+        extend: 'PVE.window.Snapshot',
+        submit: function () {
+            const me = this, form = me.formPanel.getForm();
+            if (me.viewonly || !form.isValid()) { return; }
+            const values = form.getValues();
+            request({ url: me.url, method: me.isCreate ? 'POST' : 'PUT', waitMsgTarget: me,
+                params: me.isCreate ? { action: 'create', snapname: values.snapname, description: values.description || '' } :
+                    { description: values.description || '' },
+                success: response => {
+                    if (me.isCreate) { trackTask(response, me.ownerPanel); task(response); }
+                    me.close();
+                } });
+        },
+        initComponent: function () {
+            const me = this;
+            // Native Snapshot uses vmid in its API URL; DCT routes use the private project ID.
+            me.vmid = me.projectId;
+            me.type = 'docker';
+            me.callParent();
+            me.setTitle(me.isCreate ? translate('Create') + ': DCT ' + me.guestId + ' (' + me.vmname + ') ' + translate('Snapshot') :
+                translate(me.viewonly ? 'View' : 'Edit') + ': ' + translate('Snapshot') + ' ' + me.snapname);
+            const description = me.down('[name=description]');
+            if (description) { description.setReadOnly(Boolean(me.viewonly)); description.maxLength = 4096; }
+            const name = me.down('[name=snapname]');
+            if (me.isCreate && name) { name.maxLength = 40; name.enforceMaxLength = true; }
+            const summary = me.down('#summary');
+            if (summary) { summary.getColumns().forEach(column => { column.renderer = Ext.htmlEncode; }); }
+        },
+    });
+
+    Ext.define('PVE.betterdocker.Snapshots', {
+        extend: 'PVE.guest.SnapshotTree', alias: 'widget.pveBetterDockerSnapshots', type: 'docker',
+        // Reuse the native LXC tree, columns, toolbar, keyboard handling and editor.
+        controller: {
+            xclass: 'Ext.app.ViewController',
+            init: function (view) {
+                const me = this, vm = me.getViewModel(), info = view.ownerPanel.pveSelNode.data;
+                vm.set('type', 'docker'); vm.set('nodename', info.node); vm.set('vmid', info.vmid); vm.set('vmname', info.name);
+                me.load_task = new Ext.util.DelayedTask(me.reload, me);
+                view.getStore().sorters.add({ property: 'order', direction: 'ASC' });
+                view.updateActions();
+                me.reload();
+            },
+            cancel: function () { this.load_task.cancel(); },
+            select: function (_, records) {
+                this.getViewModel().set('selected', records.length ? records[0].get('name') : '');
+            },
+            newSnapshot: function () { this.run_editor(false); },
+            editSnapshot: function () { this.run_editor(true); },
+            run_editor: function (edit) {
+                const me = this, view = me.getView(), vm = me.getViewModel(), snapname = vm.get('selected');
+                if (edit && (!snapname || snapname === 'current')) { return; }
+                const info = view.ownerPanel.pveSelNode.data;
+                const win = Ext.create('PVE.betterdocker.SnapshotEdit', {
+                    ownerPanel: view.ownerPanel, nodename: info.node, projectId: (info.realId || info.id).split('/')[1], guestId: info.vmid, vmname: info.name,
+                    isCreate: !edit, viewonly: !vm.get('snapshotAllowed'), snapname: edit ? snapname : undefined,
+                    submitText: !edit ? translate('Take Snapshot') : undefined,
+                });
+                win.show();
+                me.mon(win, 'destroy', () => { me.reload(); view.ownerPanel.reloadDocker(); }, me);
+            },
+            rollback: function () { this.snapshotAction('restore'); },
+            remove: function () { this.snapshotAction('delete'); },
+            snapshotAction: function (action) {
+                const me = this, view = me.getView(), snapname = me.getViewModel().get('selected');
+                if (!snapname || snapname === 'current') { return; }
+                request({ url: view.apiUrl + '/snapshot', method: 'POST', params: { action, snapname }, waitMsgTarget: view,
+                    callback: () => me.reload(), success: response => {
+                        trackTask(response, view.ownerPanel);
+                        Ext.create('Proxmox.window.TaskProgress', { upid: response.result.data, autoShow: true });
+                    } });
+            },
+            reload: function () {
+                const me = this, view = me.getView();
+                if (me.destroyed || view.destroyed || me.loadingSnapshots) { return; }
+                me.loadingSnapshots = true;
+                request({ url: view.apiUrl + '/snapshots', method: 'GET', success: response => {
+                    me.loadingSnapshots = false;
+                    if (me.destroyed || view.destroyed) { return; }
+                    Proxmox.Utils.setErrorMask(view, false);
+                    const vm = me.getViewModel(), rows = response.result.data, current = rows.find(row => row.name === 'current');
+                    vm.set('running', Boolean(current?.running));
+                    if (current?.digest !== me.old_digest) {
+                        me.old_digest = current?.digest;
+                        const selected = vm.get('selected'), nodes = {};
+                        rows.forEach(row => { nodes[row.name] = Object.assign({}, row, { children: [], leaf: true,
+                            iconCls: row.name === 'current' ? 'fa fa-cube fa-fw x-fa-tree' : 'fa fa-fw fa-history x-fa-tree' }); });
+                        const root = { name: '__root', expanded: true, children: [] };
+                        rows.forEach(row => {
+                            const item = nodes[row.name], parent = nodes[row.parent];
+                            if (parent) { parent.children.push(item); parent.leaf = false; parent.expanded = true; parent.expandable = false; }
+                            else { root.children.push(item); }
+                        });
+                        view.setRootNode(root);
+                        if (selected) {
+                            const record = view.getRootNode().findChild('name', selected, true);
+                            if (record) { view.getSelectionModel().select(record); }
+                        }
+                    }
+                    view.updateActions(); me.load_task.delay(3000);
+                }, failure: response => {
+                    me.loadingSnapshots = false;
+                    if (!me.destroyed && !view.destroyed) { Proxmox.Utils.setErrorMask(view, response.htmlStatus); me.load_task.delay(3000); }
+                } });
+            },
+        },
+        updateActions: function () {
+            const me = this, vm = me.getViewModel(), owner = me.ownerPanel, data = owner.snapshotState;
+            const unlocked = Boolean(data && !data.operation?.active && !owner.pendingTask);
+            const supported = Boolean(data?.containers?.length && data.containers.length === data.expected && data.containers.every(item => ['created', 'exited', 'running'].includes(item.state)));
+            vm.set('snapshotAllowed', unlocked && Boolean(data?.capabilities?.snapshot));
+            vm.set('rollbackAllowed', unlocked && Boolean(data?.capabilities?.rollback));
+            vm.set('snapshotFeature', supported);
+        },
+        loadSnapshots: function () { this.getController().reload(); },
+        initComponent: function () {
+            const me = this;
+            me.callParent();
+            // The native rollback confirmation uses a VM identifier; retain its wording for DCT.
+            const button = me.query('proxmoxButton').find(item => item.text === translate('Rollback'));
+            if (button) { button.confirmMsg = function () {
+                const info = me.ownerPanel.pveSelNode.data, record = me.getSelectionModel().getSelection()[0];
+                return Ext.htmlEncode(translate('Rollback') + ' DCT ' + info.vmid + ' (' + info.name + ") '" + record.get('name') + "'? " + translate('Current state will be lost.'));
+            }; }
+        },
+    });
+
     Ext.define('PVE.betterdocker.Config', {
         extend: 'PVE.panel.Config', alias: 'widget.pveBetterDockerConfig', showSearch: false,
         // The native Config panel passes this to Help on every card activation.
@@ -372,20 +876,44 @@
         initComponent: function () {
             const me = this;
             const info = me.pveSelNode.data;
-            const identifier = info.id.split('/')[1];
+            const identifier = (info.realId || info.id).split('/')[1];
             const url = '/nodes/' + encodeURIComponent(info.node) + '/docker/' + identifier;
             let current;
             let selectedService;
             let loading = false;
+            const editable = () => current && current.capabilities ? Boolean(current.capabilities.configure) : Proxmox.UserName === 'root@pam';
+            const locked = () => Boolean(me.pendingTask || current && current.operation && current.operation.active);
             const set = (id, value) => { const item = me.down('#' + id); if (item) { item.setValue(value); } };
-            const rows = (id, data) => { const item = me.down('#' + id); if (item) { item.getStore().loadData(data); } };
+            const rows = (id, data) => {
+                const item = me.down('#' + id); if (!item) { return; }
+                const model = item.getSelectionModel && item.getSelectionModel();
+                const selected = model && model.getSelection()[0];
+                const key = selected && (selected.get('id') || selected.get('key'));
+                item.getStore().loadData(data);
+                if (key && model) { const record = item.getStore().getRange().find(row => (row.get('id') || row.get('key')) === key); if (record) { model.select(record); } }
+            };
             const service = () => current && current.services.find(item => item.name === selectedService);
             const populate = () => {
                 if (!current) { return; }
                 const running = current.containers.some(item => item.state === 'running');
                 [['startButton', current.status === 'running'], ['stopButton', !running], ['restartButton', !running]].forEach(([id, disabled]) => {
-                    const button = me.down('#' + id); if (button) { button.setDisabled(disabled); }
+                    const button = me.down('#' + id); if (button) { button.setDisabled(disabled || locked() || current.capabilities && !current.capabilities.power); }
                 });
+                const consoleButton = me.down('#consoleButton');
+                if (consoleButton) { consoleButton.setDisabled(!running || current.capabilities && !current.capabilities.console); }
+                me.query('[bdWrite=true]').forEach(button => button.setDisabled(locked() || !editable()));
+                const op = current.operation || {};
+                const operationLabel = me.down('#operationLabel');
+                if (operationLabel) { operationLabel.setText(op.active || me.pendingTask ? '<i class="fa fa-lock"></i> ' + Ext.htmlEncode(translate('Operation in progress')) : op.failed ? Ext.htmlEncode(translate(op.message)) : ''); }
+                me.snapshotState = current;
+                const snapshots = me.down('#snapshots');
+                if (snapshots && snapshots.rendered) { snapshots.updateActions(); if (!snapshots.isHidden()) { snapshots.loadSnapshots(); } }
+                const tags = me.down('#dockerTags');
+                if (tags) { tags.loadTags(current.tags || ''); tags.canEdit = editable(); if (tags.getViewModel) { tags.getViewModel().set('canEdit', editable() && !locked()); } }
+                rows('serviceGrid', current.containers.concat(current.services.filter(service => !current.containers.some(container => container.service === service.name)).map(service => ({
+                    id: '', name: '—', service: service.name, image: service.image, state: 'stopped', health: 'none', restarts: 0, exitcode: '—',
+                }))).map(container => Object.assign({}, container, { ports: (current.services.find(service => service.name === container.service)?.ports || [])
+                    .map(port => port.published + ':' + port.target + '/' + port.protocol).join(', ') })));
                 selectedService = service() ? selectedService : (current.services[0] || {}).name;
                 me.query('[itemId=serviceSelector]').forEach(combo => {
                     combo.getStore().loadData(current.services.map(item => ({ name: item.name })));
@@ -401,20 +929,25 @@
                 const active = service();
                 if (active) {
                     const values = active.settings;
+                    const restore = me.down('#restoreCompose'); if (restore) { restore.setDisabled(!active.overridden || !editable() || locked()); }
                     rows('resourceGrid', [
                         { key: 'Memory', value: values.memory ? values.memory + ' MiB' : 'Unlimited' },
-                        { key: 'Swap', value: values.memory ? values.swap + ' MiB' : 'Docker default' },
+                        { key: 'Swap', value: values.memory ? values.swap === -1 ? translate('Unlimited') : values.swap + ' MiB' : 'Docker default' },
                         { key: 'CPU limit', value: values.cpus || 'Unlimited' },
                         { key: 'CPU units', value: values.cpuunits || 'Docker default' },
                         { key: 'PID limit', value: values.pids || 'Unlimited' },
+                        { key: 'Container disk limit', value: values.disk ? values.disk + ' MiB' : (current.storage?.rootfs?.supported ? 'Unlimited' : 'Not supported by host') },
+                        { key: 'Project data disk', value: current.storage?.limit_mib ? current.storage.limit_mib + ' MiB' + (current.storage.mounted ? ' (' + Proxmox.Utils.format_size(current.storage.used) + ' / ' + Proxmox.Utils.format_size(current.storage.available) + ' ' + translate('Available') + ')' : ' — ' + translate('Unavailable')) : 'Unlimited' },
+                        { key: 'Settings source', value: active.overridden ? 'GUI override' : 'Compose' },
                     ].concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
                     rows('dnsGrid', [{ key: 'DNS servers', value: values.dns.join(', ') || 'Docker default' },
                         { key: 'Search domains', value: values.dns_search.join(', ') || 'Docker default' }]);
                     rows('optionGrid', [{ key: 'Restart policy', value: values.restart }, { key: 'Image', value: active.image }]);
                 }
-                set('source', current.deployment.mode === 'compose' ? current.deployment.compose :
-                    'Image: ' + current.deployment.image + '\nPublished ports:\n' + (current.deployment.ports || 'None'));
-                const consoleCombo = me.down('#container');
+                if (current.deployment) { set('source', current.deployment.mode === 'compose' ? current.deployment.compose :
+                    'Image: ' + current.deployment.image + '\nPublished ports:\n' + (current.deployment.ports || 'None')); }
+                if (me.updateServiceActions) { const grid = me.down('#serviceGrid'); if (grid) { me.updateServiceActions(grid.getSelectionModel().getSelection()); } }
+                const consoleCombo = me.down('#consoleContainer');
                 if (consoleCombo) {
                     const old = consoleCombo.getValue();
                     const containers = current.containers.filter(item => item.state === 'running');
@@ -430,14 +963,35 @@
                     failure: response => { loading = false; if (!me.destroyed) { Proxmox.Utils.setErrorMask(me, response.htmlStatus); } },
                 });
             };
-            const act = operation => dockerAction(info, operation, me);
+            me.reloadDocker = reload;
+            const act = operation => { if (!locked()) { dockerAction(info, operation, me); } };
             const editDeployment = () => request({ url, method: 'GET', success: response => {
-                Ext.create('PVE.betterdocker.CreateWizard', { projectId: identifier, vmid: info.vmid, nodename: info.node,
+                Ext.create('PVE.betterdocker.DeploymentEdit', { ownerPanel: me, projectId: identifier, vmid: info.vmid, nodename: info.node,
                     deployment: response.result.data.deployment }).show();
             } });
+            const editDataDisk = () => {
+                if (!editable() || locked() || !current) { return; }
+                const existing = current.storage?.limit_mib || 0;
+                const win = Ext.create('Proxmox.window.Edit', {
+                    title: translate('Edit data disk'), url: url + '/storage-limit', method: 'PUT', width: 400,
+                    onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
+                    items: [{ xtype: 'inputpanel', items: [field('size_mib', 'Data disk (MiB)', existing || 1024,
+                        { xtype: 'numberfield', minValue: existing ? existing + 1 : 256, maxValue: 1048576, allowDecimals: false, allowBlank: false })] }],
+                    submit: function () {
+                        const form = this.formPanel.getForm();
+                        if (!form.isValid()) { return; }
+                        request({ url: url + '/storage-limit', method: 'PUT', waitMsgTarget: win, params: form.getValues(),
+                            success: response => { trackTask(response, me); task(response); win.close(); } });
+                    },
+                });
+                win.show();
+            };
             const editSettings = (group, selectedKey) => {
                 const active = service();
-                if (!active) { return; }
+                if (!active || !editable() || locked()) { return; }
+                if (selectedKey === 'Settings source') { return; }
+                if (selectedKey === 'Project data disk') { editDataDisk(); return; }
+                if (selectedKey === 'Image') { editDeployment(); return; }
                 if (selectedKey && selectedKey.startsWith('Mount Point')) { editDeployment(); return; }
                 const values = active.settings;
                 const numeric = (name, label, maximum, extra) => field(name, label, values[name] || 0,
@@ -445,22 +999,23 @@
                 let fields = group === 'resources' ? [
                     numeric('memory', 'Memory (MiB)', 1048576), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1 }),
                     numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3 }),
+                    numeric('disk', 'Container disk (MiB)', 1048576, { disabled: !current.storage?.rootfs?.supported }),
                     numeric('cpuunits', 'CPU units', 262144), numeric('pids', 'PID limit', 4194304),
-                    { xtype: 'displayfield', value: 'Limits apply to each container of this service. Zero CPU, memory or PID limit means unlimited. With a memory limit, zero swap disables swap; -1 allows unlimited swap.' },
                 ] : group === 'dns' ? [
                     field('dns', 'DNS servers', values.dns.join(', ')), field('dns_search', 'Search domains', values.dns_search.join(', ')),
-                    { xtype: 'displayfield', value: 'Separate entries with commas. Empty fields use Docker defaults.' },
                 ] : [field('restart', 'Restart policy', values.restart, { xtype: 'combobox', editable: false, queryMode: 'local',
-                    store: [['no', 'No'], ['always', 'Always'], ['unless-stopped', 'Unless stopped'], ['on-failure', 'On failure']] })];
+                    store: [['no', translate('No')], ['always', translate('Always')], ['unless-stopped', translate('Unless stopped')], ['on-failure', translate('On failure')]] })];
                 if (group === 'resources' && selectedKey) {
                     const names = selectedKey === 'Memory' || selectedKey === 'Swap' ? ['memory', 'swap'] :
-                        selectedKey === 'PID limit' ? ['pids'] : ['cpus', 'cpuunits'];
+                        selectedKey === 'PID limit' ? ['pids'] : selectedKey === 'Container disk limit' ? ['disk'] : ['cpus', 'cpuunits'];
                     fields = fields.filter(item => !item.name || names.includes(item.name));
                 }
-                const win = Ext.create('Ext.window.Window', { title: 'Edit ' + group + ' — ' + active.name,
-                    modal: true, width: 520, layout: 'fit', items: [{ xtype: 'form', bodyPadding: 12, items: fields }],
-                    buttons: [{ text: 'OK', handler: () => {
-                        const form = win.down('form').getForm();
+                const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate(group) + ' — ' + active.name,
+                    url: url + '/settings', method: 'PUT', width: 400, showReset: true,
+                    onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
+                    items: [{ xtype: 'inputpanel', items: fields }],
+                    submit: function () {
+                        const form = this.formPanel.getForm();
                         if (!form.isValid()) { return; }
                         const changed = form.getValues();
                         const settings = Object.assign({}, values);
@@ -470,87 +1025,125 @@
                         }
                         request({ url: url + '/settings', method: 'PUT', waitMsgTarget: win,
                             params: { service: active.name, settings: JSON.stringify(settings) },
-                            success: response => { task(response); win.close(); } });
-                    } }, { text: 'Cancel', handler: () => win.close() }],
+                            success: response => { trackTask(response, me); task(response); win.close(); } });
+                    },
                 });
                 win.show();
             };
-            const selector = () => ({ xtype: 'combobox', itemId: 'serviceSelector', fieldLabel: 'Service', labelWidth: 50,
+            const selector = () => ({ xtype: 'combobox', itemId: 'serviceSelector', fieldLabel: translate('Service'), labelWidth: 50,
                 queryMode: 'local', editable: false, displayField: 'name', valueField: 'name',
                 store: { fields: ['name'], data: [] }, listeners: { select: combo => { selectedService = combo.getValue(); populate(); } } });
             const grid = (id, columns, fields) => ({ xtype: 'grid', itemId: id, minHeight: 150,
                 store: { fields, data: [] }, columns: columns.map(column => Object.assign({ flex: 1, renderer: Ext.htmlEncode }, column)) });
-            const properties = id => Object.assign(grid(id, [{ text: 'Name', dataIndex: 'key', width: 200, flex: 0,
+            const properties = id => Object.assign(grid(id, [{ text: translate('Name'), dataIndex: 'key', width: 200, flex: 0,
                 renderer: (value, meta) => {
                     const icons = { Memory: 'pmx-itype-icon-memory', Swap: 'fa fa-refresh', 'CPU limit': 'pmx-itype-icon-processor',
                         'CPU units': 'pmx-itype-icon-processor', 'PID limit': 'fa fa-cubes' };
                     const icon = icons[value] || (String(value).startsWith('Mount Point') ? 'fa fa-hdd-o' : 'fa fa-cog');
                     meta.tdCls = 'pve-itype-fa';
-                    return '<i class="pve-grid-fa fa-fw ' + icon + '"></i> ' + Ext.htmlEncode(value);
-                } }, { text: 'Value', dataIndex: 'value' }], ['key', 'value']), { hideHeaders: true });
-            const card = (title, id, icon, items, tbar, extra) => Object.assign({ xtype: 'panel', title, itemId: id,
+                    return '<i class="pve-grid-fa fa-fw ' + icon + '"></i> ' + Ext.htmlEncode(translate(value));
+                } }, { text: translate('Value'), dataIndex: 'value', renderer: value => Ext.htmlEncode(translate(value)) }], ['key', 'value']), { hideHeaders: true });
+            const card = (title, id, icon, items, tbar, extra) => Object.assign({ xtype: 'panel', title: translate(title), itemId: id,
                 iconCls: 'fa fa-' + icon, layout: 'anchor', scrollable: true, bodyPadding: 0,
                 defaults: { anchor: '100%' }, items, tbar,
                 listeners: { afterrender: reload, activate: reload } }, extra);
-            me.title = 'Docker ' + (info.vmid ? info.vmid + ' ' : '') + '(' + info.name + ') on node \'' + info.node + '\'';
+            me.title = 'DCT ' + (info.vmid ? info.vmid + ' ' : '') + '(' + info.name + ') ' + translate('on node') + ' \'' + info.node + '\'';
             me.hstateid = 'betterdocker-' + identifier;
+            me.tbarSpacing = false;
             me.tbar = [
-                { text: 'Start', itemId: 'startButton', iconCls: 'fa fa-play', handler: () => act('start') },
-                { xtype: 'splitbutton', text: 'Shutdown', itemId: 'stopButton', iconCls: 'fa fa-power-off', handler: () => act('stop'),
-                    menu: [{ text: 'Restart', itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('restart') }] },
-                { text: 'Console', iconCls: 'fa fa-terminal', handler: () => me.selectById('console') },
-                { text: 'More', menu: [{ text: 'Edit deployment', iconCls: 'fa fa-fw fa-pencil', handler: editDeployment },
-                    { text: 'Refresh', iconCls: 'fa fa-fw fa-refresh', handler: reload },
-                    { text: 'Remove', iconCls: 'fa fa-trash', handler: () => Ext.Msg.confirm('Remove Docker project',
-                        'Remove this project? Volumes and bind-mount data are retained.', answer => { if (answer === 'yes') { act('delete'); } }) }] },
+                { xtype: 'tbtext', itemId: 'operationLabel', text: translate('') },
+                { xtype: 'pveTagEditContainer', itemId: 'dockerTags', cls: 'proxmox-tags-full', tags: info.tags || '', canEdit: Proxmox.UserName === 'root@pam',
+                    listeners: { change: function (tags) {
+                        request({ url: url + '/config', method: 'PUT', params: { tags }, success: reload });
+                    } } }, '->',
+                { text: translate('Start'), itemId: 'startButton', iconCls: 'fa fa-play', handler: () => act('start') },
+                { xtype: 'splitbutton', text: translate('Shutdown'), itemId: 'stopButton', iconCls: 'fa fa-power-off', handler: () => act('stop'),
+                    menu: [{ text: translate('Restart'), itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('restart') }] },
+                { text: translate('Console'), itemId: 'consoleButton', iconCls: 'fa fa-terminal', handler: () => me.selectById('console') },
+                { text: translate('More'), menu: [{ text: translate('Edit deployment'), bdWrite: true, iconCls: 'fa fa-fw fa-pencil', handler: editDeployment },
+                    { text: translate('Refresh'), iconCls: 'fa fa-fw fa-refresh', handler: reload },
+                    { text: translate('Remove'), bdWrite: true, iconCls: 'fa fa-trash', handler: () => Ext.Msg.confirm(translate('Remove Docker project'),
+                        translate('Remove this project? Volumes and bind-mount data are retained.'), answer => { if (answer === 'yes') { act('delete'); } }) }] },
             ];
             me.items = [
-                { xtype: 'pveBetterDockerSummary', title: 'Summary', itemId: 'summary', iconCls: 'fa fa-book',
+                { xtype: 'pveBetterDockerSummary', title: translate('Summary'), itemId: 'summary', iconCls: 'fa fa-book',
                     apiUrl: url, projectName: info.name, pveSelNode: me.pveSelNode, listeners: { afterrender: reload } },
-                { xtype: 'pveBetterDockerConsole', title: 'Console', itemId: 'console', iconCls: 'fa fa-terminal', apiUrl: url,
+                { xtype: 'pveBetterDockerConsole', title: translate('Console'), itemId: 'console', iconCls: 'fa fa-terminal', apiUrl: url,
                     listeners: { afterrender: reload } },
+                card('Services', 'services', 'cubes', [grid('serviceGrid', [
+                    { text: translate('Service'), dataIndex: 'service' }, { text: translate('Instance'), dataIndex: 'name' },
+                    { text: translate('Image'), dataIndex: 'image' }, { text: translate('Published ports'), dataIndex: 'ports' }, { text: translate('Status'), dataIndex: 'state', renderer: value => Ext.htmlEncode(statusText(value)) },
+                    { text: translate('Health'), dataIndex: 'health', renderer: value => Ext.htmlEncode(translate(value === 'none' ? 'No healthcheck' : value)) },
+                    { text: translate('Restarts'), dataIndex: 'restarts', width: 85, flex: 0 },
+                    { text: translate('Exit code'), dataIndex: 'exitcode', width: 85, flex: 0 },
+                ], ['id', 'name', 'service', 'image', 'ports', 'state', 'health', 'restarts', 'exitcode'])],
+                    ['start', 'stop', 'restart'].map(verb => ({ text: translate({ start: 'Start', stop: 'Shutdown', restart: 'Restart' }[verb]),
+                        itemId: 'service-' + verb, disabled: true, handler: () => {
+                            const selected = me.down('#serviceGrid').getSelectionModel().getSelection()[0];
+                            if (!selected || locked()) { return; }
+                            const execute = () => request({ url: url + '/service-action', method: 'POST',
+                                params: { service: selected.get('service'), action: verb }, success: response => trackTask(response, me) });
+                            if (verb === 'start') { execute(); } else { Ext.Msg.confirm(translate('Confirm'),
+                                Ext.htmlEncode(translate(verb === 'stop' ? 'Shutdown' : 'Restart') + ' ' + selected.get('service') + '?'), answer => { if (answer === 'yes') { execute(); } }); }
+                        } })).concat([{ text: translate('Console'), handler: () => {
+                            const record = me.down('#serviceGrid').getSelectionModel().getSelection()[0];
+                            me.selectById('console'); const combo = me.down('#consoleContainer');
+                            if (record && combo) { combo.setValue(record.get('id')); }
+                        } }, { text: translate('Logs'), handler: () => {
+                            const record = me.down('#serviceGrid').getSelectionModel().getSelection()[0];
+                            me.selectById('logs'); const view = me.down('#logs');
+                            if (record && view) { view.setTarget(record.get('service'), record.get('id')); }
+                        } }]), { layout: 'fit' }),
                 card('Resources', 'resources', 'cube', [properties('resourceGrid')],
-                    [{ text: 'Edit', handler: () => {
+                    [{ text: translate('Edit'), itemId: 'resourceEdit', disabled: true, handler: () => {
                         const grid = me.down('#resourceGrid');
                         const selected = grid.getSelectionModel().getSelection()[0];
-                        editSettings('resources', selected && selected.get('key'));
+                        if (selected) { editSettings('resources', selected.get('key')); }
+                    } }, { text: translate('Restore Compose'), itemId: 'restoreCompose', bdWrite: true, handler: () => {
+                        const active = service(); if (!active || !active.overridden) { return; }
+                        request({ url: url + '/reset-settings', method: 'POST', params: { service: active.name },
+                            success: response => { trackTask(response, me); task(response); } });
                     } }, '->', selector()], { layout: 'fit' }),
                 card('Network', 'network', 'exchange', [Object.assign(grid('networkGrid', [
-                    { text: 'Name', dataIndex: 'name', width: 80, flex: 0 }, { text: 'Bridge', dataIndex: 'bridge' },
-                    { text: 'MAC address', dataIndex: 'hwaddr' }, { text: 'IPv4', dataIndex: 'address' },
-                    { text: 'IPv4 mode', dataIndex: 'mode' }, { text: 'MTU', dataIndex: 'mtu' }],
-                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu']), { flex: 1 }),
-                    Object.assign(grid('portGrid', [{ text: 'Service', dataIndex: 'service' }, { text: 'IP address', dataIndex: 'host_ip' },
-                        { text: 'Published port', dataIndex: 'published' }, { text: 'Container port', dataIndex: 'target' },
-                        { text: 'Protocol', dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: 'Published ports', flex: 1 })],
-                    [{ text: 'Edit ports', handler: editDeployment }], { layout: { type: 'vbox', align: 'stretch' } }),
-                card('DNS', 'dns', 'globe', [properties('dnsGrid')], [{ text: 'Edit', handler: () => editSettings('dns') }, '->', selector()], { layout: 'fit' }),
-                card('Options', 'options', 'cog', [properties('optionGrid')], [{ text: 'Edit', handler: () => editSettings('options') }, '->', selector()], { layout: 'fit' }),
-                card('Deployment', 'deployment', 'file-code-o', [{ xtype: 'textarea', itemId: 'source', readOnly: true, fieldStyle: 'font-family:monospace' }],
-                    [{ text: 'Edit', handler: editDeployment }], { layout: 'fit' }),
-                card('Logs', 'logs', 'file-text-o', [{ xtype: 'textarea', itemId: 'logsText', readOnly: true, fieldStyle: 'font-family:monospace' }],
-                    [{ text: 'Refresh', handler: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) }],
-                    { layout: 'fit', listeners: { afterrender: () => request({ url: url + '/logs', method: 'GET', success: response => set('logsText', response.result.data) }) } }),
-                card('Task History', 'tasks', 'list-alt', [grid('taskGrid', [{ text: 'Start time', dataIndex: 'starttime',
-                    renderer: value => new Date(value * 1000).toLocaleString() }, { text: 'Description', dataIndex: 'type',
-                        renderer: (value, metadata, record) => Ext.htmlEncode(Proxmox.Utils.format_task_description(value, record.get('id'))) },
-                    { text: 'User', dataIndex: 'user' }, { text: 'Status', dataIndex: 'status' }], ['upid', 'starttime', 'type', 'id', 'user', 'status'])],
-                    [{ text: 'Refresh', handler: () => me.loadDockerTasks() }],
-                    { layout: 'fit', listeners: { afterrender: panel => {
-                        panel.down('grid').on('itemdblclick', (_, record) => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: record.get('upid') }));
-                        me.loadDockerTasks();
-                    } } }),
+                    { text: translate('Name'), dataIndex: 'name', width: 80, flex: 0 }, { text: translate('Bridge'), dataIndex: 'bridge' },
+                    { text: translate('MAC address'), dataIndex: 'hwaddr' }, { text: translate('IPv4'), dataIndex: 'address' },
+                    { text: translate('IPv4 mode'), dataIndex: 'mode' }, { text: translate('MTU'), dataIndex: 'mtu' }],
+                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu']), { height: 90 }),
+                    Object.assign(grid('portGrid', [{ text: translate('Service'), dataIndex: 'service' }, { text: translate('IP address'), dataIndex: 'host_ip' },
+                        { text: translate('Published port'), dataIndex: 'published' }, { text: translate('Container port'), dataIndex: 'target' },
+                        { text: translate('Protocol'), dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: translate('Published ports'), flex: 1 })],
+                    [{ text: translate('Edit ports'), bdWrite: true, handler: editDeployment }, { xtype: 'tbtext', text: translate('Interface settings are read-only') }], { layout: { type: 'vbox', align: 'stretch' } }),
+                card('DNS', 'dns', 'globe', [properties('dnsGrid')], [{ text: translate('Edit'), itemId: 'dnsEdit', disabled: true, handler: () => { const row = me.down('#dnsGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('dns', row.get('key')); } } }, '->', selector()], { layout: 'fit' }),
+                card('Options', 'options', 'cog', [properties('optionGrid')], [{ text: translate('Edit'), itemId: 'optionsEdit', disabled: true, handler: () => { const row = me.down('#optionGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('options', row.get('key')); } } }, '->', selector()], { layout: 'fit' }),
+                card('Deployment', 'deployment', 'file-code-o', [{ xtype: 'pveBetterDockerCodeArea', itemId: 'source', readOnly: true, fieldStyle: 'font-family:monospace' }],
+                    [{ text: translate('Edit'), bdWrite: true, handler: editDeployment }, { text: translate('Download YAML'), handler: () => download('compose.yaml', me.down('#source').getValue()) }], { layout: 'fit' }),
+                { xtype: 'pveBetterDockerLogs', title: translate('Logs'), itemId: 'logs', iconCls: 'fa fa-file-text-o', apiUrl: url },
+                { xtype: 'proxmoxNodeTasks', title: translate('Task History'), itemId: 'tasks', iconCls: 'fa fa-list-alt',
+                    nodename: info.node, preFilter: { vmid: info.vmid } },
             ];
+            const hostAccess = Proxmox.UserName === 'root@pam' || Boolean(Ext.state.Manager.get('GuiCap')?.nodes?.['Sys.Console']);
+            if (!hostAccess) { me.items = me.items.filter(item => !['deployment', 'logs', 'console'].includes(item.itemId)); }
             const history = me.items.splice(me.items.findIndex(item => item.itemId === 'tasks'), 1)[0];
-            me.items.splice(6, 0, history);
-            me.loadDockerTasks = () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/tasks', method: 'GET',
-                params: { limit: 200 }, success: response => rows('taskGrid', response.result.data.filter(item =>
-                    item.type.startsWith('betterdocker') && (item.id === identifier || String(item.id) === String(info.vmid)))) });
+            me.items.splice(7, 0, history);
+            me.items.splice(8, 0, { xtype: 'pveBetterDockerSnapshots', title: translate('Snapshots'), itemId: 'snapshots', iconCls: 'fa fa-history', apiUrl: url, ownerPanel: me });
+            me.items.push({ xtype: 'pveACLView', title: translate('Permissions'), itemId: 'permissions', iconCls: 'fa fa-unlock', path: '/vms/' + info.vmid });
+            me.loadDockerTasks = () => { const tasks = me.down('#tasks'); if (tasks && tasks.store) { tasks.store.load(); } };
             ['resources', 'dns', 'options'].forEach(group => {
                 const entry = me.items.find(item => item.itemId === group);
-                entry.items[0].listeners = { itemdblclick: (_, record) => editSettings(group, record.get('key')) };
+                entry.items[0].listeners = { itemdblclick: (_, record) => editSettings(group, record.get('key')),
+                    selectionchange: (_, records) => { const button = me.down('#' + (group === 'resources' ? 'resourceEdit' : group + 'Edit'));
+                        if (button) { button.setDisabled(!records.length || records[0].get('key') === 'Settings source' || !editable() || locked()); } } };
             });
+            const services = me.items.find(item => item.itemId === 'services');
+            me.updateServiceActions = records => {
+                ['start', 'stop', 'restart'].forEach(verb => { const button = me.down('#service-' + verb);
+                    if (button) { button.setDisabled(!records.length || locked() || current && current.capabilities && !current.capabilities.power ||
+                        (records.length && (verb === 'start' ? records[0].get('state') === 'running' : records[0].get('state') !== 'running'))); } });
+            };
+            services.items[0].listeners = { selectionchange: (_, records) => me.updateServiceActions(records) };
             me.callParent();
+            const nativeHelp = me.down('proxmoxHelpButton');
+            if (nativeHelp) { nativeHelp.setHandler(help); }
             me.on('afterrender', () => { reload(); me.poll = setInterval(reload, 10000); }, me, { single: true });
             me.on('beforedestroy', () => clearInterval(me.poll));
         },
@@ -561,30 +1154,31 @@
         initComponent: function () {
             const me = this, record = me.pveSelNode, info = record.data;
             const running = info.status === 'running' || info.status === 'partial';
-            const allowed = Proxmox.UserName === 'root@pam';
+            const caps = Ext.state.Manager.get('GuiCap');
+            const allowed = Proxmox.UserName === 'root@pam' || Boolean(caps && caps.nodes && caps.nodes['Sys.Console']);
             const act = operation => dockerAction(info, operation);
-            me.title = 'Docker ' + info.name;
+            me.title = 'DCT ' + info.name;
             me.items = [
-                { text: 'Start', iconCls: 'fa fa-fw fa-play', disabled: !allowed || info.status === 'running', handler: () => act('start') },
-                { text: 'Shutdown', iconCls: 'fa fa-fw fa-power-off', disabled: !allowed || !running, handler: () => act('stop') },
-                { text: 'Restart', iconCls: 'fa fa-fw fa-refresh', disabled: !allowed || !running, handler: () => act('restart') },
+                { text: translate('Start'), iconCls: 'fa fa-fw fa-play', disabled: !allowed || info.status === 'running', handler: () => act('start') },
+                { text: translate('Shutdown'), iconCls: 'fa fa-fw fa-power-off', disabled: !allowed || !running, handler: () => act('stop') },
+                { text: translate('Restart'), iconCls: 'fa fa-fw fa-refresh', disabled: !allowed || !running, handler: () => act('restart') },
                 { xtype: 'menuseparator' },
-                { text: 'Console', iconCls: 'fa fa-fw fa-terminal', disabled: !allowed || !running || !me.workspace,
+                { text: translate('Console'), iconCls: 'fa fa-fw fa-terminal', disabled: !allowed || !running || !me.workspace,
                     handler: () => {
                         me.workspace.selectById(info.id);
                         const panel = me.workspace.query('pveBetterDockerConfig').find(item =>
                             !item.destroyed && item.pveSelNode.data.id === info.id);
                         if (panel) { panel.selectById('console'); }
                     } },
-                { text: 'Edit deployment', iconCls: 'fa fa-fw fa-pencil', disabled: !allowed,
-                    handler: () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + info.id.split('/')[1],
-                        method: 'GET', success: response => Ext.create('PVE.betterdocker.CreateWizard', {
-                            projectId: info.id.split('/')[1], vmid: info.vmid, nodename: info.node, deployment: response.result.data.deployment,
+                { text: translate('Edit deployment'), iconCls: 'fa fa-fw fa-pencil', disabled: !allowed,
+                    handler: () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1],
+                        method: 'GET', success: response => Ext.create('PVE.betterdocker.DeploymentEdit', {
+                            projectId: (info.realId || info.id).split('/')[1], vmid: info.vmid, nodename: info.node, deployment: response.result.data.deployment,
                         }).show() }) },
                 { xtype: 'menuseparator' },
-                { text: 'Remove', iconCls: 'fa fa-fw fa-trash', disabled: !allowed,
-                    handler: () => Ext.Msg.confirm('Remove Docker project',
-                        'Remove this project? Volumes and bind-mount data are retained.', answer => {
+                { text: translate('Remove'), iconCls: 'fa fa-fw fa-trash', disabled: !allowed,
+                    handler: () => Ext.Msg.confirm(translate('Remove Docker project'),
+                        translate('Remove this project? Volumes and bind-mount data are retained.'), answer => {
                             if (answer === 'yes') { act('delete'); }
                         }) },
             ];
@@ -599,8 +1193,8 @@
             const nodename = this.nodename;
             const createCT = this.getComponent('createct');
             this.insert(createCT ? this.items.indexOf(createCT) + 1 : 2, {
-                text: 'Create DCT', itemId: 'createdct', iconCls: 'fa bd-docker-icon',
-                disabled: Proxmox.UserName !== 'root@pam',
+                text: translate('Create DCT'), itemId: 'createdct', iconCls: 'fa bd-docker-icon',
+                disabled: Proxmox.UserName !== 'root@pam' && !(Ext.state.Manager.get('GuiCap') || {}).nodes?.['Sys.Console'],
                 handler: () => Ext.create('PVE.betterdocker.CreateWizard', { nodename }).show(),
             });
         },
@@ -622,9 +1216,63 @@
         return menu;
     };
 
+
+    if (PVE.form && PVE.form.ViewSelector) {
+        const viewInit = PVE.form.ViewSelector.prototype.initComponent;
+        Ext.override(PVE.form.ViewSelector, {
+            initComponent: function () {
+                viewInit.apply(this, arguments);
+                const getFilter = this.getViewFilter;
+                this.getViewFilter = function () {
+                    const view = getFilter.apply(this, arguments);
+                    if (view.id === 'tags' && view.filterfn) {
+                        const native = view.filterfn;
+                        view.filterfn = record => record.data.type === 'docker' || native(record);
+                    }
+                    if (view.id === 'tags' && view.getFilterFn) {
+                        const native = view.getFilterFn;
+                        view.getFilterFn = (...args) => {
+                            const filter = native(...args);
+                            return record => record.data.type === 'docker' || filter(record);
+                        };
+                    }
+                    return view;
+                };
+            },
+        });
+    }
+    // Native Tag View clones IDs, while its refresh lookup normalizes only VM/CT IDs.
+    // Resolve DCT clones in the existing ResourceStore collection without changing IDs.
+    const installResourceLookup = () => {
+        const collection = PVE.data && PVE.data.ResourceStore && PVE.data.ResourceStore.data;
+        if (!collection || collection.betterdockerLookup) { return; }
+        const lookup = collection.get;
+        collection.get = function (key) {
+            const record = lookup.call(this, key);
+            const alias = typeof key === 'string' && key.match(/^(docker\/[0-9a-f]{32})-/);
+            return record || (alias ? lookup.call(this, alias[1]) : record);
+        };
+        collection.betterdockerLookup = true;
+    };
     const originalInit = PVE.StdWorkspace.prototype.initComponent;
     const originalContent = PVE.StdWorkspace.prototype.setContent;
+    const originalSelect = PVE.StdWorkspace.prototype.selectById;
+    const originalLogin = PVE.StdWorkspace.prototype.onLogin;
     Ext.override(PVE.StdWorkspace, {
+        selectById: function (resourceId) {
+            if (typeof resourceId === 'string' && resourceId.startsWith('docker/')) {
+                const tree = this.down('pveResourceTree');
+                const root = tree && tree.getStore().getRootNode();
+                const clone = root && root.findChildBy(node => node.data.realId === resourceId, undefined, true);
+                if (clone) { resourceId = clone.data.id; }
+            }
+            return originalSelect.apply(this, [resourceId]);
+        },
+        onLogin: function (data) {
+            if (originalLogin) { originalLogin.apply(this, arguments); }
+            const button = this.down('#createDocker');
+            if (button) { button.setDisabled(!data || !(Proxmox.UserName === 'root@pam' || data.cap && data.cap.nodes && data.cap.nodes['Sys.Console'])); }
+        },
         setContent: function (comp) {
             if (comp && comp.pveSelNode && comp.pveSelNode.data.type === 'docker') {
                 comp.xtype = 'pveBetterDockerConfig';
@@ -633,13 +1281,14 @@
         },
         initComponent: function () {
             originalInit.apply(this, arguments);
+            installResourceLookup();
             try {
                 const user = this.down('#userinfo');
                 if (!user || !user.ownerCt) { return; }
                 const toolbar = user.ownerCt;
                 toolbar.insert(toolbar.items.indexOf(user), {
-                    xtype: 'button', text: 'Create Docker', iconCls: 'fa bd-docker-icon',
-                    margin: '3 5 0 0', baseCls: 'x-btn', disabled: Proxmox.UserName !== 'root@pam',
+                    xtype: 'button', itemId: 'createDocker', text: translate('Create DCT'), iconCls: 'fa bd-docker-icon',
+                    margin: '3 5 0 0', baseCls: 'x-btn', disabled: Proxmox.UserName !== 'root@pam' && !(Ext.state.Manager.get('GuiCap') || {}).nodes?.['Sys.Console'],
                     handler: () => Ext.create('PVE.betterdocker.CreateWizard').show(),
                 });
             } catch (error) { console.error('BetterDocker: cannot add toolbar button', error); }

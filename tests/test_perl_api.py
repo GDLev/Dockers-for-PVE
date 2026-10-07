@@ -20,7 +20,9 @@ sub register_method { push @main::registered, $_[1]; }
             (base / 'PVE/RPCEnvironment.pm').write_text('''
 package PVE::RPCEnvironment;
 sub get { bless {}, __PACKAGE__ }
-sub get_user { 'root@pam' }
+our $user = 'root@pam';
+sub get_user { $user }
+sub check { $main::grants{$_[2] . ':' . $_[3]->[0]} // 0 }
 1;
 ''')
             (base / 'PVE/AccessControl.pm').write_text('package PVE::AccessControl; 1;')
@@ -31,15 +33,28 @@ sub get_user { 'root@pam' }
 package JSON;
 use Exporter 'import';
 our @EXPORT_OK = qw(decode_json);
-sub decode_json { die 'not used in this test'; }
+use JSON::PP ();
+sub decode_json { JSON::PP::decode_json($_[0]); }
 1;
 ''')
-            subprocess.run(['perl', '-T', '-I' + folder, '-I' + str(ROOT / 'backend'), '-MPVE::API2::BetterDocker', '-e', '''
+            subprocess.run(['perl', '-T', '-I' + folder, '-I' + str(ROOT / 'backend'), '-MPVE::API2::BetterDocker', '-e', r'''
+# PVE's router cannot mix fixed and wildcard segments at the same depth.
+my %segments;
+for my $route (@main::registered) {
+    my @path = split('/', $route->{path});
+    for my $depth (0 .. $#path) {
+        my $parent = join('/', @path[0 .. $depth - 1]);
+        my $kind = $path[$depth] =~ /^\{/ ? 'wildcard' : 'fixed';
+        my $key = $depth . ':' . $parent;
+        die 'router conflict' if $segments{$key} && $segments{$key} ne $kind;
+        $segments{$key} = $kind;
+    }
+}
 my ($create) = grep { $_->{name} eq 'create' } @main::registered;
 die 'LXC template still required' if $create->{parameters}->{properties}->{ostemplate};
 die 'deployment missing' unless $create->{parameters}->{properties}->{deployment};
 for my $route (@main::registered) {
-    die 'non-root grant' if $route->{permissions}->{user} || $route->{permissions}->{check};
+    die 'missing runtime permission wrapper' unless $route->{permissions}->{user} eq 'all';
     die 'unprotected' unless $route->{protected} || $route->{name} eq 'vncwebsocket';
 }
 package PVE::API2::Cluster;
@@ -76,4 +91,46 @@ for my $invalid ('../101', "101\n", '99', '1000000000', '101;id', 'A' x 32) {
 die 'missing Docker resource' unless $result->[0]->{type} eq 'docker';
 die 'config exposed' if $result->[0]->{deployment} || $result->[0]->{compose};
 die 'schema missing Docker' unless grep { $_ eq 'docker' } @{$PVE::API2::Cluster::info->{returns}->{items}->{properties}->{type}->{enum}};
+$PVE::RPCEnvironment::user = 'audit@pve';
+my %param = (id => 'a' x 32, node => 'pve', action => 'start');
+for my $route (@main::registered) {
+    next if $route->{name} eq 'list';
+    eval { $route->{code}->(\%param); };
+    die "route lacks authorization: $route->{name}" unless $@ =~ /Permission denied/;
+}
+$main::grants{'/vms/101:VM.Audit'} = 1;
+*PVE::API2::BetterDocker::output = sub { '{"deployment":{"environment":"secret"},"services":[],"containers":[]}' };
+my ($management) = grep { $_->{name} eq 'management' } @main::registered;
+my $public = $management->{code}->(\%param);
+die 'auditor can read source secrets' if exists($public->{deployment});
+die 'auditor can configure Docker' if $public->{capabilities}->{configure};
+my ($logs) = grep { $_->{name} eq 'logs' } @main::registered;
+eval { $logs->{code}->(\%param); };
+die 'auditor can read logs' unless $@ =~ /Permission denied/;
+PVE::API2::BetterDocker::register_docker_method({ name => 'action', code => sub { 'allowed' } });
+my $power = $main::registered[-1];
+eval { $power->{code}->(\%param); };
+die 'audit implies power grant' unless $@ =~ /Permission denied/;
+$main::grants{'/vms/101:VM.PowerMgmt'} = 1;
+die 'power permission rejected' unless $power->{code}->(\%param) eq 'allowed';
+$param{action} = 'delete';
+eval { $power->{code}->(\%param); };
+die 'power grants destructive configuration' unless $@ =~ /Permission denied/;
+PVE::API2::BetterDocker::register_docker_method({ name => 'snapshot', code => sub { 'allowed' } });
+my $snapshot = $main::registered[-1];
+$param{action} = 'create';
+eval { $snapshot->{code}->(\%param); };
+die 'power grants snapshot' unless $@ =~ /Permission denied/;
+$main::grants{'/vms/101:VM.Snapshot.Rollback'} = 1;
+eval { $snapshot->{code}->(\%param); };
+die 'rollback grants snapshot creation' unless $@ =~ /Permission denied/;
+$param{action} = 'restore';
+die 'native rollback grant rejected' unless $snapshot->{code}->(\%param) eq 'allowed';
+$main::grants{'/vms/101:VM.Snapshot'} = 1;
+$param{action} = 'create';
+die 'native snapshot grant rejected' unless $snapshot->{code}->(\%param) eq 'allowed';
+$param{action} = 'delete';
+$main::grants{'/nodes/pve:Sys.Console'} = 1;
+die 'host administrator rejected' unless $power->{code}->(\%param) eq 'allowed';
+
 ''' , '101', 'a' * 32], check=True)

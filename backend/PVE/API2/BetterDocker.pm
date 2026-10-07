@@ -13,7 +13,7 @@ use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 my $helper = '/usr/local/lib/betterdocker/provision.py';
 my $node = { type => 'string', format => 'pve-node' };
 my $id = { type => 'string', pattern => '^[0-9a-f]{32}$' };
-my $root = { description => 'Only root@pam can manage host Docker projects.' };
+my $root = { description => 'Project privileges and host Sys.Console are checked by register_docker_method.' };
 
 sub output {
     my ($args) = @_;
@@ -88,6 +88,44 @@ sub task_id {
     die "Docker project does not exist on this node\n";
 }
 
+
+# VM.Audit permits a public inventory only. Host configuration, logs and shells
+# require Sys.Console because Docker runs directly on the PVE host.
+sub capabilities {
+    my ($identifier, $node) = @_;
+    my $rpc = PVE::RPCEnvironment::get();
+    my $user = $rpc->get_user();
+    my $root_user = $user eq 'root@pam';
+    my $vmid = defined($identifier) ? task_id($identifier, $node) : undef;
+    my $host = $root_user || $rpc->check($user, "/nodes/$node", ['Sys.Console'], 1);
+    my $audit = $host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Audit'], 1));
+    return { audit => $audit ? 1 : 0, configure => $host ? 1 : 0, console => $host ? 1 : 0,
+        snapshot => ($host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Snapshot'], 1))) ? 1 : 0,
+        rollback => ($host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Snapshot'], 1)) || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Snapshot.Rollback'], 1))) ? 1 : 0,
+        power => ($host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.PowerMgmt'], 1))) ? 1 : 0,
+        permissions => ($root_user || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['Permissions.Modify'], 1))) ? 1 : 0 };
+}
+
+sub register_docker_method {
+    my ($method) = @_;
+    my $code = $method->{code};
+    my $name = $method->{name};
+    $method->{permissions} = { user => 'all' };
+    $method->{code} = sub {
+        my ($param) = @_;
+        my $caps = capabilities($param->{id}, $param->{node});
+        my $scope = $name eq 'list' && $param->{diagnostics} ? 'configure' :
+                    $name =~ /^(list|management|rrddata|notes|capabilities|snapshots|snapshot_config)$/ ? 'audit' :
+                    ($name eq 'snapshot' && $param->{action} eq 'restore') ? 'rollback' :
+                    ($name eq 'snapshot' || $name eq 'snapshot_edit') ? 'snapshot' :
+                    ($name eq 'action' && $param->{action} ne 'delete') || $name eq 'service_action' ? 'power' : 'configure';
+        # List and capabilities are filtered below; knowing an ID is not a grant.
+        die "Permission denied\n" unless ($name eq 'list' && !$param->{diagnostics}) || $caps->{$scope};
+        return $code->($param);
+    };
+    __PACKAGE__->register_method($method);
+}
+
 # Called after Cluster.pm has registered its resource method. No new daemon is exposed.
 sub hook_resources {
     my $next = PVE::API2::Cluster->map_method_by_name('nextid');
@@ -116,16 +154,19 @@ sub hook_resources {
     $info->{code} = sub {
         my ($param) = @_;
         my $resources = $original->($param);
-        return $resources unless PVE::RPCEnvironment::get()->get_user() eq 'root@pam';
         return $resources if $param->{type} && $param->{type} ne 'vm';
         my %nodes = map { $_->{node} => $_->{status} } grep { $_->{type} eq 'node' } @$resources;
         for my $item (@{summaries()}) {
+            next unless capabilities($item->{id}, $item->{node})->{audit};
             my $status = $item->{status};
             $status = 'unknown' if exists($nodes{$item->{node}}) && $nodes{$item->{node}} ne 'online';
             push @$resources, {
                 id => "docker/$item->{id}", vmid => $item->{vmid}, type => 'docker', name => $item->{name},
                 text => $item->{vmid} ? "$item->{vmid} ($item->{name})" : $item->{name},
-                node => $item->{node}, status => $status, uptime => $status eq 'running' ? 1 : 0,
+                node => $item->{node}, status => $status, uptime => ($status eq 'running' || $status eq 'partial') ? ($item->{metrics}->{uptime} // 0) : 0,
+                tags => $item->{tags} // '',
+                cpu => $item->{metrics}->{cpu} // 0, maxcpu => $item->{metrics}->{cpus} // 0,
+                mem => $item->{metrics}->{mem} // 0, maxmem => $item->{metrics}->{maxmem} // 0,
                 hastate => 'unmanaged',
             };
         }
@@ -133,15 +174,17 @@ sub hook_resources {
     };
 }
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'list', path => '', method => 'GET', protected => 1, proxyto => 'node',
     description => 'List host Docker projects on this node.', permissions => $root,
-    parameters => { additionalProperties => 0, properties => { node => $node } },
+    parameters => { additionalProperties => 0, properties => { node => $node, diagnostics => { type => 'boolean', optional => 1, default => 0 } } },
     returns => { type => 'array', items => { type => 'object' } },
-    code => sub { my ($param) = @_; return [grep { $_->{node} eq $param->{node} } @{summaries()}]; },
+    code => sub { my ($param) = @_;
+        return [decode_json(output(['diagnostics', $param->{node}]))] if $param->{diagnostics};
+        return [grep { $_->{node} eq $param->{node} && capabilities($_->{id}, $_->{node})->{audit} } @{summaries()}]; },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'create', path => '', method => 'POST', protected => 1, proxyto => 'node',
     description => 'Deploy Docker Compose or an image directly on this node with a dedicated published-port IP.',
     permissions => $root,
@@ -173,7 +216,7 @@ __PACKAGE__->register_method({
     },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'update', path => '{id}', method => 'PUT', protected => 1, proxyto => 'node',
     description => 'Edit a deployment and apply Compose changes without changing its project IP.', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
@@ -197,7 +240,7 @@ __PACKAGE__->register_method({
     },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'detail', path => '{id}', method => 'GET', protected => 1, proxyto => 'node',
     description => 'Get a Docker deployment and its network settings.', permissions => $root,
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
@@ -205,7 +248,7 @@ __PACKAGE__->register_method({
     code => sub { my ($param) = @_; return decode_json(output(['detail', $param->{id}, $param->{node}])); },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'action', path => '{id}/action', method => 'POST', protected => 1, proxyto => 'node',
     description => 'Start, stop, restart or remove a Docker project (volumes retained).', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
@@ -223,23 +266,29 @@ __PACKAGE__->register_method({
     },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'logs', path => '{id}/logs', method => 'GET', protected => 1, proxyto => 'node',
-    description => 'Read the last 200 lines of project logs.', permissions => $root,
-    parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+    description => 'Read bounded project, service or container logs.', permissions => $root,
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        service => { type => 'string', maxLength => 128, optional => 1 },
+        container => { type => 'string', pattern => '^[0-9a-f]{64}$', optional => 1 },
+        tail => { type => 'integer', minimum => 1, maximum => 5000, default => 200, optional => 1 } } },
     returns => { type => 'string' },
-    code => sub { my ($param) = @_; return output(['logs', $param->{id}, $param->{node}]); },
+    code => sub { my ($p) = @_; return output(['logs', $p->{id}, $p->{node}, $p->{service} // '', $p->{container} // '', $p->{tail} // 200]); },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'management', path => '{id}/management', method => 'GET', protected => 1, proxyto => 'node',
     description => 'Read service resources, mounts, container state and live usage.', permissions => $root,
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
     returns => { type => 'object' },
-    code => sub { my ($param) = @_; return decode_json(output(['management', $param->{id}, $param->{node}])); },
+    code => sub { my ($param) = @_; my $info = decode_json(output(['management', $param->{id}, $param->{node}]));
+        $info->{capabilities} = capabilities($param->{id}, $param->{node});
+        delete $info->{deployment} unless $info->{capabilities}->{configure};
+        return $info; },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'settings', path => '{id}/settings', method => 'PUT', protected => 1, proxyto => 'node',
     description => 'Apply persistent resource, DNS and restart settings to one service.', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
@@ -262,7 +311,7 @@ __PACKAGE__->register_method({
     },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'termproxy', path => '{id}/termproxy', method => 'POST', protected => 1, proxyto => 'node',
     description => 'Open an interactive shell inside a running project container.', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
@@ -304,7 +353,7 @@ __PACKAGE__->register_method({
     },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'vncwebsocket', path => '{id}/vncwebsocket', method => 'GET', proxyto => 'node', permissions => $root,
     description => 'Connect a project terminal websocket using its authenticated ticket.',
     parameters => { additionalProperties => 0, properties => {
@@ -322,7 +371,7 @@ __PACKAGE__->register_method({
     },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'rrddata', path => '{id}/rrddata', method => 'GET', protected => 1, proxyto => 'node', permissions => $root,
     description => 'Read recorded Docker metrics in the native chart format (seven-day retention).',
     parameters => { additionalProperties => 0, properties => {
@@ -333,27 +382,144 @@ __PACKAGE__->register_method({
     code => sub { my ($p) = @_; return decode_json(output(['rrddata', $p->{id}, $p->{node}, $p->{timeframe}, $p->{cf} // 'AVERAGE'])); },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'notes', path => '{id}/config', method => 'GET', protected => 1, proxyto => 'node', permissions => $root,
     description => 'Read project notes.',
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
     returns => { type => 'object' },
-    code => sub { my ($p) = @_; return decode_json(output(['notes', $p->{id}, $p->{node}])); },
+    code => sub { my ($p) = @_; return { %{decode_json(output(['notes', $p->{id}, $p->{node}]))},
+        %{decode_json(output(['tags', $p->{id}, $p->{node}]))} }; },
 });
 
-__PACKAGE__->register_method({
+register_docker_method({
     name => 'set_notes', path => '{id}/config', method => 'PUT', protected => 1, proxyto => 'node', permissions => $root,
     description => 'Save project notes.',
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
-        description => { type => 'string', maxLength => 8192 } } },
+        description => { type => 'string', maxLength => 8192, optional => 1 },
+        tags => { type => 'string', maxLength => 2048, optional => 1 } } },
     returns => { type => 'null' },
     code => sub {
         my ($p) = @_;
         my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
-        chmod 0600, $path; print $fh $p->{description}; close $fh;
-        eval { output(['notes', $p->{id}, $p->{node}, $path]); };
+        chmod 0600, $path; print $fh ($p->{description} // ''); close $fh;
+        eval {
+            output(['notes', $p->{id}, $p->{node}, $path]) if defined($p->{description});
+            output(['tags', $p->{id}, $p->{node}, $p->{tags}]) if defined($p->{tags});
+        };
         my $err = $@; unlink $path; die $err if $err;
         return undef;
     },
 });
+
+register_docker_method({
+    name => 'preview', path => '', method => 'PUT', protected => 1, proxyto => 'node',
+    description => 'Validate Compose and preview non-secret deployment details.',
+    parameters => { additionalProperties => 0, properties => { node => $node,
+        deployment => { type => 'string', maxLength => 262144 }, id => { %$id, optional => 1 } } },
+    returns => { type => 'array', items => { type => 'object' } },
+    code => sub {
+        my ($p) = @_;
+        my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
+        chmod 0600, $path; print $fh $p->{deployment}; close $fh;
+        my $result = eval { decode_json(output(['preview', $path, defined($p->{id}) ? $p->{id} : ()])); };
+        my $err = $@; unlink $path; die $err if $err;
+        return $result;
+    },
+});
+
+register_docker_method({
+    name => 'service_action', path => '{id}/service-action', method => 'POST', protected => 1, proxyto => 'node',
+    description => 'Operate one Compose service without restarting dependencies.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        service => { type => 'string', maxLength => 128 }, action => { type => 'string', enum => ['start', 'stop', 'restart'] } } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($p) = @_;
+        my $rpc = PVE::RPCEnvironment::get();
+        $p->{action} =~ /\A(start|stop|restart)\z/ or die "Invalid service action\n";
+        my $action = $1;
+        return $rpc->fork_worker('betterdocker' . $action, task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'service-action', $p->{id}, $p->{node}, $p->{service}, $action]);
+        });
+    },
+});
+
+register_docker_method({
+    name => 'reset_settings', path => '{id}/reset-settings', method => 'POST', protected => 1, proxyto => 'node',
+    description => 'Restore Compose settings for one service while preserving stopped state.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        service => { type => 'string', maxLength => 128 } } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($p) = @_;
+        my $rpc = PVE::RPCEnvironment::get();
+        return $rpc->fork_worker('betterdockersettings', task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'reset-settings', $p->{id}, $p->{node}, $p->{service}]);
+        });
+    },
+});
+
+
+register_docker_method({
+    name => 'storage_limit', path => '{id}/storage-limit', method => 'PUT', protected => 1, proxyto => 'node',
+    description => 'Create or enlarge the bounded project data disk; services must be stopped.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        size_mib => { type => 'integer', minimum => 256, maximum => 1048576 } } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($p) = @_;
+        my $rpc = PVE::RPCEnvironment::get();
+        return $rpc->fork_worker('betterdockersettings', task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'storage-limit', $p->{id}, $p->{node}, $p->{size_mib}]);
+        });
+    },
+});
+
+register_docker_method({
+    name => 'snapshots', path => '{id}/snapshots', method => 'GET', protected => 1, proxyto => 'node',
+    description => 'List complete private DCT snapshots without deployment secrets.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+    returns => { type => 'array', items => { type => 'object' } },
+    code => sub { my ($p) = @_; return decode_json(output(['snapshots', $p->{id}, $p->{node}])); },
+});
+
+register_docker_method({
+    name => 'snapshot', path => '{id}/snapshot', method => 'POST', protected => 1, proxyto => 'node',
+    description => 'Create, restore or delete a DCT snapshot. Live snapshots freeze and resume services. Rollback stops services and creates no other snapshot.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        action => { type => 'string', enum => ['create', 'restore', 'delete'] },
+        snapname => { type => 'string', pattern => '[A-Za-z][A-Za-z0-9_-]{0,39}', maxLength => 40 },
+        description => { type => 'string', optional => 1, maxLength => 4096 } } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($p) = @_;
+        my $rpc = PVE::RPCEnvironment::get();
+        $p->{action} =~ /\A(create|restore|delete)\z/ or die "Invalid snapshot action\n";
+        my $action = $1;
+        # Names and descriptions are passed as argv, never through a shell or a public metadata file.
+        return $rpc->fork_worker('betterdockersnapshot' . $action, task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'snapshot', $p->{id}, $p->{node}, $action, $p->{snapname}, $p->{description} // '']);
+        });
+    },
+});
+
+register_docker_method({
+    name => 'snapshot_config', path => '{id}/snapshot/{snapname}/config', method => 'GET', protected => 1, proxyto => 'node',
+    description => 'Read public settings stored in a DCT snapshot.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        snapname => { type => 'string', pattern => '[A-Za-z][A-Za-z0-9_-]{0,39}', maxLength => 40 } } },
+    returns => { type => 'object' },
+    code => sub { my ($p) = @_; return decode_json(output(['snapshot-config', $p->{id}, $p->{node}, $p->{snapname}])); },
+});
+
+register_docker_method({
+    name => 'snapshot_edit', path => '{id}/snapshot/{snapname}/config', method => 'PUT', protected => 1, proxyto => 'node',
+    description => 'Edit a DCT snapshot description without changing its saved contents.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+        snapname => { type => 'string', pattern => '[A-Za-z][A-Za-z0-9_-]{0,39}', maxLength => 40 },
+        description => { type => 'string', maxLength => 4096 } } },
+    returns => { type => 'null' },
+    code => sub { my ($p) = @_; output(['snapshot-edit', $p->{id}, $p->{node}, $p->{snapname}, $p->{description}]); return undef; },
+});
+
 1;

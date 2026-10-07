@@ -1,10 +1,17 @@
-.bd-docker-icon { position: relative; background-image: url('/pve2/images/betterdocker.svg'); background-repeat: no-repeat; background-position: center; background-size: contain; }
-.bd-docker-icon::before { content: '\00a0'; }
-
-/* Menu icons occupy Proxmox's absolute-positioned column beside the label. */
-.x-menu-item-icon.bd-docker-icon { position: absolute; }
-
-/* Native status overlays assume a font glyph; the Docker logo is a background. */
+/* Match the surrounding PVE icon colour, including light/dark and selection. */
+.bd-docker-icon { position: relative; }
+.bd-docker-icon::before {
+    content: '\00a0';
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.1em;
+    background-color: currentColor;
+    -webkit-mask: url('/pve2/images/betterdocker.svg') center / contain no-repeat;
+    mask: url('/pve2/images/betterdocker.svg') center / contain no-repeat;
+}
+.x-menu-item-icon.bd-docker-icon,
+.x-treelist-item-icon.bd-docker-icon { position: absolute; }
 .x-tree-icon-custom.bd-docker-icon::after,
 .x-grid-icon-custom.bd-docker-icon::after {
     position: absolute;
@@ -13,4 +20,10 @@
     right: -3px;
     bottom: -1px;
     line-height: 1;
+}
+.bd-source textarea, textarea.bd-source {
+    font-family: monospace;
+    tab-size: 2;
+    white-space: pre;
+    overflow: auto;
 }

@@ -36,6 +36,61 @@ class ManagementTests(unittest.TestCase):
         worker.apply_settings(config, {'app': dict(VALUES, swap=-1)})
         self.assertEqual(config['services']['app']['memswap_limit'], -1)
 
+    def test_disk_setting_only_changes_selected_storage_size(self):
+        config = {'services': {'web': {'storage_opt': {'other': 'retained'}}, 'db': {'storage_opt': {'size': '2G'}}}}
+        worker.apply_settings(config, {'web': dict(VALUES, disk=512)})
+        self.assertEqual(config['services']['web']['storage_opt'], {'other': 'retained', 'size': '512M'})
+        self.assertEqual(config['services']['db']['storage_opt']['size'], '2G')
+        worker.apply_settings(config, {'web': dict(VALUES, disk=0)})
+        self.assertNotIn('size', config['services']['web']['storage_opt'])
+        for disk in (-1, True, 0.5, 1048577):
+            with self.assertRaises(ValueError):
+                worker.validate_settings(dict(VALUES, disk=disk))
+
+    def test_unsupported_container_quota_fails_before_runtime_change(self):
+        with patch.object(worker, 'rootfs_quota_support', return_value={'supported': False}), patch.object(worker, 'locked') as lock:
+            with self.assertRaisesRegex(ValueError, 'XFS'):
+                worker.service_settings(ID, 'pve', 'web', dict(VALUES, disk=512))
+            lock.assert_not_called()
+
+    def test_data_disk_rejects_running_and_external_mounts(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'locked'), patch.object(worker, 'detail'):
+            directory = Path(folder) / ID
+            directory.mkdir()
+            runtime = directory / 'compose.runtime.json'
+            runtime.write_text(json.dumps({'services': {'web': {'volumes': [{'type': 'bind', 'source': '/etc', 'target': '/data'}]}}}))
+            for state in ('running', 'paused', 'restarting', 'removing'):
+                with self.subTest(state=state), patch.object(worker, 'container_records', return_value=[{'state': state}]):
+                    with self.assertRaisesRegex(ValueError, 'Stop all'):
+                        worker.project_storage_limit(ID, 'pve', 512)
+            with patch.object(worker, 'container_records', return_value=[]):
+                with self.assertRaisesRegex(ValueError, 'external host paths'):
+                    worker.project_storage_limit(ID, 'pve', 512)
+            self.assertFalse((directory / 'storage.ext4').exists())
+
+    def test_data_disk_mapping_persists_and_rejects_bypass(self):
+        mapping = {'bind:/owned/data': '/owned/storage-data/data-0'}
+        config = {'services': {'web': {'volumes': [{'type': 'bind', 'source': '/owned/data', 'target': '/data'}]}}}
+        with patch.object(worker, 'storage_config', return_value={'mapping': mapping}), patch.object(worker, 'storage_mount'):
+            worker.apply_storage(config, ID)
+            self.assertEqual(config['services']['web']['volumes'][0]['source'], mapping['bind:/owned/data'])
+            worker.apply_storage(config, ID)
+            config['services']['web']['volumes'].append({'type': 'bind', 'source': '/external', 'target': '/new'})
+            with self.assertRaisesRegex(ValueError, 'cannot be bypassed'):
+                worker.apply_storage(config, ID)
+
+    def test_data_disk_is_grow_only(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'locked'), patch.object(worker, 'detail'), patch.object(worker, 'container_records', return_value=[]), patch.object(worker, 'storage_config', return_value={'size_mib': 512}), patch.object(worker, 'run') as run:
+            for size in (256, 512):
+                with self.assertRaisesRegex(ValueError, 'only be enlarged'):
+                    worker.project_storage_limit(ID, 'pve', size)
+            run.assert_not_called()
+
+    def test_disk_units(self):
+        self.assertEqual(worker.disk_mib('512M'), 512)
+        self.assertEqual(worker.disk_mib('2GiB'), 2048)
+        self.assertEqual(worker.disk_mib('1073741824'), 1024)
+
     def test_console_cannot_exec_into_another_project_or_stopped_container(self):
         container = 'b' * 64
         with patch.object(worker, 'detail'), patch.object(worker, 'container_records', return_value=[]):

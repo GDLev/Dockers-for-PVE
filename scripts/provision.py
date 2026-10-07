@@ -71,7 +71,8 @@ def release_id(identifier):
 def run(args, **kwargs):
     kwargs.setdefault('timeout', 60)
     kwargs.setdefault('env', {'PATH': os.environ.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin'), 'HOME': '/root'})
-    return subprocess.run(args, check=True, text=True, **kwargs)
+    kwargs.setdefault('check', True)
+    return subprocess.run(args, text=True, **kwargs)
 
 
 def capture(args):
@@ -255,10 +256,13 @@ def prepare(data, identifier, directory, project_directory=None):
     # Canonical config may contain passwords; never send it to the task log.
     try:
         config = json.loads(capture(command))
-    except subprocess.CalledProcessError:
-        raise ValueError('Invalid Compose configuration. Check YAML, .env and referenced files.') from None
+    except subprocess.CalledProcessError as error:
+        locations = sorted(set(re.findall(r'line [0-9]+', error.stderr or '')))
+        location = ' (' + ', '.join(locations) + ')' if locations else ''
+        raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
     config = bind_ports(config, data['address'], identifier)
     apply_settings(config, load_settings(project_directory))
+    apply_storage(config, identifier)
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
     def escape(value):
         if isinstance(value, str):
@@ -279,7 +283,7 @@ def load_settings(directory):
 
 
 def validate_settings(value):
-    if not isinstance(value, dict) or set(value) - {'cpus', 'memory', 'swap', 'cpuunits', 'pids', 'dns', 'dns_search', 'restart'}:
+    if not isinstance(value, dict) or set(value) - {'cpus', 'memory', 'swap', 'cpuunits', 'pids', 'dns', 'dns_search', 'restart', 'disk'}:
         raise ValueError('Invalid service settings')
     result = {}
     for key, maximum in [('cpus', 8192), ('memory', 1048576), ('swap', 1048576), ('cpuunits', 262144), ('pids', 4194304)]:
@@ -291,6 +295,11 @@ def validate_settings(value):
         raise ValueError('CPU units must be at least 2')
     if result['swap'] and not result['memory']:
         raise ValueError('Set a memory limit before setting swap')
+    if 'disk' in value:
+        disk = value['disk']
+        if isinstance(disk, bool) or not isinstance(disk, int) or not 0 <= disk <= 1048576:
+            raise ValueError('Invalid disk limit')
+        result['disk'] = disk
     dns = value.get('dns', [])
     if not isinstance(dns, list) or len(dns) > 8:
         raise ValueError('Invalid DNS servers')
@@ -333,6 +342,13 @@ def apply_settings(config, settings):
             service.pop('mem_reservation', None)
         if values['pids']:
             service['pids_limit'] = values['pids']
+        if 'disk' in values:
+            options = service.setdefault('storage_opt', {})
+            options.pop('size', None)
+            if values['disk']:
+                options['size'] = str(values['disk']) + 'M'
+            if not options:
+                service.pop('storage_opt', None)
         service['dns'] = values['dns']
         service['dns_search'] = values['dns_search']
         service['restart'] = values['restart']
@@ -352,7 +368,9 @@ def container_records(identifier):
         records.append({'id': item['Id'], 'name': item['Name'].lstrip('/'),
                         'service': labels.get('com.docker.compose.service', ''),
                         'state': item['State']['Status'], 'started': item['State'].get('StartedAt', ''),
-                        'image': item['Config']['Image'], 'pid': item['State'].get('Pid', 0)})
+                        'image': item['Config']['Image'], 'pid': item['State'].get('Pid', 0),
+                        'health': item['State'].get('Health', {}).get('Status', 'none'),
+                        'restarts': item.get('RestartCount', 0), 'exitcode': item['State'].get('ExitCode', 0)})
     return records
 
 
@@ -498,6 +516,193 @@ def notes(identifier, node, description=None):
     return {'description': path.read_text() if path.exists() else ''}
 
 
+def rootfs_quota_support():
+    """Do not advertise Docker size quotas on an unsupported backing filesystem."""
+    cache = ROOT.parent / 'rootfs-quota.json'
+    if cache.exists() and time.time() - cache.stat().st_mtime < 60:
+        return json.loads(cache.read_text())
+    result = {'supported': False, 'reason': 'Requires overlay2 on XFS with project quotas'}
+    try:
+        info = json.loads(capture(['docker', 'info', '--format', '{{json .}}']))
+        fs = json.loads(capture(['findmnt', '-J', '-T', info['DockerRootDir'], '-o', 'FSTYPE,OPTIONS']))['filesystems'][0]
+        options = set(fs['options'].split(','))
+        result['supported'] = info.get('Driver') == 'overlay2' and fs['fstype'] == 'xfs' and bool(options & {'pquota', 'prjquota'})
+        result['driver'] = info.get('Driver', '')
+        if result['supported']:
+            result['reason'] = ''
+        write_json(cache, result)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        pass
+    return result
+
+
+def disk_mib(value):
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)\s*([kmgt]?)(?:i?b)?', str(value), re.I)
+    if not match:
+        return 0
+    return int(float(match[1]) * (1024 ** (' kmgt'.index(match[2].lower()))) / 1048576)
+
+
+def storage_config(identifier):
+    path = ROOT / project_id(identifier) / 'storage.json'
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def storage_mount(identifier):
+    folder = ROOT / project_id(identifier)
+    config = storage_config(identifier)
+    if not config:
+        return
+    mountpoint = folder / 'storage-data'
+    image = folder / 'storage.ext4'
+    # Mount by exact owned image; fail closed if an unrelated mount occupies the path.
+    if os.path.ismount(mountpoint):
+        device = capture(['findmnt', '-n', '-M', str(mountpoint), '-o', 'SOURCE']).strip()
+        backing = capture(['losetup', '-n', '-O', 'BACK-FILE', device]).strip()
+        if Path(backing).resolve() != image.resolve():
+            raise ValueError('Project storage mount is occupied by another filesystem')
+        return
+    mountpoint.mkdir(mode=0o700, exist_ok=True)
+    run(['mount', '-o', 'loop,nodev,nosuid', str(image), str(mountpoint)])
+
+
+def apply_storage(config, identifier):
+    settings = storage_config(identifier)
+    if settings:
+        storage_mount(identifier)
+        mapping = settings['mapping']
+        for service in config.get('services', {}).values():
+            for mount in service.get('volumes', []):
+                key = mount.get('type', '') + ':' + mount.get('source', '')
+                if key in mapping:
+                    mount.update(type='bind', source=mapping[key])
+                    mount.pop('volume', None)
+                    mount.pop('bind', None)
+                elif not mount.get('read_only') and mount.get('type') != 'tmpfs' and mount.get('source') not in mapping.values():
+                    raise ValueError('New writable mounts require a separate data migration; existing data disk cannot be bypassed')
+    return config
+
+
+def project_storage_status(identifier):
+    settings = storage_config(identifier)
+    result = {'limit_mib': settings.get('size_mib', 0), 'rootfs': rootfs_quota_support(), 'mounted': False}
+    if settings:
+        point = ROOT / identifier / 'storage-data'
+        result['mounted'] = os.path.ismount(point)
+        if result['mounted']:
+            fs = os.statvfs(point)
+            result.update(used=(fs.f_blocks - fs.f_bfree) * fs.f_frsize, available=fs.f_bavail * fs.f_frsize)
+    return result
+
+
+def project_storage_limit(identifier, node, size_mib):
+    size_mib = int(size_mib)
+    if not 256 <= size_mib <= 1048576:
+        raise ValueError('Project data disk must be between 256 and 1048576 MiB')
+    with locked():
+        detail(identifier, node)
+        if any(item['state'] not in ('created', 'exited', 'dead') for item in container_records(identifier)):
+            raise ValueError('Stop all project services before changing the data disk')
+        folder = ROOT / identifier
+        previous = storage_config(identifier)
+        if previous and size_mib <= previous['size_mib']:
+            raise ValueError('Data disks can only be enlarged; shrinking or removing a disk is not supported')
+        image, point = folder / 'storage.ext4', folder / 'storage-data'
+        if previous:
+            storage_mount(identifier)
+            with image.open('r+b') as handle:
+                handle.truncate(size_mib * 1048576)
+            device = capture(['findmnt', '-n', '-M', str(point), '-o', 'SOURCE']).strip()
+            run(['losetup', '-c', device])
+            run(['resize2fs', device], timeout=1800)
+            previous['size_mib'] = size_mib
+            write_json(folder / 'storage.json', previous)
+            return
+        runtime = folder / 'compose.runtime.json'
+        original = runtime.read_text()
+        config = json.loads(original)
+        mapping, sources = {}, {}
+        for service in config['services'].values():
+            for mount in service.get('volumes', []):
+                if mount.get('read_only') or mount.get('type') == 'tmpfs':
+                    continue
+                kind, source = mount.get('type'), mount.get('source', '')
+                key = str(kind) + ':' + source
+                if kind == 'bind':
+                    path = Path(source)
+                    # Do not migrate arbitrary host paths, sockets or configuration files.
+                    if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()) or path.resolve() == folder.resolve():
+                        raise ValueError('Data disk requires project-owned directory mounts; external host paths are not migrated')
+                    if path.exists() and not path.is_dir():
+                        raise ValueError('Data disk supports directory mounts only')
+                elif kind == 'volume':
+                    definition = config.get('volumes', {}).get(source, {})
+                    if definition.get('external') or definition.get('driver_opts'):
+                        raise ValueError('External or custom-driver volumes cannot be migrated to the data disk')
+                    volume_name = definition.get('name', 'bd-' + identifier + '_' + source)
+                    volume = json.loads(capture(['docker', 'volume', 'inspect', volume_name]))[0]
+                    if volume.get('Driver') != 'local' or volume.get('Options') or volume.get('Labels', {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                        raise ValueError('Only local volumes owned by this Compose project can be migrated')
+                    path = Path(volume['Mountpoint'])
+                    users = capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + volume_name]).split()
+                    owned = {item['id'] for item in container_records(identifier)}
+                    if any(item not in owned for item in users):
+                        raise ValueError('A volume is shared with another project')
+                else:
+                    raise ValueError('Unsupported writable mount')
+                sources[key] = path
+        if not sources:
+            raise ValueError('Project has no writable data directory or local volume')
+        if image.exists() or point.exists():
+            raise ValueError('An unfinished storage migration exists; inspect it before retrying')
+        needed = sum(int(capture(['du', '-sx', '-B1', str(path)]).split()[0]) for path in set(sources.values()) if path.exists())
+        if needed + 64 * 1048576 > size_mib * 1048576 * 0.9:
+            raise ValueError('Data disk is too small for the current data and filesystem overhead')
+        for command in ('mkfs.ext4', 'mount', 'losetup', 'resize2fs', 'findmnt', 'cp', 'du', 'systemd-escape', 'systemctl'):
+            if not shutil.which(command):
+                raise ValueError('Missing storage tool: ' + command)
+        # Original sources remain intact as a recovery copy. Runtime is switched only after copying succeeds.
+        with image.open('xb') as handle:
+            os.chmod(image, 0o600)
+            handle.truncate(size_mib * 1048576)
+        mounted = False
+        try:
+            run(['mkfs.ext4', '-q', '-m', '0', str(image)])
+            point.mkdir(mode=0o700)
+            run(['mount', '-o', 'loop,nodev,nosuid', str(image), str(point)])
+            mounted = True
+            for index, (key, path) in enumerate(sources.items()):
+                target = point / ('data-' + str(index))
+                target.mkdir()
+                if path.exists():
+                    run(['cp', '-a', '--', str(path) + '/.', str(target)], timeout=1800)
+                mapping[key] = str(target)
+            write_json(folder / 'storage.json', {'size_mib': size_mib, 'mapping': mapping})
+            apply_storage(config, identifier)
+            write_json(runtime, config)
+            unit = capture(['systemd-escape', '--path', '--suffix=mount', str(point)]).strip()
+            if not re.fullmatch(r'[a-zA-Z0-9_.\\-]+\.mount', unit):
+                raise ValueError('Invalid storage mount unit')
+            unit_path = Path('/etc/systemd/system') / unit
+            unit_path.write_text('[Unit]\nDescription=BetterDocker project data disk\nBefore=docker.service\n\n[Mount]\nWhat=' + str(image) + '\nWhere=' + str(point) + '\nType=ext4\nOptions=loop,nodev,nosuid\n\n[Install]\nRequiredBy=docker.service\n')
+            run(['systemctl', 'daemon-reload'])
+            run(['systemctl', 'enable', unit])
+        except Exception:
+            runtime.write_text(original)
+            (folder / 'storage.json').unlink(missing_ok=True)
+            if 'unit_path' in locals():
+                with contextlib.suppress(subprocess.SubprocessError):
+                    run(['systemctl', 'disable', unit])
+                unit_path.unlink(missing_ok=True)
+                run(['systemctl', 'daemon-reload'])
+            if mounted:
+                run(['umount', str(point)])
+            # Preserve partially copied disk for diagnosis; never erase application data.
+            raise
+        (folder / 'snapshot-restored.json').unlink(missing_ok=True)
+        print('Project data moved to a bounded disk. Original sources retained as a recovery copy.')
+
+
 def management(identifier, node, shared_stats=None):
     info = detail(identifier, node)
     directory = ROOT / identifier
@@ -513,9 +718,12 @@ def management(identifier, node, shared_stats=None):
                   'pids': max(0, int(service.get('pids_limit') or limits.get('pids') or 0)),
                   'dns': service.get('dns', []), 'dns_search': service.get('dns_search', []),
                   'restart': service.get('restart', 'no')}
+        if service.get('storage_opt', {}).get('size'):
+            values['disk'] = disk_mib(service['storage_opt']['size'])
         info['services'].append({'name': name, 'image': service.get('image', ''),
                                  'settings': settings.get(name, values), 'replicas': service.get('deploy', {}).get('replicas', 1),
-                                 'mounts': service.get('volumes', []), 'ports': service.get('ports', [])})
+                                 'mounts': service.get('volumes', []), 'ports': service.get('ports', []),
+                                 'overridden': name in settings})
     info['containers'] = container_records(identifier)
     active = [item['id'] for item in info['containers'] if item['state'] == 'running']
     info['stats'] = []
@@ -527,11 +735,15 @@ def management(identifier, node, shared_stats=None):
     info['metrics'] = metric_snapshot(info['containers'], info['stats'], info['services'])
     info['metrics'].update(swap_usage(info['containers'], info['services']))
     info['metrics'].update(disk_usage(identifier, info['containers']))
+    info['storage'] = project_storage_status(identifier)
+    info['operation'] = operation_state(identifier)
     return info
 
 
 def service_settings(identifier, node, service, values):
     values = validate_settings(values)
+    if values.get('disk') and not rootfs_quota_support()['supported']:
+        raise ValueError('Container disk limit requires overlay2 on XFS with project quotas; volumes use a separate data disk')
     with locked():
         info = detail(identifier, node)
         directory = ROOT / identifier
@@ -551,6 +763,11 @@ def service_settings(identifier, node, service, values):
         except Exception:
             runtime.write_text(original)
             raise
+        marker = directory / 'snapshot-restored.json'
+        if marker.exists():
+            restored = json.loads(marker.read_text())
+            restored['containers'] = [row['id'] for row in container_records(identifier)]
+            write_json(marker, restored)
         write_json(directory / 'settings.json', settings)
         os.chmod(directory / 'settings.json', 0o600)
         refresh(node)
@@ -736,10 +953,14 @@ def dhcp_event(environment):
 
 
 def rebind_runtime(directory, address):
+    if (directory / 'storage.json').exists():
+        storage_mount(directory.name)
     if not address or address == '0.0.0.0':
         raise ValueError('A dedicated address must be acquired before deployment')
     path = directory / 'compose.runtime.json'
     config = json.loads(path.read_text())
+    if (directory / 'storage.json').exists():
+        apply_storage(config, directory.name)
     for service in config['services'].values():
         for port in service.get('ports', []):
             port['host_ip'] = address
@@ -766,7 +987,8 @@ def sync_dhcp(info):
         rebind_runtime(directory, assigned['address'])
         info['address'] = assigned['address']
         if info['status'] in ('running', 'partial', 'creating') or info.get('network_resume'):
-            run(compose_base(directory, info['id']) + ['up', '-d'], timeout=1800)
+            if not restored_start(info['id']):
+                run(compose_base(directory, info['id']) + ['up', '-d'], timeout=1800)
         info.pop('network_resume', None)
         if info['status'] == 'network-error':
             info['status'] = 'creating'
@@ -809,6 +1031,7 @@ def create(data, node, identifier=None):
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             raise
+        (directory / 'snapshot-restored.json').unlink(missing_ok=True)
         write_json(directory / 'request.json', data)
         info = {'id': identifier, 'vmid': vmid, 'node': node, 'name': data['name'], 'bridge': data['bridge'],
                 'address': data['address'], 'status': 'creating', 'created': int(time.time()),
@@ -865,7 +1088,11 @@ def refresh(node):
         try:
             shared_stats = [json.loads(line) for line in capture(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *active]).splitlines()] if active else []
             for info in due:
-                record_metrics(management(info['id'], node, shared_stats=shared_stats))
+                snapshot = management(info['id'], node, shared_stats=shared_stats)
+                record_metrics(snapshot)
+                public = json.loads((METADATA / (info['id'] + '.json')).read_text())
+                public['metrics'] = {key: snapshot['metrics'][key] for key in ('cpu', 'cpus', 'mem', 'maxmem', 'uptime', 'time')}
+                write_json(METADATA / (info['id'] + '.json'), public)
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             print(f'Metrics unavailable: {error}', file=sys.stderr)
 
@@ -874,7 +1101,7 @@ def action(identifier, node, operation):
     with locked():
         info = detail(identifier, node)
         directory = ROOT / identifier
-        commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['up', '-d', '--force-recreate'], 'delete': ['down']}
+        commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['restart'], 'delete': ['down']}
         if operation not in commands:
             raise ValueError('Unsupported operation')
         if operation in ('start', 'restart'):
@@ -884,7 +1111,8 @@ def action(identifier, node, operation):
             info.pop('network_resume', None)
             info['status'] = 'creating'
             write_json(METADATA / (identifier + '.json'), info)
-        run(compose_base(directory, identifier) + commands[operation], timeout=1800)
+        if operation != 'start' or not restored_start(identifier):
+            run(compose_base(directory, identifier) + commands[operation], timeout=1800)
         if operation == 'delete':
             # Reserve the metadata until the owned alias is successfully released.
             remove_network(info)
@@ -921,6 +1149,7 @@ def update(identifier, node, data):
             config = prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory)
             for filename in ('compose.source.yaml', '.env', 'compose.runtime.json'):
                 os.replace(staging / filename, directory / filename)
+        (directory / 'snapshot-restored.json').unlink(missing_ok=True)
         write_json(directory / 'request.json', data)
         info = {key: value for key, value in existing.items() if key != 'deployment'}
         info['expected'] = sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values())
@@ -940,14 +1169,711 @@ def update(identifier, node, data):
 
 def restore(node):
     with locked():
+        for path in ROOT.glob('*/storage.json'):
+            storage_mount(path.parent.name)
         for info in summaries():
             if info['node'] == node:
                 ensure_address(info, wait=False)
 
 
+# Operation markers contain no deployment data and live outside project directories.
+# The per-project flock rejects conflicting requests instead of queueing them.
+def operation_state(identifier):
+    path = ROOT.parent / 'operations' / (project_id(identifier) + '.json')
+    if not path.exists():
+        return {}
+    state = json.loads(path.read_text())
+    if state.get('active'):
+        pid = state.get('pid', 0)
+        try:
+            alive = pid > 0 and (PROC / str(pid) / 'stat').read_text().split(') ', 1)[1].split()[19] == state.get('process_start')
+        except (OSError, IndexError):
+            alive = False
+        if not alive:
+            state.update(active=False, failed=True, message='Operation interrupted. Open Task History.')
+    return state
+
+
+@contextlib.contextmanager
+def operation(identifier, name):
+    project_id(identifier)
+    folder = ROOT.parent / 'operations'
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (folder / (identifier + '.lock')).open('w') as handle:
+        os.chmod(handle.name, 0o600)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('Another operation is running for this project') from None
+        path = folder / (identifier + '.json')
+        pid = os.getpid()
+        state = {'active': True, 'action': name, 'pid': pid, 'started': int(time.time()),
+                 'process_start': (PROC / str(pid) / 'stat').read_text().split(') ', 1)[1].split()[19]}
+        write_json(path, state)
+        os.chmod(path, 0o600)
+        try:
+            yield
+        except Exception:
+            state.update(active=False, failed=True, message='Operation failed. Open Task History.')
+            raise
+        finally:
+            state.update(active=False, finished=int(time.time()))
+            write_json(path, state)
+
+
+def preview(data, identifier=None):
+    identifier = project_id(identifier) if identifier else uuid.uuid4().hex
+    with tempfile.TemporaryDirectory(prefix='betterdocker-preview-') as folder:
+        config = prepare(dict(validate(data), address=data.get('address') or '0.0.0.0'), identifier,
+                         Path(folder), project_directory=ROOT / identifier)
+        # Deliberately return only a plan, never expanded env values or secrets.
+        return [{'service': name, 'image': service.get('image', ''),
+                 'replicas': service.get('deploy', {}).get('replicas', 1),
+                 'ports': service.get('ports', []),
+                 'mounts': [{'type': m.get('type'), 'target': m.get('target'),
+                             'read_only': m.get('read_only', False)} for m in service.get('volumes', [])]}
+                for name, service in config['services'].items()]
+
+
+def project_tags(identifier, node, tags=None):
+    with locked():
+        info = detail(identifier, node)
+        info.pop('deployment', None)
+        if tags is not None:
+            entries = sorted(set(tag.strip().lower() for tag in tags.split(';') if tag.strip()))
+            if len(entries) > 32 or any(not re.fullmatch(r'[a-z0-9_][a-z0-9_.+-]{0,63}', tag) for tag in entries):
+                raise ValueError('Invalid tags')
+            info['tags'] = ';'.join(entries)
+            write_json(METADATA / (identifier + '.json'), info)
+        return {'tags': info.get('tags', '')}
+
+
+def service_action(identifier, node, service, verb):
+    with locked():
+        info = detail(identifier, node)
+        directory = ROOT / identifier
+        config = json.loads((directory / 'compose.runtime.json').read_text())
+        if service not in config['services'] or verb not in ('start', 'stop', 'restart'):
+            raise ValueError('Invalid service operation')
+        if verb in ('start', 'restart'):
+            ensure_address(info)
+            rebind_runtime(directory, info['address'])
+        command = {'start': ['up', '-d', '--no-deps'], 'stop': ['stop'], 'restart': ['restart']}[verb]
+        if verb != 'start' or not restored_start(identifier, service):
+            run(compose_base(directory, identifier) + command + [service], timeout=1800)
+        refresh(node)
+
+
+def reset_settings(identifier, node, service):
+    with locked():
+        info = detail(identifier, node)
+        directory = ROOT / identifier
+        settings = load_settings(directory)
+        if service not in settings:
+            return
+        original = (directory / 'compose.runtime.json').read_text()
+        previous = dict(settings)
+        settings.pop(service)
+        active = any(c['service'] == service and c['state'] == 'running' for c in container_records(identifier))
+        marker = directory / 'snapshot-restored.json'
+        if marker.exists():
+            restored = json.loads(marker.read_text())
+            restored['containers'] = [row['id'] for row in container_records(identifier)]
+            write_json(marker, restored)
+        write_json(directory / 'settings.json', settings)
+        os.chmod(directory / 'settings.json', 0o600)
+        try:
+            with tempfile.TemporaryDirectory(prefix='betterdocker-reset-', dir=ROOT) as folder:
+                staging = Path(folder)
+                prepare(dict(info['deployment'], address=info.get('address') or '0.0.0.0'), identifier, staging, directory)
+                os.replace(staging / 'compose.runtime.json', directory / 'compose.runtime.json')
+            run(compose_base(directory, identifier) + ['up', '-d' if active else '--no-start', '--no-deps', service], timeout=1800)
+            marker = directory / 'snapshot-restored.json'
+            if marker.exists():
+                restored = json.loads(marker.read_text())
+                restored['containers'] = [row['id'] for row in container_records(identifier)]
+                write_json(marker, restored)
+        except Exception:
+            write_json(directory / 'settings.json', previous)
+            (directory / 'compose.runtime.json').write_text(original)
+            raise
+        refresh(node)
+
+
+def project_logs(identifier, node, service='', container='', tail=200):
+    detail(identifier, node)
+    tail = int(tail)
+    if not 1 <= tail <= 5000:
+        raise ValueError('Tail must be between 1 and 5000')
+    if container:
+        if not any(c['id'] == container for c in container_records(identifier)):
+            raise ValueError('Container does not belong to this project')
+        result = run(['docker', 'logs', '--timestamps', '--tail', str(tail), container], capture_output=True)
+        return '\n'.join(sorted((result.stdout + result.stderr).splitlines())) + '\n'
+    config = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
+    if service and service not in config['services']:
+        raise ValueError('Unknown service')
+    return capture(compose_base(ROOT / identifier, identifier) + ['logs', '--no-color', '--timestamps', '--tail', str(tail)] + ([service] if service else []))
+
+
+def diagnostics(node):
+    if node != current_node():
+        raise ValueError('Wrong node')
+    def probe(command):
+        try:
+            return capture(command).strip()
+        except (OSError, subprocess.SubprocessError):
+            return 'Unavailable'
+    docker_root = probe(['docker', 'info', '--format', '{{.DockerRootDir}}'])
+    disk = shutil.disk_usage(docker_root) if Path(docker_root).is_dir() else None
+    projects = [item for item in summaries() if item['node'] == node]
+    targets = ['/usr/share/pve-manager/js/betterdocker.js', '/usr/share/pve-manager/css/betterdocker.css',
+               '/usr/share/perl5/PVE/API2/BetterDocker.pm', '/usr/local/lib/betterdocker/provision.py']
+    markers = ['/usr/share/pve-manager/index.html.tpl', '/usr/share/perl5/PVE/API2/Nodes.pm',
+               '/usr/share/perl5/PVE/API2/Cluster.pm', '/usr/share/perl5/PVE/Cluster.pm']
+    integration = all(Path(p).is_file() for p in targets) and all(Path(p).is_file() and 'BEGIN BETTERDOCKER' in Path(p).read_text() for p in markers)
+    return {'addon': '19', 'pve': probe(['pveversion']), 'engine': probe(['docker', '--version']),
+            'compose': probe(['docker', 'compose', 'version', '--short']),
+            'timer': probe(['systemctl', 'is-active', 'betterdocker-refresh.timer']),
+            'addresses': probe(['systemctl', 'is-active', 'betterdocker-addresses.service']),
+            'integration': 'OK' if integration else 'Repair required',
+            'integration_check': probe(['systemctl', 'show', '--property=Result', '--value', 'betterdocker-integration.service']), 'projects': len(projects),
+            'storage': {'path': docker_root, 'total': disk.total, 'used': disk.used, 'free': disk.free} if disk else {},
+            'dhcp': [{'vmid': p.get('vmid'), 'state': probe(['systemctl', 'is-active', 'betterdocker-dhcp@' + p['id'] + '.service'])}
+                     for p in projects if p.get('ipv4mode') == 'dhcp']}
+
+
+# DCT snapshots are private, complete copies independent of the Docker image cache.
+def snapshot_name(value):
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,39}', value) or value in ('current', 'vzdump'):
+        raise ValueError('Snapshot name must start with a letter and contain at most 40 letters, digits, underscores or hyphens')
+    return value
+
+
+def snapshot_root(identifier):
+    return ROOT.parent / 'snapshots' / project_id(identifier)
+
+
+def snapshot_tree_state(identifier, names=None):
+    path = ROOT / project_id(identifier) / 'snapshot-tree.json'
+    state = json.loads(path.read_text()) if path.exists() else {'parents': {}, 'descriptions': {}, 'current': ''}
+    if names is None:
+        names = {path.parent.name for path in snapshot_root(identifier).glob('*/manifest.json') if not path.parent.name.startswith('.')}
+    if names is not None:
+        state['parents'] = {name: parent if parent in names and parent != name else ''
+                            for name, parent in state.get('parents', {}).items() if name in names}
+        state['descriptions'] = {name: value for name, value in state.get('descriptions', {}).items() if name in names}
+        if not path.exists():
+            restored = ROOT / identifier / 'snapshot-restored.json'
+            candidates = []
+            for name in names:
+                manifest = snapshot_root(identifier) / name / 'manifest.json'
+                if manifest.exists():
+                    data = json.loads(manifest.read_text())
+                    if not data.get('recovery'):
+                        candidates.append((data['created'], name))
+            latest = max(candidates, default=(0, ''))
+            state['current'] = latest[1]
+            if restored.exists() and restored.stat().st_mtime > latest[0]:
+                state['current'] = json.loads(restored.read_text()).get('name', '')
+        if state.get('current') not in names:
+            state['current'] = ''
+        # An invalid legacy sidecar must never make the tree recursive.
+        for name in state['parents']:
+            seen, parent = {name}, state['parents'][name]
+            while parent:
+                if parent in seen:
+                    state['parents'][name] = ''
+                    break
+                seen.add(parent)
+                parent = state['parents'].get(parent, '')
+    return state
+
+
+def snapshot_tree_write(identifier, state):
+    write_json(ROOT / identifier / 'snapshot-tree.json', state)
+
+
+def snapshot_list(identifier, node):
+    import hashlib
+    info = detail(identifier, node)
+    rows = []
+    for path in snapshot_root(identifier).glob('*/manifest.json'):
+        try:
+            data = json.loads(path.read_text())
+            if data.get('version') == 1 and data.get('id') == identifier and data.get('name') == path.parent.name:
+                rows.append({key: data[key] for key in ('name', 'created', 'description', 'size', 'recovery')})
+        except (OSError, ValueError, KeyError):
+            continue
+    rows.sort(key=lambda row: (row['created'], row['name']))
+    state = snapshot_tree_state(identifier, {row['name'] for row in rows})
+    for row in rows:
+        row.update(parent=state['parents'].get(row['name'], ''), snaptime=row['created'],
+                   description=state['descriptions'].get(row['name'], row['description']))
+    current = {'name': 'current', 'parent': state.get('current', ''), 'description': '',
+               'running': info.get('status') in ('running', 'partial')}
+    current['digest'] = hashlib.sha256(json.dumps([rows, current], sort_keys=True).encode()).hexdigest()
+    return rows + [current]
+
+
+def snapshot_config(identifier, node, name):
+    detail(identifier, node)
+    folder = snapshot_root(identifier) / snapshot_name(name)
+    if folder.is_symlink():
+        raise ValueError('Invalid snapshot directory')
+    manifest = json.loads((folder / 'manifest.json').read_text())
+    if manifest.get('id') != identifier or manifest.get('name') != name:
+        raise ValueError('Invalid snapshot manifest')
+    state = snapshot_tree_state(identifier)
+    metadata = json.loads((folder / 'configuration' / 'metadata.json').read_text())
+    config = json.loads((folder / 'configuration' / 'compose.runtime.json').read_text())
+    # Native snapshot details are an inventory, not a way to read deployment secrets.
+    result = {'description': state.get('descriptions', {}).get(name, manifest['description']),
+              'snaptime': manifest['created'], 'hostname': metadata.get('name', ''),
+              'net0': 'bridge=' + metadata.get('bridge', '') + ',ip=' + metadata.get('address', '')}
+    for service, settings in sorted(config['services'].items()):
+        for key in ('image', 'cpus', 'cpu_shares', 'mem_limit', 'memswap_limit', 'pids_limit', 'restart'):
+            if key in settings:
+                result[service + '.' + key] = str(settings[key])
+        result[service + '.replicas'] = str(settings.get('deploy', {}).get('replicas', 1))
+        limits = settings.get('deploy', {}).get('resources', {}).get('limits', {})
+        for key in ('cpus', 'memory', 'pids'):
+            if key in limits:
+                result[service + '.limit.' + key] = str(limits[key])
+        for key in ('dns', 'dns_search', 'storage_opt'):
+            if settings.get(key):
+                result[service + '.' + key] = json.dumps(settings[key], sort_keys=True)
+        for index, mount in enumerate(settings.get('volumes', [])):
+            result[service + '.mount' + str(index)] = str(mount.get('source', '')) + ',mp=' + str(mount.get('target', '')) + (',ro=1' if mount.get('read_only') else '')
+        for index, port in enumerate(settings.get('ports', [])):
+            result[service + '.port' + str(index)] = str(port.get('host_ip', '')) + ':' + str(port.get('published', '')) + ':' + str(port.get('target', '')) + '/' + str(port.get('protocol', 'tcp'))
+    storage = folder / 'configuration' / 'storage.json'
+    if storage.exists():
+        result['data_disk'] = str(json.loads(storage.read_text())['size_mib']) + ' MiB'
+    return result
+
+
+def snapshot_edit(identifier, node, name, description):
+    snapshot_name(name)
+    if len(description) > 4096:
+        raise ValueError('Snapshot description cannot exceed 4096 characters')
+    with locked():
+        snapshot_config(identifier, node, name)
+        state = snapshot_tree_state(identifier)
+        state.setdefault('descriptions', {})[name] = description
+        snapshot_tree_write(identifier, state)
+
+
+def snapshot_containers(identifier, allow_running=False, quiesced=False):
+    records = container_records(identifier)
+    allowed = {'created', 'exited'} | ({'running', 'paused'} if allow_running else set()) | ({'paused'} if quiesced else set())
+    if any(row['state'] not in allowed for row in records):
+        raise ValueError('DCT is changing state; wait until its services are stable')
+    return json.loads(capture(['docker', 'inspect', *[row['id'] for row in records]])) if records else []
+
+
+@contextlib.contextmanager
+def snapshot_quiesce(identifier):
+    records = container_records(identifier)
+    if any(row['state'] not in ('running', 'created', 'exited') for row in records):
+        raise ValueError('DCT is changing state or already paused; wait before taking a snapshot')
+    paused = []
+    def resume():
+        failures = []
+        for container in list(paused):
+            try:
+                run(['docker', 'unpause', container], capture_output=True)
+                paused.remove(container)
+            except (OSError, subprocess.SubprocessError):
+                failures.append(container)
+        if failures:
+            raise ValueError('Could not resume all DCT services after snapshot; check Task History')
+    try:
+        for row in records:
+            if row['state'] == 'running':
+                run(['docker', 'pause', row['id']], capture_output=True)
+                paused.append(row['id'])
+        if paused:
+            os.sync()
+        yield resume
+    finally:
+        resume()
+
+
+def snapshot_mounts(identifier, containers, allow_missing=False):
+    """Resolve actual Docker mounts, never assume that a Compose volume is private."""
+    folder = ROOT / identifier
+    owned = {row['Id'] for row in containers}
+    sources = {}
+    for row in containers:
+        for mount in row.get('Mounts', []):
+            if not mount.get('RW', True) or mount['Type'] == 'tmpfs':
+                continue
+            source = Path(mount['Source'])
+            if mount['Type'] == 'bind':
+                if source.is_symlink() or not source.resolve().is_relative_to(folder.resolve()) or source.resolve() == folder.resolve():
+                    raise ValueError('Snapshots require project-owned writable mounts; external host paths are not supported')
+                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'settings.json', 'storage.json'):
+                    raise ValueError('Deployment files cannot also be writable application mounts')
+            elif mount['Type'] == 'volume':
+                volume = json.loads(capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
+                if volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                    raise ValueError('Snapshots require local volumes owned by this DCT')
+                users = set(capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + mount['Name']]).split())
+                if users - owned:
+                    raise ValueError('A writable volume is shared with another project')
+                if source.resolve() != Path(volume['Mountpoint']).resolve():
+                    raise ValueError('Volume mount does not match Docker metadata')
+            else:
+                raise ValueError('Unsupported writable snapshot mount')
+            if not source.is_dir() and not (allow_missing and not source.exists()):
+                raise ValueError('Snapshots support writable directory mounts only')
+            sources[str(source)] = {'source': str(source), 'type': mount['Type'], 'volume': mount.get('Name', '')}
+    paths = sorted(sources, key=lambda value: len(Path(value).parts))
+    # Copy overlapping bind mounts only once; retain the exact volume ownership checks above.
+    return [sources[value] for value in paths if not any(Path(value).is_relative_to(Path(parent)) for parent in paths if parent != value)]
+
+
+def snapshot_digest(folder):
+    """Inventory hashes include symlink targets and empty directories, without following links."""
+    import hashlib
+    result = {}
+    for base, dirs, files in os.walk(folder, followlinks=False):
+        for name in dirs + files:
+            path = Path(base) / name
+            key = str(path.relative_to(folder))
+            if key == 'checksums.json':
+                continue
+            if path.is_symlink():
+                result[key] = 'link:' + os.readlink(path)
+            elif path.is_dir():
+                result[key] = 'directory'
+            elif path.is_file():
+                digest = hashlib.sha256()
+                with path.open('rb') as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                        digest.update(chunk)
+                result[key] = digest.hexdigest()
+            else:
+                raise ValueError('Snapshot contains an unsupported special file')
+    return result
+
+
+def snapshot_check(identifier, name):
+    folder = snapshot_root(identifier) / snapshot_name(name)
+    if folder.is_symlink() or not folder.is_dir():
+        raise ValueError('Snapshot does not exist')
+    manifest = json.loads((folder / 'manifest.json').read_text())
+    if manifest.get('version') != 1 or manifest.get('id') != identifier or manifest.get('name') != name:
+        raise ValueError('Invalid snapshot manifest')
+    if snapshot_digest(folder) != json.loads((folder / 'checksums.json').read_text()):
+        raise ValueError('Snapshot integrity check failed; nothing was restored')
+    return folder, manifest
+
+
+def snapshot_capture(identifier, node, name, description='', recovery=False, quiesced=False, resume=None):
+    snapshot_name(name)
+    if len(description) > 4096:
+        raise ValueError('Snapshot description cannot exceed 4096 characters')
+    info = detail(identifier, node)
+    tree_state = snapshot_tree_state(identifier)
+    containers = snapshot_containers(identifier, quiesced=quiesced)
+    if not containers:
+        raise ValueError('DCT has no containers to snapshot')
+    config = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
+    expected = sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values())
+    counts = {name: sum((row['Config'].get('Labels') or {}).get('com.docker.compose.service') == name for row in containers) for name in config['services']}
+    if len(containers) != expected or any(counts[name] != service.get('deploy', {}).get('replicas', 1) for name, service in config['services'].items()):
+        raise ValueError('DCT instances are incomplete; deploy all services before taking a snapshot')
+    storage_mount(identifier)
+    mounts = snapshot_mounts(identifier, containers)
+    if storage_config(identifier):
+        point = str(ROOT / identifier / 'storage-data')
+        mounts = [entry for entry in mounts if not Path(entry['source']).is_relative_to(Path(point))]
+        mounts.append({'source': point, 'type': 'bind', 'volume': ''})
+    # Exclude nested filesystems; an application could otherwise cross ownership boundaries.
+    mounted = json.loads(capture(['findmnt', '-J', '-l', '-o', 'TARGET']))['filesystems']
+    for entry in mounts:
+        path = Path(entry['source']).resolve()
+        if any(Path(item['target']).is_relative_to(path) and Path(item['target']) != path for item in mounted):
+            raise ValueError('Nested filesystems in writable mounts are not supported by snapshots')
+    root = snapshot_root(identifier)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(root.parent, 0o700)
+    os.chmod(root, 0o700)
+    final = root / name
+    if final.exists():
+        raise ValueError('Snapshot name already exists')
+    temporary = Path(tempfile.mkdtemp(prefix='.creating-', dir=root))
+    tags = []
+    try:
+        files = temporary / 'configuration'
+        files.mkdir(mode=0o700)
+        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'storage.json', 'notes.txt'):
+            source = ROOT / identifier / filename
+            if source.exists():
+                shutil.copy2(source, files / filename)
+        public = {key: value for key, value in info.items() if key != 'deployment'}
+        write_json(files / 'metadata.json', public)
+        data = temporary / 'data'
+        data.mkdir(mode=0o700)
+        for index, entry in enumerate(mounts):
+            entry['copy'] = 'data/' + str(index)
+            run(['cp', '-a', '--reflink=auto', '--', entry['source'], str(temporary / entry['copy'])], timeout=86400)
+        for index, container in enumerate(containers):
+            tag = 'betterdocker-snapshot/' + identifier + ':' + uuid.uuid4().hex
+            run(['docker', 'commit', '--pause=false', container['Id'], tag], timeout=86400, capture_output=True)
+            tags.append(tag)
+            container['SnapshotImage'] = capture(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag]).strip()
+            container['SnapshotTag'] = tag
+        if resume:
+            resume()
+        run(['docker', 'image', 'save', '-o', str(temporary / 'images.tar'), *tags], timeout=86400)
+        os.chmod(temporary / 'images.tar', 0o600)
+        network_names = sorted({network for container in containers for network in container.get('NetworkSettings', {}).get('Networks', {})})
+        networks = json.loads(capture(['docker', 'network', 'inspect', *network_names])) if network_names else []
+        write_json(temporary / 'networks.json', networks)
+        write_json(temporary / 'containers.json', containers)
+        size = sum(path.stat().st_size for path in temporary.rglob('*') if path.is_file() and not path.is_symlink())
+        write_json(temporary / 'manifest.json', {'version': 1, 'id': identifier, 'name': name,
+                   'created': int(time.time()), 'description': description, 'recovery': recovery,
+                   'mounts': mounts, 'size': size})
+        write_json(temporary / 'checksums.json', snapshot_digest(temporary))
+        os.replace(temporary, final)
+        state = tree_state
+        state.setdefault('parents', {})[name] = state.get('current', '')
+        if not recovery:
+            state['current'] = name
+        snapshot_tree_write(identifier, state)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        for tag in tags:
+            run(['docker', 'image', 'rm', tag], check=False, capture_output=True)
+    print('Snapshot created: ' + name)
+    return name
+
+
+def docker_engine(method, path, body):
+    """Only the local Docker socket is used; never log Config/Env or daemon responses."""
+    import http.client
+    import socket
+    class Connection(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(1800)
+            self.sock.connect('/var/run/docker.sock')
+    connection = Connection('localhost', timeout=1800)
+    try:
+        connection.request(method, path, body=json.dumps(body), headers={'Content-Type': 'application/json'})
+        response = connection.getresponse()
+        payload = response.read()
+        if response.status not in (200, 201, 204):
+            raise ValueError('Docker snapshot restore failed (HTTP ' + str(response.status) + '); see Task History')
+        return json.loads(payload) if payload else {}
+    finally:
+        connection.close()
+
+
+def snapshot_apply(identifier, node, name, check_only=False):
+    from urllib.parse import quote
+    folder, manifest = snapshot_check(identifier, name)
+    current = detail(identifier, node)
+    existing = snapshot_containers(identifier, allow_running=check_only)
+    # Validate both source and target ownership before touching containers or application files.
+    snapshot_mounts(identifier, existing, allow_missing=True)
+    saved = json.loads((folder / 'containers.json').read_text())
+    configs = folder / 'configuration'
+    before_storage = storage_config(identifier)
+    saved_storage = json.loads((configs / 'storage.json').read_text()) if (configs / 'storage.json').exists() else {}
+    mounted_targets = json.loads(capture(['findmnt', '-J', '-l', '-o', 'TARGET']))['filesystems']
+    for entry in manifest['mounts']:
+        source = Path(entry['source'])
+        if any(Path(item['target']).is_relative_to(source.resolve()) and Path(item['target']) != source.resolve() for item in mounted_targets):
+            raise ValueError('Nested filesystems in snapshot targets are not supported')
+        if entry['type'] == 'bind' and (source.is_symlink() or not source.resolve().is_relative_to((ROOT / identifier).resolve())):
+            raise ValueError('Snapshot mount ownership changed')
+        if entry['type'] == 'volume':
+            volume = json.loads(capture(['docker', 'volume', 'inspect', entry['volume']]))[0]
+            if volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                raise ValueError('Snapshot volume ownership changed')
+            users = set(capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + entry['volume']]).split())
+            if users - {row['Id'] for row in existing}:
+                raise ValueError('Snapshot volume is now shared with another project')
+    saved_networks = json.loads((folder / 'networks.json').read_text()) if (folder / 'networks.json').exists() else []
+    existing_networks = set(capture(['docker', 'network', 'ls', '--format', '{{.Name}}']).splitlines())
+    for network in saved_networks:
+        if network['Name'] not in existing_networks:
+            if (network.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                raise ValueError('An external snapshot network is missing')
+            body = {key: network[key] for key in ('Name', 'Driver', 'Internal', 'Attachable', 'EnableIPv6', 'IPAM', 'Options', 'Labels') if key in network}
+            if not check_only:
+                docker_engine('POST', '/networks/create', body)
+    if check_only:
+        return
+    run(['docker', 'image', 'load', '-i', str(folder / 'images.tar')], timeout=86400, capture_output=True)
+    if existing:
+        run(['docker', 'rm', *[row['Id'] for row in existing]], timeout=1800, capture_output=True)
+    project = ROOT / identifier
+    replaced_disk = None
+    if before_storage and (not saved_storage or before_storage['size_mib'] != saved_storage['size_mib']):
+        storage_mount(identifier)  # verifies that the loop device is owned by this DCT
+        unit = capture(['systemd-escape', '--path', '--suffix=mount', str(project / 'storage-data')]).strip()
+        # Remove only this DCT's dependency before unmounting; never stop the Docker daemon.
+        run(['systemctl', 'disable', unit], check=False, capture_output=True)
+        run(['systemctl', 'daemon-reload'], capture_output=True)
+        # Wait for systemd's unmount job before mounting a replacement at the same path.
+        run(['systemctl', 'stop', unit], capture_output=True)
+        if os.path.ismount(project / 'storage-data'):
+            run(['umount', str(project / 'storage-data')], capture_output=True)
+        replaced_disk = project / ('storage-rollback-' + uuid.uuid4().hex + '.ext4')
+        (project / 'storage.ext4').rename(replaced_disk)
+        (project / 'storage.json').unlink()
+        before_storage = {}
+        if not saved_storage:
+            (project / 'storage-data').rmdir()
+            (Path('/etc/systemd/system') / unit).unlink(missing_ok=True)
+            run(['systemctl', 'daemon-reload'], capture_output=True)
+    if saved_storage:
+        if not before_storage:
+            image = project / 'storage.ext4'
+            if image.exists():
+                raise ValueError('Unmanaged data disk image exists')
+            with image.open('xb') as handle:
+                os.chmod(image, 0o600)
+                handle.truncate(saved_storage['size_mib'] * 1048576)
+            run(['mkfs.ext4', '-q', '-m', '0', str(image)])
+        write_json(project / 'storage.json', saved_storage)
+        unit = capture(['systemd-escape', '--path', '--suffix=mount', str(project / 'storage-data')]).strip()
+        if not before_storage:
+            unit_path = Path('/etc/systemd/system') / unit
+            unit_path.write_text('[Unit]\nDescription=BetterDocker data disk\nBefore=docker.service\n\n[Mount]\nWhat=' + str(project / 'storage.ext4') + '\nWhere=' + str(project / 'storage-data') + '\nType=ext4\nOptions=loop,nodev,nosuid\n\n[Install]\nRequiredBy=docker.service\n')
+            run(['systemctl', 'daemon-reload'], capture_output=True)
+            run(['systemctl', 'enable', unit], capture_output=True)
+            (project / 'storage-data').mkdir(mode=0o700, exist_ok=True)
+            run(['systemctl', 'start', unit], capture_output=True)
+        storage_mount(identifier)
+    for entry in manifest['mounts']:
+        target = Path(entry['source'])
+        target.mkdir(parents=True, exist_ok=True)
+        for child in target.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        run(['cp', '-a', '--', str(folder / entry['copy']) + '/.', str(target)], timeout=86400)
+    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'notes.txt'):
+        source, target = configs / filename, project / filename
+        if source.exists():
+            shutil.copy2(source, target)
+        else:
+            target.unlink(missing_ok=True)
+    metadata = json.loads((configs / 'metadata.json').read_text())
+    # Identity and the current DHCP lease belong to the existing DCT, not to a new guest.
+    metadata.update({key: current[key] for key in ('id', 'vmid', 'node', 'address') if key in current})
+    metadata.update(status='stopped')
+    metadata.pop('network_resume', None)
+    write_json(METADATA / (identifier + '.json'), metadata)
+    rebind_runtime(project, metadata['address'])
+    created = []
+    for container in saved:
+        body = dict(container['Config'])
+        body['Image'] = container['SnapshotImage']
+        body['HostConfig'] = dict(container['HostConfig'])
+        if saved_storage:
+            service_name = (container['Config'].get('Labels') or {}).get('com.docker.compose.service')
+            runtime_config = json.loads((project / 'compose.runtime.json').read_text())
+            configured = {mount['target']: mount for mount in runtime_config['services'][service_name].get('volumes', [])}
+            # Data migration can be pending while stopped: use the saved runtime disk mapping.
+            binds = body['HostConfig'].get('Binds') or []
+            for destination, mount in configured.items():
+                if mount.get('type') != 'bind' or mount.get('source') not in saved_storage['mapping'].values():
+                    continue
+                binds = [value for value in binds if value.split(':')[1] != destination]
+                binds.append(mount['source'] + ':' + destination + (':ro' if mount.get('read_only') else ':rw'))
+                body['HostConfig']['Mounts'] = [item for item in body['HostConfig'].get('Mounts') or [] if item.get('Target') != destination]
+            body['HostConfig']['Binds'] = binds
+        # Keep ephemeral Docker IDs/IP assignments out of create requests.
+        networks = {}
+        for network, endpoint in container.get('NetworkSettings', {}).get('Networks', {}).items():
+            networks[network] = {key: endpoint[key] for key in ('Aliases', 'IPAMConfig', 'Links', 'DriverOpts') if endpoint.get(key)}
+        body['NetworkingConfig'] = {'EndpointsConfig': networks}
+        for bindings in (body['HostConfig'].get('PortBindings') or {}).values():
+            for binding in bindings or []:
+                if binding.get('HostIp') == current.get('address') or binding.get('HostIp') == json.loads((configs / 'metadata.json').read_text()).get('address'):
+                    binding['HostIp'] = metadata['address']
+        result = docker_engine('POST', '/containers/create?name=' + quote(container['Name'].lstrip('/'), safe=''), body)
+        created.append(result['Id'])
+    for container in saved:
+        if container.get('SnapshotTag'):
+            run(['docker', 'image', 'rm', container['SnapshotTag']], check=False, capture_output=True)
+    write_json(project / 'snapshot-restored.json', {'name': name, 'containers': created, 'address': metadata['address']})
+    state = snapshot_tree_state(identifier)
+    state['current'] = name
+    snapshot_tree_write(identifier, state)
+    refresh(node)
+    if replaced_disk:
+        replaced_disk.unlink()
+
+
+def project_snapshot(identifier, node, verb, name, description=''):
+    snapshot_name(name)
+    with locked():
+        detail(identifier, node)
+        if verb == 'create':
+            with snapshot_quiesce(identifier) as resume:
+                snapshot_capture(identifier, node, name, description, quiesced=True, resume=resume)
+        elif verb == 'delete':
+            folder = snapshot_root(identifier) / name
+            if folder.is_symlink() or not (folder / 'manifest.json').exists():
+                raise ValueError('Snapshot does not exist')
+            state = snapshot_tree_state(identifier)
+            parent = state.get('parents', {}).get(name, '')
+            state['parents'] = {child: parent if ancestor == name else ancestor for child, ancestor in state.get('parents', {}).items() if child != name}
+            state.setdefault('descriptions', {}).pop(name, None)
+            if state.get('current') == name:
+                state['current'] = parent
+            shutil.rmtree(folder)
+            snapshot_tree_write(identifier, state)
+            print('Snapshot removed: ' + name)
+        elif verb == 'restore':
+            # LXC validates the target, stops the guest, then rolls back without another snapshot.
+            snapshot_apply(identifier, node, name, check_only=True)
+            records = container_records(identifier)
+            for row in records:
+                if row['state'] == 'paused':
+                    run(['docker', 'unpause', row['id']], capture_output=True)
+            active = [row['id'] for row in records if row['state'] in ('running', 'paused')]
+            if active:
+                run(['docker', 'stop', '--time', '0', *active], timeout=1800, capture_output=True)
+            snapshot_apply(identifier, node, name)
+            print('Snapshot restored; DCT remains stopped.')
+        else:
+            raise ValueError('Invalid snapshot operation')
+
+
+def restored_start(identifier, service=None):
+    marker = ROOT / identifier / 'snapshot-restored.json'
+    if not marker.exists():
+        return False
+    restored = json.loads(marker.read_text())
+    runtime = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
+    addresses = {port.get('host_ip') for service_config in runtime['services'].values() for port in service_config.get('ports', [])}
+    if addresses and addresses != {restored.get('address')}:
+        raise ValueError('DCT address changed after rollback; restore a snapshot again to rebind preserved filesystems')
+    saved = set(restored['containers'])
+    records = container_records(identifier)
+    if {row['id'] for row in records} != saved:
+        raise ValueError('Restored DCT instances changed; redeploy before starting')
+    ids = [row['id'] for row in records if not service or row['service'] == service]
+    if ids:
+        run(['docker', 'start', *ids], timeout=1800)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id'])
+    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -961,9 +1887,11 @@ def main():
     elif args.operation in ('validate', 'create'):
         data = validate(json.loads(Path(values[0]).read_text()))
         if args.operation == 'create':
-            create(data, values[1], values[2] if len(values) > 2 else None)
+            with operation(values[2], 'create'):
+                create(data, values[1], values[2])
     elif args.operation == 'update':
-        update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())))
+        with operation(values[0], 'update'):
+            update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())))
     elif args.operation in ('dhcp-client', 'dhcp-release'):
         dhcp_client(values[0], release=args.operation == 'dhcp-release')
     elif args.operation == 'notes':
@@ -973,7 +1901,8 @@ def main():
     elif args.operation == 'management':
         print(json.dumps(management(*values)))
     elif args.operation == 'settings':
-        service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()))
+        with operation(values[0], 'settings'):
+            service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()))
     elif args.operation in ('console-check', 'console'):
         command = console_target(*values)
         if args.operation == 'console':
@@ -981,10 +1910,35 @@ def main():
     elif args.operation == 'detail':
         print(json.dumps(detail(*values)))
     elif args.operation == 'action':
-        action(*values)
+        with operation(values[0], values[2]):
+            action(*values)
     elif args.operation == 'logs':
-        info = detail(*values)
-        run(compose_base(ROOT / info['id'], info['id']) + ['logs', '--no-color', '--tail', '200'])
+        print(project_logs(*values), end='')
+    elif args.operation == 'preview':
+        print(json.dumps(preview(json.loads(Path(values[0]).read_text()), values[1] if len(values) > 1 else None)))
+    elif args.operation == 'tags':
+        print(json.dumps(project_tags(*values)))
+    elif args.operation == 'service-action':
+        with operation(values[0], values[3]):
+            service_action(*values)
+    elif args.operation == 'reset-settings':
+        with operation(values[0], 'settings'):
+            reset_settings(*values)
+    elif args.operation == 'snapshot-config':
+        print(json.dumps(snapshot_config(*values)))
+    elif args.operation == 'snapshot-edit':
+        with operation(values[0], 'snapshot-edit'):
+            snapshot_edit(*values)
+    elif args.operation == 'snapshots':
+        print(json.dumps(snapshot_list(*values)))
+    elif args.operation == 'snapshot':
+        with operation(values[0], 'snapshot-' + values[2]):
+            project_snapshot(*values)
+    elif args.operation == 'storage-limit':
+        with operation(values[0], 'settings'):
+            project_storage_limit(values[0], values[1], values[2])
+    elif args.operation == 'diagnostics':
+        print(json.dumps(diagnostics(*values)))
     elif args.operation == 'restore':
         restore(current_node())
     elif args.operation == 'refresh':
