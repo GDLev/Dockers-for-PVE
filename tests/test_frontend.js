@@ -554,10 +554,12 @@ console.log('Measured usage without capacities, service-scoped log filters and d
 (async () => {
     const alerts = [];
     context.Ext.Msg.alert = (title, message) => alerts.push({ title, message });
-    const importHandler = wizard.items[1].items[0].items[1].items[0].listeners.change;
+    const importButton = wizard.items[1].items[0].items[1].items[0];
+    assert.equal(importButton.xclass, 'Ext.form.field.FileButton', 'imports use a button without a text-field layout');
+    const importHandler = importButton.listeners.change;
     let resets = 0, writes = 0;
     const upload = { fileInputEl: { dom: { files: [{ size: 10, text: async () => { throw new Error('read failed'); } }] } },
-        reset() { resets++; }, up: () => ({ down: () => ({ setValue() { writes++; } }) }),
+        reset(clear) { assert.equal(clear, true); resets++; }, up: () => ({ down: () => ({ setValue() { writes++; } }) }),
     };
     await importHandler.call(upload);
     assert.equal(resets, 1);

@@ -32,18 +32,18 @@
         const url = URL.createObjectURL(new Blob([value], { type: 'text/plain;charset=utf-8' }));
         link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
     };
-    const importFile = (label, name, maximum) => ({ xtype: 'filefield', buttonOnly: true, hideLabel: true, buttonText: translate(label),
+    const importFile = (label, name, maximum) => ({ xclass: 'Ext.form.field.FileButton', text: translate(label),
         listeners: { change: async function () {
             const file = this.fileInputEl.dom.files[0];
             if (!file) { return; }
-            if (file.size > maximum) { Ext.Msg.alert(translate('Error'), translate('File is too large')); this.reset(); return; }
+            if (file.size > maximum) { Ext.Msg.alert(translate('Error'), translate('File is too large')); this.reset(true); return; }
             try {
                 const content = await file.text();
                 if (!this.destroyed) { this.up('window').down('[name=' + name + ']').setValue(content); }
             } catch (_) {
                 if (!this.destroyed) { Ext.Msg.alert(translate('Error'), translate('Could not read file')); }
             } finally {
-                if (!this.destroyed) { this.reset(); }
+                if (!this.destroyed) { this.reset(true); }
             }
         } } });
     const importRow = (label, name, maximum) => ({ xtype: 'container', layout: 'hbox', margin: '0 0 5 0',
