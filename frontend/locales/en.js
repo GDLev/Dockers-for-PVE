@@ -4,6 +4,8 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Volumes, bind mounts and deployment files are retained.": "Volumes, bind mounts and deployment files are retained.",
+            "Open in separate window": "Open in separate window",
             "Could not read file": "Could not read file",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.",
             "Network settings are fixed after creation. Published ports use the DCT address.": "Network settings are fixed after creation. Published ports use the DCT address.",
@@ -118,6 +120,7 @@
             "On failure": "On failure",
             "No": "No",
             "Always": "Always",
+            "Overrule active shutdown tasks": "Overrule active shutdown tasks",
             "Update integration check": "Update integration check"
         }
     };

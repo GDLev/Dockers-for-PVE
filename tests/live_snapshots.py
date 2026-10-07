@@ -25,6 +25,7 @@ def main():
     previous = json.loads(state_file.read_text()) if state_file.exists() else {}
     existing = next((item for item in w.summaries() if item['id'] == previous.get('id') and item['name'] == previous.get('name') and item['name'].startswith('snapshot-test-')), None)
     if existing:
+        w.action(existing['id'], node, 'force-stop')
         w.action(existing['id'], node, 'delete')
     preferred = w.capture(['pvesh', 'get', '/cluster/nextid']).strip()
     try:

@@ -86,7 +86,7 @@ class NetworkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder) / 'projects'), \
              patch.object(worker, 'METADATA', Path(folder) / 'metadata'), \
              patch.object(worker, 'locked', tempfile.TemporaryDirectory), \
-             patch.object(worker, 'detail', return_value=INFO), patch.object(worker, 'run'), patch.object(worker, 'remove_network'):
+             patch.object(worker, 'detail', return_value=INFO), patch.object(worker, 'run'), patch.object(worker, 'remove_network'), patch.object(worker, 'container_records', return_value=[]):
             directory = worker.ROOT / IDENTIFIER / 'data'
             directory.mkdir(parents=True)
             (directory / 'database').write_text('valuable data')

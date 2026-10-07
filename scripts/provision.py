@@ -4,6 +4,7 @@ import argparse
 import contextlib
 from datetime import datetime
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -80,6 +81,8 @@ def capture(args):
 
 
 def write_json(path, value):
+    if path.parent == METADATA and isinstance(value, dict):
+        value = {key: item for key, item in value.items() if key != 'digest'}
     # A refresh that started before migration must not overwrite the assigned ID.
     if path.parent == METADATA and isinstance(value, dict) and value.get('id') and not value.get('vmid'):
         vmid = next((number for number, entry in reserved_ids().items() if entry['id'] == value['id']), None)
@@ -369,6 +372,7 @@ def container_records(identifier):
                         'service': labels.get('com.docker.compose.service', ''),
                         'state': item['State']['Status'], 'started': item['State'].get('StartedAt', ''),
                         'image': item['Config']['Image'], 'pid': item['State'].get('Pid', 0),
+                        'stop_signal': item['Config'].get('StopSignal') or 'SIGTERM',
                         'health': item['State'].get('Health', {}).get('Status', 'none'),
                         'restarts': item.get('RestartCount', 0), 'exitcode': item['State'].get('ExitCode', 0)})
     return records
@@ -595,12 +599,13 @@ def project_storage_status(identifier):
     return result
 
 
-def project_storage_limit(identifier, node, size_mib):
+def project_storage_limit(identifier, node, size_mib, digest=None):
     size_mib = int(size_mib)
     if not 256 <= size_mib <= 1048576:
         raise ValueError('Project data disk must be between 256 and 1048576 MiB')
     with locked():
         detail(identifier, node)
+        assert_configuration_digest(identifier, node, digest)
         if any(item['state'] not in ('created', 'exited', 'dead') for item in container_records(identifier)):
             raise ValueError('Stop all project services before changing the data disk')
         folder = ROOT / identifier
@@ -703,6 +708,71 @@ def project_storage_limit(identifier, node, size_mib):
         print('Project data moved to a bounded disk. Original sources retained as a recovery copy.')
 
 
+
+def service_values(service):
+    limits = service.get('deploy', {}).get('resources', {}).get('limits', {})
+    memory = int(service.get('mem_limit') or limits.get('memory') or 0) // 1048576
+    total = int(service.get('memswap_limit') or 0) // 1048576
+    values = {'cpus': float(service.get('cpus') or limits.get('cpus') or 0), 'memory': memory,
+              'swap': -1 if service.get('memswap_limit') == -1 else max(0, total - memory) if total else memory, 'cpuunits': service.get('cpu_shares', 0),
+              'pids': max(0, int(service.get('pids_limit') or limits.get('pids') or 0)),
+              'dns': service.get('dns', []), 'dns_search': service.get('dns_search', []),
+              'restart': service.get('restart', 'no')}
+    if service.get('storage_opt', {}).get('size'):
+        values['disk'] = disk_mib(service['storage_opt']['size'])
+    return values
+
+
+def load_pending(directory):
+    path = directory / 'pending.json'
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def save_pending(directory, pending):
+    # Empty queues have the same digest as configurations created before this feature.
+    pending = {name: changes for name, changes in pending.items() if changes}
+    if pending:
+        write_json(directory / 'pending.json', pending)
+    else:
+        (directory / 'pending.json').unlink(missing_ok=True)
+
+
+def pending_settings(identifier, node, service):
+    detail(identifier, node)
+    directory = ROOT / identifier
+    config = json.loads((directory / 'compose.runtime.json').read_text())
+    if service not in config['services']:
+        raise ValueError('Unknown Compose service')
+    values = load_settings(directory).get(service, service_values(config['services'][service]))
+    values = dict(values, disk=values.get('disk', 0))
+    pending = load_pending(directory).get(service, {})
+    return [dict(key=key, value=value, **({'pending': pending[key]} if key in pending else {}))
+            for key, value in values.items()]
+
+
+def revert_settings(identifier, node, service, keys, digest=None):
+    with locked():
+        detail(identifier, node)
+        assert_configuration_digest(identifier, node, digest)
+        directory = ROOT / identifier
+        config = json.loads((directory / 'compose.runtime.json').read_text())
+        if service not in config['services']:
+            raise ValueError('Unknown Compose service')
+        values = load_settings(directory).get(service, service_values(config['services'][service]))
+        values = dict(values, disk=values.get('disk', 0))
+        names = keys.split(',')
+        if not names or any(key not in values for key in names):
+            raise ValueError('Invalid setting to revert')
+        pending = load_pending(directory)
+        changes = dict(pending.get(service, {}))
+        for key in names:
+            changes.pop(key, None)
+        validate_settings(dict(values, **changes))
+        pending[service] = changes
+        save_pending(directory, pending)
+
+
+
 def management(identifier, node, shared_stats=None):
     info = detail(identifier, node)
     directory = ROOT / identifier
@@ -710,20 +780,11 @@ def management(identifier, node, shared_stats=None):
     settings = load_settings(directory)
     info['services'] = []
     for name, service in config['services'].items():
-        limits = service.get('deploy', {}).get('resources', {}).get('limits', {})
-        memory = int(service.get('mem_limit') or limits.get('memory') or 0) // 1048576
-        total = int(service.get('memswap_limit') or 0) // 1048576
-        values = {'cpus': float(service.get('cpus') or limits.get('cpus') or 0), 'memory': memory,
-                  'swap': -1 if service.get('memswap_limit') == -1 else max(0, total - memory) if total else memory, 'cpuunits': service.get('cpu_shares', 0),
-                  'pids': max(0, int(service.get('pids_limit') or limits.get('pids') or 0)),
-                  'dns': service.get('dns', []), 'dns_search': service.get('dns_search', []),
-                  'restart': service.get('restart', 'no')}
-        if service.get('storage_opt', {}).get('size'):
-            values['disk'] = disk_mib(service['storage_opt']['size'])
+        values = service_values(service)
         info['services'].append({'name': name, 'image': service.get('image', ''),
                                  'settings': settings.get(name, values), 'replicas': service.get('deploy', {}).get('replicas', 1),
                                  'mounts': service.get('volumes', []), 'ports': service.get('ports', []),
-                                 'overridden': name in settings})
+                                 'overridden': name in settings, 'pending': load_pending(directory).get(name, {})})
     info['containers'] = container_records(identifier)
     active = [item['id'] for item in info['containers'] if item['state'] == 'running']
     info['stats'] = []
@@ -740,37 +801,173 @@ def management(identifier, node, shared_stats=None):
     return info
 
 
-def service_settings(identifier, node, service, values):
+def require_stopped(containers):
+    if any(c['state'] not in ('created', 'exited', 'dead', 'stopped') for c in containers):
+        raise ValueError('Stop the affected service or DCT before changing these settings')
+
+
+def live_settings_arguments(before, after):
+    """Only Docker's mutable settings qualify; everything else needs a stop."""
+    flags = {'cpus': '--cpus', 'cpu_shares': '--cpu-shares',
+             'mem_limit': '--memory', 'memswap_limit': '--memory-swap',
+             'pids_limit': '--pids-limit', 'restart': '--restart'}
+    old, new = dict(before), dict(after)
+    arguments = []
+    for key, flag in flags.items():
+        a, b = old.pop(key, None), new.pop(key, None)
+        if a == b:
+            continue
+        # Zero CPU, memory and shares are ignored by Docker update. Never silently recreate.
+        if key in ('cpus', 'mem_limit') and not a:
+            raise ValueError('Stop the affected service before adding this limit to an unlimited container')
+        if key in ('cpus', 'mem_limit', 'cpu_shares') and not b:
+            raise ValueError('Stop the affected service before removing this limit')
+        value = b if b is not None else -1 if key in ('memswap_limit', 'pids_limit') else 'no' if key == 'restart' else 0
+        arguments.extend([flag, str(value)])
+    for key in ('dns', 'dns_search'):
+        if not old.get(key): old.pop(key, None)
+        if not new.get(key): new.pop(key, None)
+    if old != new:
+        raise ValueError('Stop the affected service before changing DNS, disk or Compose settings')
+    return arguments
+
+
+def update_live_containers(containers, arguments):
+    if not arguments:
+        return
+    snapshots = json.loads(capture(['docker', 'inspect', *[c['id'] for c in containers]]))
+    saved = {c['Id']: c['HostConfig'] for c in snapshots}
+    for flag, key in (('--cpus', 'NanoCpus'), ('--memory', 'Memory')):
+        if flag in arguments[::2] and any(not h.get(key) for h in saved.values()):
+            raise ValueError('Stop the affected service before adding this limit to an unlimited container')
+    touched = []
+    try:
+        for container in containers:
+            identifier = container['id']
+            touched.append(identifier)
+            run(['docker', 'update', *arguments, identifier])
+    except Exception as error:
+        failures = []
+        keys = {'--cpus': ('NanoCpus', 0), '--cpu-shares': ('CpuShares', 1024),
+                '--memory': ('Memory', 0), '--memory-swap': ('MemorySwap', -1),
+                '--pids-limit': ('PidsLimit', -1)}
+        for identifier in touched:
+            rollback = []
+            for flag in arguments[::2]:
+                if flag == '--restart':
+                    policy = saved[identifier]['RestartPolicy']
+                    value = policy['Name'] or 'no'
+                    if value == 'on-failure' and policy.get('MaximumRetryCount'):
+                        value += ':' + str(policy['MaximumRetryCount'])
+                else:
+                    key, default = keys[flag]
+                    value = saved[identifier].get(key) or default
+                    if flag == '--memory-swap' and not saved[identifier].get(key):
+                        value = 2 * saved[identifier].get('Memory', 0) or -1
+                    if flag == '--cpus': value /= 1000000000
+                rollback.extend([flag, str(value)])
+            try:
+                run(['docker', 'update', *rollback, identifier])
+            except Exception as failure:
+                failures.append(str(failure))
+        if failures:
+            raise ValueError('Resource update failed; restoring container settings also failed: ' + '; '.join(failures)) from error
+        raise
+
+
+def service_settings(identifier, node, service, values, digest=None):
     values = validate_settings(values)
     if values.get('disk') and not rootfs_quota_support()['supported']:
         raise ValueError('Container disk limit requires overlay2 on XFS with project quotas; volumes use a separate data disk')
     with locked():
-        info = detail(identifier, node)
-        directory = ROOT / identifier
-        runtime = directory / 'compose.runtime.json'
-        original = runtime.read_text()
-        config = json.loads(original)
-        if service not in config['services']:
-            raise ValueError('Unknown Compose service')
-        settings = load_settings(directory)
-        settings[service] = values
-        active = any(item['service'] == service and item['state'] == 'running' for item in container_records(identifier))
+        detail(identifier, node)
+        assert_configuration_digest(identifier, node, digest)
+        _service_settings(identifier, node, service, values)
+
+
+def _service_settings(identifier, node, service, values):
+    """Caller holds the worker lock. Only active settings enter the runtime file."""
+    directory = ROOT / identifier
+    runtime = directory / 'compose.runtime.json'
+    original = runtime.read_text()
+    config = json.loads(original)
+    if service not in config['services']:
+        raise ValueError('Unknown Compose service')
+    settings = load_settings(directory)
+    current = settings.get(service, service_values(config['services'][service]))
+    pending = load_pending(directory)
+    containers = [c for c in container_records(identifier) if c['service'] == service]
+    active = any(c['state'] not in ('created', 'exited', 'dead', 'stopped') for c in containers)
+    changed = {key: value for key, value in values.items() if current.get(key) != value}
+    if not changed:
+        pending.pop(service, None)
+        save_pending(directory, pending)
+        return
+    if active:
+        # Persist requested values first, as LXC does before trying hotplug.
+        pending[service] = changed
+        save_pending(directory, pending)
+        immediate = dict(current)
+        waiting = dict(changed)
+        before = json.loads(original)['services'][service]
+        for group in (('memory', 'swap'), ('cpus',), ('cpuunits',), ('pids',), ('restart',), ('dns', 'dns_search'), ('disk',)):
+            selected = {key: values[key] for key in group if key in changed}
+            if not selected or any(c['state'] != 'running' for c in containers):
+                continue
+            candidate = dict(immediate, **selected)
+            proposed = json.loads(original)
+            apply_settings(proposed, {service: candidate})
+            try:
+                live_settings_arguments(before, proposed['services'][service])
+            except ValueError:
+                continue
+            immediate = candidate
+            for key in selected:
+                waiting.pop(key, None)
+        if immediate != current:
+            apply_settings(config, {service: immediate})
+            arguments = live_settings_arguments(before, config['services'][service])
+            # Docker errors leave the requested changes pending and current state intact.
+            update_live_containers(containers, arguments)
+            write_json(runtime, config)
+            settings[service] = immediate
+            write_json(directory / 'settings.json', settings)
+        pending[service] = waiting
+        save_pending(directory, pending)
+    else:
+        # Save the queue before recreation, so a failed Start can be retried or reverted.
+        pending[service] = changed
+        save_pending(directory, pending)
         apply_settings(config, {service: values})
         write_json(runtime, config)
-        os.chmod(runtime, 0o600)
         try:
-            run(compose_base(directory, identifier) + ['up', '-d' if active else '--no-start', '--no-deps', service], timeout=1800)
+            run(compose_base(directory, identifier) + ['up', '--no-start', '--no-deps', service], timeout=1800)
         except Exception:
             runtime.write_text(original)
             raise
+        settings[service] = values
+        write_json(directory / 'settings.json', settings)
+        pending.pop(service, None)
+        save_pending(directory, pending)
         marker = directory / 'snapshot-restored.json'
         if marker.exists():
             restored = json.loads(marker.read_text())
             restored['containers'] = [row['id'] for row in container_records(identifier)]
             write_json(marker, restored)
-        write_json(directory / 'settings.json', settings)
-        os.chmod(directory / 'settings.json', 0o600)
-        refresh(node)
+    refresh(node)
+
+
+def apply_pending_settings(identifier, node, service=None):
+    directory = ROOT / identifier
+    for name, changes in list(load_pending(directory).items()):
+        if service is not None and name != service:
+            continue
+        require_stopped([c for c in container_records(identifier) if c['service'] == name])
+        config = json.loads((directory / 'compose.runtime.json').read_text())
+        if name not in config['services']:
+            raise ValueError('Unknown Compose service in pending settings')
+        current = load_settings(directory).get(name, service_values(config['services'][name]))
+        _service_settings(identifier, node, name, validate_settings(dict(current, **changes)))
 
 
 def console_target(identifier, node, container, shell):
@@ -1054,12 +1251,33 @@ def create(data, node, identifier=None):
     print(f"Created {data['name']} at {info['address']}")
 
 
+def configuration_digest(directory, deployment):
+    # Runtime files include assigned IPs and Docker state, not source configuration.
+    state = {'deployment': deployment, 'settings': load_settings(directory),
+             'storage': json.loads((directory / 'storage.json').read_text()) if (directory / 'storage.json').exists() else None}
+    pending = load_pending(directory)
+    if pending:
+        state['pending'] = pending
+    return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def assert_configuration_digest(identifier, node, expected):
+    if expected is None or expected == '':
+        return  # Like PVE, older API clients may omit optimistic concurrency checks.
+    if not re.fullmatch(r'[0-9a-f]{64}', expected):
+        raise ValueError('Invalid configuration digest')
+    if detail(identifier, node)['digest'] != expected:
+        raise ValueError('checksum mismatch (file change by other user?)')
+
+
 def detail(identifier, node):
     identifier = project_id(identifier)
     info = json.loads((METADATA / (identifier + '.json')).read_text())
     if info['node'] != node or node != current_node():
         raise ValueError('Project belongs to another node')
-    return dict(info, deployment=json.loads((ROOT / identifier / 'request.json').read_text()))
+    directory = ROOT / identifier
+    deployment = json.loads((directory / 'request.json').read_text())
+    return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment))
 
 
 def refresh(node):
@@ -1097,22 +1315,76 @@ def refresh(node):
             print(f'Metrics unavailable: {error}', file=sys.stderr)
 
 
-def action(identifier, node, operation):
+def graceful_shutdown(identifier, timeout=60, service=None):
+    timeout = int(timeout)
+    if not 0 <= timeout <= 86400:
+        raise ValueError('Invalid shutdown timeout')
+    def selected_records():
+        return [item for item in container_records(identifier) if service is None or item['service'] == service]
+
+    records = selected_records()
+    active_states = ('running', 'restarting', 'paused')
+    for container in records:
+        check_shutdown_cancellation(identifier)
+        if container['state'] not in active_states:
+            continue
+        try:
+            run(['docker', 'kill', '--signal', container.get('stop_signal') or 'SIGTERM', container['id']],
+                capture_output=True, timeout=30)
+        except subprocess.CalledProcessError:
+            if any(item['id'] == container['id'] and item['state'] in active_states
+                   for item in selected_records()):
+                raise
+    deadline = time.monotonic() + int(timeout)
+    while any(item['state'] in active_states for item in selected_records()):
+        check_shutdown_cancellation(identifier)
+        if time.monotonic() >= deadline:
+            raise ValueError('Shutdown timed out. DCT remains running; use Stop to force termination.')
+        time.sleep(0.2)
+    return [item['id'] for item in records]
+
+
+def action(identifier, node, operation, timeout=60):
     with locked():
         info = detail(identifier, node)
         directory = ROOT / identifier
         commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['restart'], 'delete': ['down']}
-        if operation not in commands:
+        if operation not in commands and operation not in ('shutdown', 'reboot', 'force-stop'):
             raise ValueError('Unsupported operation')
-        if operation in ('start', 'restart'):
+        if operation == 'delete' and any(item['state'] in ('running', 'restarting', 'paused')
+                                          for item in container_records(identifier)):
+            raise ValueError('DCT is running. Stop it before removal.')
+        if operation == 'reboot' and not any(item['state'] in ('running', 'restarting', 'paused')
+                                            for item in container_records(identifier)):
+            raise ValueError('DCT is not running')
+        if operation in ('start', 'restart', 'reboot'):
             ensure_address(info)
             rebind_runtime(directory, info['address'])
             info.pop('deployment', None)
             info.pop('network_resume', None)
             info['status'] = 'creating'
             write_json(METADATA / (identifier + '.json'), info)
-        if operation != 'start' or not restored_start(identifier):
-            run(compose_base(directory, identifier) + commands[operation], timeout=1800)
+        if operation == 'start':
+            apply_pending_settings(identifier, node)
+        if operation in ('shutdown', 'reboot'):
+            ids = graceful_shutdown(identifier, timeout)
+            if operation == 'reboot' and ids:
+                apply_pending_settings(identifier, node)
+                ids = [c['id'] for c in container_records(identifier)]
+                run(['docker', 'start', *ids], timeout=1800)
+        elif operation == 'force-stop':
+            ids = [item['id'] for item in container_records(identifier)
+                   if item['state'] in ('running', 'restarting', 'paused')]
+            if ids:
+                run(['docker', 'kill', *ids], capture_output=True, timeout=30)
+        elif operation != 'start' or not restored_start(identifier):
+            containers = container_records(identifier) if operation == 'start' else []
+            # Live resource updates change the Compose hash, not container identity.
+            # Start existing instances without asking Compose to reconcile that hash.
+            if containers and len(containers) == info.get('expected'):
+                run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
+            else:
+                run(compose_base(directory, identifier) + commands[operation], timeout=1800)
         if operation == 'delete':
             # Reserve the metadata until the owned alias is successfully released.
             remove_network(info)
@@ -1121,16 +1393,17 @@ def action(identifier, node, operation):
             print(f'Project removed. Volumes and bind-mount data are retained at {directory}.')
         else:
             info.pop('deployment', None)
-            if operation == 'stop':
+            if operation in ('stop', 'shutdown', 'force-stop'):
                 info.pop('network_resume', None)
                 info['status'] = 'stopped'
                 write_json(METADATA / (identifier + '.json'), info)
             refresh(node)
 
 
-def update(identifier, node, data):
+def update(identifier, node, data, digest=None):
     with locked():
         existing = detail(identifier, node)
+        assert_configuration_digest(identifier, node, digest)
         if data.get('vmid') and data['vmid'] != existing.get('vmid'):
             raise ValueError('DCT ID cannot be changed during deployment edits')
         previous = existing['deployment']
@@ -1143,7 +1416,10 @@ def update(identifier, node, data):
                 raise ValueError('Project name, bridge and IP cannot be changed during redeployment')
         if data.get('ipv4mode', 'static') == 'static' and data['address'] != existing['address']:
             raise ValueError('The project IP cannot be changed during redeployment')
+        require_stopped(container_records(identifier))
         directory = ROOT / identifier
+        if load_pending(directory):
+            raise ValueError('Revert pending service settings before editing deployment')
         with tempfile.TemporaryDirectory(prefix='betterdocker-update-', dir=ROOT) as folder:
             staging = Path(folder)
             config = prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory)
@@ -1159,7 +1435,7 @@ def update(identifier, node, data):
             ensure_address(info)
             rebind_runtime(directory, info['address'])
             write_json(METADATA / (identifier + '.json'), info)
-            run(compose_base(directory, identifier) + ['up', '-d', '--remove-orphans'], timeout=1800)
+            run(compose_base(directory, identifier) + ['up', '--no-start', '--remove-orphans'], timeout=1800)
             refresh(node)
         except Exception:
             info['status'] = 'error'
@@ -1178,6 +1454,16 @@ def restore(node):
 
 # Operation markers contain no deployment data and live outside project directories.
 # The per-project flock rejects conflicting requests instead of queueing them.
+def check_shutdown_cancellation(identifier):
+    path = ROOT.parent / 'operations' / (project_id(identifier) + '.cancel.json')
+    if not path.exists():
+        return
+    request = json.loads(path.read_text())
+    process_start = (PROC / str(os.getpid()) / 'stat').read_text().split(') ', 1)[1].split()[19]
+    if request.get('pid') == os.getpid() and request.get('process_start') == process_start:
+        raise ValueError('Shutdown interrupted by Stop.')
+
+
 def operation_state(identifier):
     path = ROOT.parent / 'operations' / (project_id(identifier) + '.json')
     if not path.exists():
@@ -1195,7 +1481,7 @@ def operation_state(identifier):
 
 
 @contextlib.contextmanager
-def operation(identifier, name):
+def operation(identifier, name, overrule=False, service=None):
     project_id(identifier)
     folder = ROOT.parent / 'operations'
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1204,10 +1490,36 @@ def operation(identifier, name):
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError('Another operation is running for this project') from None
+            if not overrule or name != 'force-stop':
+                raise ValueError('Another operation is running for this project') from None
+            previous = operation_state(identifier)
+            if not previous.get('active') or previous.get('action') != 'shutdown' or previous.get('service') != service:
+                raise ValueError('Only a matching active Shutdown can be overruled') from None
+            actor = os.environ.get('BETTERDOCKER_TASK_USER', 'root@pam')
+            owner = previous.get('user', '')
+            privileged = os.environ.get('BETTERDOCKER_TASK_SYS_MODIFY', '1' if actor == 'root@pam' else '0') == '1'
+            if not privileged and (not owner or actor.split('!', 1)[0] != owner.split('!', 1)[0]):
+                raise ValueError('Permission denied: cannot overrule another user\'s Shutdown') from None
+            token = {key: previous[key] for key in ('pid', 'process_start')}
+            write_json(folder / (identifier + '.cancel.json'), token)
+            deadline = time.monotonic() + 35
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise ValueError('Shutdown did not release its lock; Stop was not performed') from None
+                    time.sleep(0.2)
+            # A competing request must not overrule a newer operation after handoff.
+            latest = operation_state(identifier)
+            if any(latest.get(key) != value for key, value in token.items()):
+                raise ValueError('Operation changed before Stop acquired the lock')
+        (folder / (identifier + '.cancel.json')).unlink(missing_ok=True)
         path = folder / (identifier + '.json')
         pid = os.getpid()
         state = {'active': True, 'action': name, 'pid': pid, 'started': int(time.time()),
+                 'user': os.environ.get('BETTERDOCKER_TASK_USER', 'root@pam'), 'service': service,
                  'process_start': (PROC / str(pid) / 'stat').read_text().split(') ', 1)[1].split()[19]}
         write_json(path, state)
         os.chmod(path, 0o600)
@@ -1248,33 +1560,58 @@ def project_tags(identifier, node, tags=None):
         return {'tags': info.get('tags', '')}
 
 
-def service_action(identifier, node, service, verb):
+def service_action(identifier, node, service, verb, timeout=60):
     with locked():
         info = detail(identifier, node)
         directory = ROOT / identifier
         config = json.loads((directory / 'compose.runtime.json').read_text())
-        if service not in config['services'] or verb not in ('start', 'stop', 'restart'):
+        if service not in config['services'] or verb not in ('start', 'stop', 'restart', 'shutdown', 'reboot', 'force-stop'):
             raise ValueError('Invalid service operation')
-        if verb in ('start', 'restart'):
+        if verb in ('start', 'restart', 'reboot'):
             ensure_address(info)
             rebind_runtime(directory, info['address'])
-        command = {'start': ['up', '-d', '--no-deps'], 'stop': ['stop'], 'restart': ['restart']}[verb]
-        if verb != 'start' or not restored_start(identifier, service):
-            run(compose_base(directory, identifier) + command + [service], timeout=1800)
+        if verb == 'start':
+            apply_pending_settings(identifier, node, service)
+        if verb in ('shutdown', 'reboot'):
+            ids = graceful_shutdown(identifier, timeout, service)
+            if verb == 'reboot' and ids:
+                apply_pending_settings(identifier, node, service)
+                ids = [c['id'] for c in container_records(identifier) if c['service'] == service]
+                run(['docker', 'start', *ids], timeout=1800)
+        elif verb == 'force-stop':
+            ids = [item['id'] for item in container_records(identifier)
+                   if item['service'] == service and item['state'] in ('running', 'restarting', 'paused')]
+            if ids:
+                run(['docker', 'kill', *ids], capture_output=True, timeout=30)
+        else:
+            command = {'start': ['up', '-d', '--no-deps'], 'stop': ['stop'], 'restart': ['restart']}[verb]
+            if verb != 'start' or not restored_start(identifier, service):
+                containers = [c for c in container_records(identifier) if c['service'] == service] if verb == 'start' else []
+                expected = config['services'][service].get('deploy', {}).get('replicas', 1)
+                if containers and len(containers) == expected:
+                    run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
+                else:
+                    run(compose_base(directory, identifier) + command + [service], timeout=1800)
         refresh(node)
 
 
-def reset_settings(identifier, node, service):
+def reset_settings(identifier, node, service, digest=None):
     with locked():
         info = detail(identifier, node)
+        assert_configuration_digest(identifier, node, digest)
         directory = ROOT / identifier
         settings = load_settings(directory)
         if service not in settings:
+            if service in load_pending(directory):
+                require_stopped([c for c in container_records(identifier) if c['service'] == service])
+                pending = load_pending(directory)
+                pending.pop(service, None)
+                save_pending(directory, pending)
             return
         original = (directory / 'compose.runtime.json').read_text()
         previous = dict(settings)
         settings.pop(service)
-        active = any(c['service'] == service and c['state'] == 'running' for c in container_records(identifier))
+        require_stopped([c for c in container_records(identifier) if c['service'] == service])
         marker = directory / 'snapshot-restored.json'
         if marker.exists():
             restored = json.loads(marker.read_text())
@@ -1287,7 +1624,7 @@ def reset_settings(identifier, node, service):
                 staging = Path(folder)
                 prepare(dict(info['deployment'], address=info.get('address') or '0.0.0.0'), identifier, staging, directory)
                 os.replace(staging / 'compose.runtime.json', directory / 'compose.runtime.json')
-            run(compose_base(directory, identifier) + ['up', '-d' if active else '--no-start', '--no-deps', service], timeout=1800)
+            run(compose_base(directory, identifier) + ['up', '--no-start', '--no-deps', service], timeout=1800)
             marker = directory / 'snapshot-restored.json'
             if marker.exists():
                 restored = json.loads(marker.read_text())
@@ -1297,6 +1634,9 @@ def reset_settings(identifier, node, service):
             write_json(directory / 'settings.json', previous)
             (directory / 'compose.runtime.json').write_text(original)
             raise
+        pending = load_pending(directory)
+        pending.pop(service, None)
+        save_pending(directory, pending)
         refresh(node)
 
 
@@ -1513,7 +1853,7 @@ def snapshot_mounts(identifier, containers, allow_missing=False):
             if mount['Type'] == 'bind':
                 if source.is_symlink() or not source.resolve().is_relative_to(folder.resolve()) or source.resolve() == folder.resolve():
                     raise ValueError('Snapshots require project-owned writable mounts; external host paths are not supported')
-                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'settings.json', 'storage.json'):
+                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'settings.json', 'pending.json', 'storage.json'):
                     raise ValueError('Deployment files cannot also be writable application mounts')
             elif mount['Type'] == 'volume':
                 volume = json.loads(capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
@@ -1609,7 +1949,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
     try:
         files = temporary / 'configuration'
         files.mkdir(mode=0o700)
-        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'storage.json', 'notes.txt'):
+        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'storage.json', 'notes.txt'):
             source = ROOT / identifier / filename
             if source.exists():
                 shutil.copy2(source, files / filename)
@@ -1762,7 +2102,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
             else:
                 child.unlink()
         run(['cp', '-a', '--', str(folder / entry['copy']) + '/.', str(target)], timeout=86400)
-    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'notes.txt'):
+    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'notes.txt'):
         source, target = configs / filename, project / filename
         if source.exists():
             shutil.copy2(source, target)
@@ -1873,7 +2213,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -1891,7 +2231,7 @@ def main():
                 create(data, values[1], values[2])
     elif args.operation == 'update':
         with operation(values[0], 'update'):
-            update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())))
+            update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())), values[3] if len(values) > 3 else None)
     elif args.operation in ('dhcp-client', 'dhcp-release'):
         dhcp_client(values[0], release=args.operation == 'dhcp-release')
     elif args.operation == 'notes':
@@ -1900,18 +2240,28 @@ def main():
         print(json.dumps(rrddata(*values)))
     elif args.operation == 'management':
         print(json.dumps(management(*values)))
+    elif args.operation == 'pending':
+        print(json.dumps(pending_settings(*values)))
+    elif args.operation == 'revert-settings':
+        with operation(values[0], 'settings'):
+            revert_settings(*values)
     elif args.operation == 'settings':
         with operation(values[0], 'settings'):
-            service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()))
+            service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()), values[4] if len(values) > 4 else None)
     elif args.operation in ('console-check', 'console'):
         command = console_target(*values)
         if args.operation == 'console':
             os.execvp(command[0], command)
     elif args.operation == 'detail':
         print(json.dumps(detail(*values)))
+    elif args.operation == 'check-digest':
+        assert_configuration_digest(*values)
     elif args.operation == 'action':
-        with operation(values[0], values[2]):
-            action(*values)
+        overrule = len(values) > 4 and values[4] == '1'
+        if overrule and values[2] != 'force-stop':
+            raise ValueError('Overrule is only available for Stop')
+        with operation(values[0], values[2], overrule=overrule):
+            action(*values[:4])
     elif args.operation == 'logs':
         print(project_logs(*values), end='')
     elif args.operation == 'preview':
@@ -1919,8 +2269,11 @@ def main():
     elif args.operation == 'tags':
         print(json.dumps(project_tags(*values)))
     elif args.operation == 'service-action':
-        with operation(values[0], values[3]):
-            service_action(*values)
+        overrule = len(values) > 5 and values[5] == '1'
+        if overrule and values[3] != 'force-stop':
+            raise ValueError('Overrule is only available for Stop')
+        with operation(values[0], values[3], overrule=overrule, service=values[2]):
+            service_action(*values[:5])
     elif args.operation == 'reset-settings':
         with operation(values[0], 'settings'):
             reset_settings(*values)
@@ -1936,7 +2289,7 @@ def main():
             project_snapshot(*values)
     elif args.operation == 'storage-limit':
         with operation(values[0], 'settings'):
-            project_storage_limit(values[0], values[1], values[2])
+            project_storage_limit(*values)
     elif args.operation == 'diagnostics':
         print(json.dumps(diagnostics(*values)))
     elif args.operation == 'restore':

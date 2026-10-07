@@ -118,6 +118,7 @@ class WorkerTests(unittest.TestCase):
              patch.object(worker, 'locked', tempfile.TemporaryDirectory), \
              patch.object(worker, 'detail', return_value=dict(BASE, id=identifier, deployment=BASE)), \
              patch.object(worker, 'prepare', side_effect=ValueError('Invalid YAML')), \
+             patch.object(worker, 'container_records', return_value=[]), \
              patch.object(worker, 'ensure_address') as address:
             directory = Path(folder) / identifier
             directory.mkdir()

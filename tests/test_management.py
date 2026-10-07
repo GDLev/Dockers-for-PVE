@@ -101,7 +101,7 @@ class ManagementTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 worker.console_target(ID, 'pve', container, 'sh;id')
 
-    def test_stopped_service_is_not_started_and_running_service_is_recreated(self):
+    def test_stopped_service_is_not_started_and_running_dns_change_is_pending(self):
         for state in ('stopped', 'running'):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
@@ -112,7 +112,12 @@ class ManagementTests(unittest.TestCase):
                 with patch.object(worker, 'ROOT', root), patch.object(worker, 'locked') as lock, \
                      patch.object(worker, 'detail', return_value={}), patch.object(worker, 'refresh'), \
                      patch.object(worker, 'container_records', return_value=[{'service': 'web', 'state': state}]), \
-                     patch.object(worker, 'run') as run:
+                     patch.object(worker, 'update_live_containers'), patch.object(worker, 'run') as run:
+                    if state == 'running':
+                        worker.service_settings(ID, 'pve', 'web', VALUES)
+                        self.assertEqual(worker.load_pending(directory)['web']['dns'], VALUES['dns'])
+                        run.assert_not_called()
+                        continue
                     worker.service_settings(ID, 'pve', 'web', VALUES)
                     args = run.call_args.args[0]
                     self.assertIn('-d' if state == 'running' else '--no-start', args)
@@ -135,3 +140,66 @@ class ManagementTests(unittest.TestCase):
                     worker.service_settings(ID, 'pve', 'web', VALUES)
             self.assertEqual(runtime.read_text(), original)
             self.assertFalse((directory / 'settings.json').exists())
+
+
+class LiveSettingsTests(unittest.TestCase):
+    def test_live_flags_and_unlimited_pids(self):
+        args = worker.live_settings_arguments({'cpus': 1, 'mem_limit': 32, 'pids_limit': 100},
+                                               {'cpus': 2, 'mem_limit': 64})
+        self.assertEqual(args, ['--cpus', '2', '--memory', '64', '--pids-limit', '-1'])
+
+    def test_unsupported_changes_reject_before_docker_update(self):
+        for old, new in [({'cpus': 1}, {}), ({}, {'cpus': 1}), ({}, {'mem_limit': 32}), ({'mem_limit': 32}, {}), ({'cpu_shares': 100}, {}),
+                         ({}, {'dns': ['1.1.1.1']}), ({}, {'storage_opt': {'size': '512M'}})]:
+            with self.subTest(new=new), self.assertRaisesRegex(ValueError, 'Stop'):
+                worker.live_settings_arguments(old, new)
+
+    def test_failed_live_update_rolls_back_all_touched_replicas(self):
+        containers = [{'id': 'a'}, {'id': 'b'}]
+        inspected = [{'Id': c['id'], 'HostConfig': {'NanoCpus': 1000000000}} for c in containers]
+        with patch.object(worker, 'capture', return_value=json.dumps(inspected)), \
+             patch.object(worker, 'run', side_effect=[None, ValueError('failed'), None, None]) as run:
+            with self.assertRaisesRegex(ValueError, 'failed'):
+                worker.update_live_containers(containers, ['--cpus', '2'])
+            self.assertEqual([c.args[0] for c in run.call_args_list],
+                             [['docker', 'update', '--cpus', value, c] for value, c in
+                              [('2', 'a'), ('2', 'b'), ('1.0', 'a'), ('1.0', 'b')]])
+
+    def test_running_resource_save_uses_docker_update_without_compose(self):
+        values = dict(VALUES, dns=[], dns_search=[], restart='no')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); directory = root / ID; directory.mkdir()
+            config = {'services': {'web': {'cpus': 1, 'mem_limit': 32 * 1048576,
+                                          'memswap_limit': 32 * 1048576, 'restart': 'no'}}}
+            runtime = directory / 'compose.runtime.json'; runtime.write_text(json.dumps(config))
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'locked'), \
+                 patch.object(worker, 'detail', return_value={}), patch.object(worker, 'refresh'), \
+                 patch.object(worker, 'container_records', return_value=[{'id': 'a', 'service': 'web', 'state': 'running'}]), \
+                 patch.object(worker, 'update_live_containers') as update, patch.object(worker, 'run') as run:
+                worker.service_settings(ID, 'pve', 'web', values)
+                update.assert_called_once()
+                run.assert_not_called()
+                self.assertEqual(worker.load_settings(directory)['web'], values)
+                self.assertEqual(json.loads(runtime.read_text())['services']['web']['cpus'], 1.5)
+
+    def test_all_transitional_states_require_stop(self):
+        for state in ('running', 'paused', 'restarting', 'removing'):
+            with self.subTest(state=state), self.assertRaisesRegex(ValueError, 'Stop'):
+                worker.require_stopped([{'state': state}])
+        worker.require_stopped([{'state': s} for s in ('created', 'exited', 'dead')])
+
+    def test_failed_replica_update_restores_default_cpu_weight(self):
+        containers = [{'id': 'a'}, {'id': 'b'}]
+        inspected = [{'Id': c['id'], 'HostConfig': {'CpuShares': 0}} for c in containers]
+        with patch.object(worker, 'capture', return_value=json.dumps(inspected)), \
+             patch.object(worker, 'run', side_effect=[None, ValueError('failed'), None, None]) as run:
+            with self.assertRaisesRegex(ValueError, 'failed'):
+                worker.update_live_containers(containers, ['--cpu-shares', '512'])
+            self.assertEqual(run.call_args_list[-1].args[0], ['docker', 'update', '--cpu-shares', '1024', 'b'])
+
+    def test_actual_unlimited_container_rejected_before_update(self):
+        with patch.object(worker, 'capture', return_value=json.dumps([{'Id': 'a', 'HostConfig': {'NanoCpus': 0}}])), \
+             patch.object(worker, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'Stop'):
+                worker.update_live_containers([{'id': 'a'}], ['--cpus', '1'])
+            run.assert_not_called()

@@ -5,6 +5,8 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "Volumes, bind mounts and deployment files are retained.": "Wolumeny, bind mounty i pliki wdrożenia są zachowywane.",
+            "Open in separate window": "Otwórz w osobnym oknie",
             "Could not read file": "Nie można odczytać pliku",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limity dotyczą każdego kontenera. Przywróć Compose usuwa ustawienia GUI. Limit CPU, pamięci lub PID równy 0 oznacza brak limitu; przy limicie pamięci swap 0 wyłącza swap, a -1 oznacza brak limitu.",
             "Network settings are fixed after creation. Published ports use the DCT address.": "Ustawienia sieci są stałe po utworzeniu DCT. Publikowane porty używają adresu DCT.",
@@ -119,6 +121,7 @@
             "On failure": "Po błędzie",
             "No": "Nie",
             "Always": "Zawsze",
+            "Overrule active shutdown tasks": "Przerwij aktywne zadania wyłączania",
             "Update integration check": "Kontrola integracji po aktualizacji"
         }
     };

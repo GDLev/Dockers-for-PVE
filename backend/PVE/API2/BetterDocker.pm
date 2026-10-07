@@ -14,6 +14,8 @@ use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 my $helper = '/usr/local/lib/betterdocker/provision.py';
 my $node = { type => 'string', format => 'pve-node' };
 my $id = { type => 'string', pattern => '^[0-9a-f]{32}$' };
+my $digest = { type => 'string', pattern => '^[0-9a-f]{64}$', optional => 1,
+    description => 'Configuration digest from GET; prevents concurrent modification when supplied.' };
 my $root = { description => 'Project privileges and host Sys.Console are checked by register_docker_method.' };
 
 sub output {
@@ -21,6 +23,13 @@ sub output {
     my $text = '';
     PVE::Tools::run_command([$helper, @$args], outfunc => sub { $text .= "$_[0]\n"; });
     return $text;
+}
+
+sub check_digest {
+    my ($param) = @_;
+    return unless defined($param->{digest});
+    my $info = decode_json(output(['detail', $param->{id}, $param->{node}]));
+    PVE::Tools::assert_if_modified($param->{digest}, $info->{digest});
 }
 
 sub worker_id {
@@ -122,6 +131,11 @@ sub register_docker_method {
                     ($name eq 'action' && $param->{action} ne 'delete') || $name eq 'service_action' ? 'power' : 'configure';
         # List and capabilities are filtered below; knowing an ID is not a grant.
         die "Permission denied\n" unless ($name eq 'list' && !$param->{diagnostics}) || $caps->{$scope};
+        my $rpc = PVE::RPCEnvironment::get();
+        my $user = $rpc->get_user();
+        local $ENV{BETTERDOCKER_TASK_USER} = $user;
+        local $ENV{BETTERDOCKER_TASK_SYS_MODIFY} = ($user eq 'root@pam' ||
+            $rpc->check($user, "/nodes/$param->{node}", ['Sys.Modify'], 1)) ? '1' : '0';
         return $code->($param);
     };
     __PACKAGE__->register_method($method);
@@ -221,11 +235,12 @@ register_docker_method({
     name => 'update', path => '{id}', method => 'PUT', protected => 1, proxyto => 'node',
     description => 'Edit a deployment and apply Compose changes without changing its project IP.', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
-        node => $node, id => $id, deployment => { type => 'string', maxLength => 262144 },
+        node => $node, id => $id, digest => $digest, deployment => { type => 'string', maxLength => 262144 },
     } },
     returns => { type => 'string' },
     code => sub {
         my ($param) = @_;
+        check_digest($param);
         my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh $param->{deployment}; close $fh;
@@ -233,7 +248,7 @@ register_docker_method({
         if (my $err = $@) { unlink $path; die $err; }
         my $rpcenv = PVE::RPCEnvironment::get();
         my $upid = eval { $rpcenv->fork_worker('betterdockerupdate', task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
-            eval { PVE::Tools::run_command([$helper, 'update', $param->{id}, $param->{node}, $path]); };
+            eval { PVE::Tools::run_command([$helper, 'update', $param->{id}, $param->{node}, $path, $param->{digest} // '']); };
             my $err = $@; unlink $path; die $err if $err;
         }); };
         if (my $err = $@) { unlink $path; die $err; }
@@ -251,18 +266,36 @@ register_docker_method({
 
 register_docker_method({
     name => 'action', path => '{id}/action', method => 'POST', protected => 1, proxyto => 'node',
-    description => 'Start, stop, restart or remove a Docker project (volumes retained).', permissions => $root,
+    description => 'Control project power or remove a project. Shutdown is graceful; force-stop kills immediately. Legacy stop/restart retain Docker semantics.', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
-        node => $node, id => $id, action => { type => 'string', enum => ['start', 'stop', 'restart', 'delete'] },
+        node => $node, id => $id, action => { type => 'string', enum => ['start', 'stop', 'restart', 'shutdown', 'reboot', 'force-stop', 'delete'] },
+        timeout => { type => 'integer', minimum => 0, maximum => 86400, optional => 1, default => 60 },
+        'overrule-shutdown' => { type => 'boolean', optional => 1, default => 0 },
     } },
     returns => { type => 'string' },
     code => sub {
         my ($param) = @_;
         my $rpcenv = PVE::RPCEnvironment::get();
-        $param->{action} =~ /\A(start|stop|restart|delete)\z/ or die "Invalid Docker action\n";
+        $param->{action} =~ /\A(start|stop|restart|shutdown|reboot|force-stop|delete)\z/ or die "Invalid Docker action\n";
         my $action = $1;
-        return $rpcenv->fork_worker('betterdocker' . $action, task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
-            PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $action]);
+        die "Overrule is only available for Stop\n" if $param->{'overrule-shutdown'} && $action ne 'force-stop';
+        (my $task_action = $action) =~ s/-//g;
+        return $rpcenv->fork_worker('betterdocker' . $task_action, task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $action, $param->{timeout} // 60, $param->{'overrule-shutdown'} ? 1 : 0]);
+        });
+    },
+});
+
+register_docker_method({
+    name => 'destroy', path => '{id}', method => 'DELETE', protected => 1, proxyto => 'node', permissions => $root,
+    description => 'Remove the project while retaining persistent data and deployment files.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $rpcenv = PVE::RPCEnvironment::get();
+        return $rpcenv->fork_worker('betterdockerdelete', task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, 'delete']);
         });
     },
 });
@@ -285,26 +318,63 @@ register_docker_method({
     returns => { type => 'object' },
     code => sub { my ($param) = @_; my $info = decode_json(output(['management', $param->{id}, $param->{node}]));
         $info->{capabilities} = capabilities($param->{id}, $param->{node});
+        my $op = $info->{operation} // {};
+        my $owner = $op->{user} // '';
+        my $actor = $ENV{BETTERDOCKER_TASK_USER};
+        $owner =~ s/!.*$//; $actor =~ s/!.*$//;
+        $info->{capabilities}->{overrule_shutdown} = ($op->{active} && $op->{action} eq 'shutdown' &&
+            $info->{capabilities}->{power} && ($ENV{BETTERDOCKER_TASK_SYS_MODIFY} eq '1' ||
+            ($owner ne '' && $owner eq $actor))) ? 1 : 0;
         delete $info->{deployment} unless $info->{capabilities}->{configure};
+        delete $info->{digest} unless $info->{capabilities}->{configure};
         return $info; },
+});
+
+register_docker_method({
+    name => 'pending', path => '{id}/pending', method => 'GET', protected => 1, proxyto => 'node',
+    description => 'Read current and pending settings for one Compose service.',
+    parameters => { additionalProperties => 0, properties => {
+        node => $node, id => $id, service => { type => 'string', maxLength => 128 },
+    } },
+    returns => { type => 'array', items => { type => 'object' } },
+    code => sub { my ($p) = @_; return decode_json(output(['pending', $p->{id}, $p->{node}, $p->{service}])); },
+});
+
+register_docker_method({
+    name => 'revert_settings', path => '{id}/pending', method => 'PUT', protected => 1, proxyto => 'node',
+    description => 'Discard selected pending settings without changing the running containers.',
+    parameters => { additionalProperties => 0, properties => {
+        node => $node, id => $id, digest => $digest, service => { type => 'string', maxLength => 128 },
+        revert => { type => 'string', maxLength => 256 },
+    } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($p) = @_;
+        check_digest($p);
+        my $rpc = PVE::RPCEnvironment::get();
+        return $rpc->fork_worker('betterdockersettings', task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'revert-settings', $p->{id}, $p->{node}, $p->{service}, $p->{revert}, $p->{digest} // '']);
+        });
+    },
 });
 
 register_docker_method({
     name => 'settings', path => '{id}/settings', method => 'PUT', protected => 1, proxyto => 'node',
     description => 'Apply persistent resource, DNS and restart settings to one service.', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
-        node => $node, id => $id, service => { type => 'string', maxLength => 128 },
+        node => $node, id => $id, digest => $digest, service => { type => 'string', maxLength => 128 },
         settings => { type => 'string', maxLength => 8192 },
     } },
     returns => { type => 'string' },
     code => sub {
         my ($param) = @_;
+        check_digest($param);
         my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh $param->{settings}; close $fh;
         my $rpcenv = PVE::RPCEnvironment::get();
         my $upid = eval { $rpcenv->fork_worker('betterdockersettings', task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
-            eval { PVE::Tools::run_command([$helper, 'settings', $param->{id}, $param->{node}, $param->{service}, $path]); };
+            eval { PVE::Tools::run_command([$helper, 'settings', $param->{id}, $param->{node}, $param->{service}, $path, $param->{digest} // '']); };
             my $err = $@; unlink $path; die $err if $err;
         }); };
         if (my $err = $@) { unlink $path; die $err; }
@@ -432,15 +502,19 @@ register_docker_method({
     name => 'service_action', path => '{id}/service-action', method => 'POST', protected => 1, proxyto => 'node',
     description => 'Operate one Compose service without restarting dependencies.',
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
-        service => { type => 'string', maxLength => 128 }, action => { type => 'string', enum => ['start', 'stop', 'restart'] } } },
+        service => { type => 'string', maxLength => 128 }, action => { type => 'string', enum => ['start', 'stop', 'restart', 'shutdown', 'reboot', 'force-stop'] },
+        timeout => { type => 'integer', minimum => 0, maximum => 86400, optional => 1, default => 60 },
+        'overrule-shutdown' => { type => 'boolean', optional => 1, default => 0 } } },
     returns => { type => 'string' },
     code => sub {
         my ($p) = @_;
         my $rpc = PVE::RPCEnvironment::get();
-        $p->{action} =~ /\A(start|stop|restart)\z/ or die "Invalid service action\n";
+        $p->{action} =~ /\A(start|stop|restart|shutdown|reboot|force-stop)\z/ or die "Invalid service action\n";
         my $action = $1;
-        return $rpc->fork_worker('betterdocker' . $action, task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
-            PVE::Tools::run_command([$helper, 'service-action', $p->{id}, $p->{node}, $p->{service}, $action]);
+        die "Overrule is only available for Stop\n" if $p->{'overrule-shutdown'} && $action ne 'force-stop';
+        (my $task_action = $action) =~ s/-//g;
+        return $rpc->fork_worker('betterdocker' . $task_action, task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+            PVE::Tools::run_command([$helper, 'service-action', $p->{id}, $p->{node}, $p->{service}, $action, $p->{timeout} // 60, $p->{'overrule-shutdown'} ? 1 : 0]);
         });
     },
 });
@@ -448,14 +522,15 @@ register_docker_method({
 register_docker_method({
     name => 'reset_settings', path => '{id}/reset-settings', method => 'POST', protected => 1, proxyto => 'node',
     description => 'Restore Compose settings for one service while preserving stopped state.',
-    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
         service => { type => 'string', maxLength => 128 } } },
     returns => { type => 'string' },
     code => sub {
         my ($p) = @_;
+        check_digest($p);
         my $rpc = PVE::RPCEnvironment::get();
         return $rpc->fork_worker('betterdockersettings', task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
-            PVE::Tools::run_command([$helper, 'reset-settings', $p->{id}, $p->{node}, $p->{service}]);
+            PVE::Tools::run_command([$helper, 'reset-settings', $p->{id}, $p->{node}, $p->{service}, $p->{digest} // '']);
         });
     },
 });
@@ -464,14 +539,15 @@ register_docker_method({
 register_docker_method({
     name => 'storage_limit', path => '{id}/storage-limit', method => 'PUT', protected => 1, proxyto => 'node',
     description => 'Create or enlarge the bounded project data disk; services must be stopped.',
-    parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
         size_mib => { type => 'integer', minimum => 256, maximum => 1048576 } } },
     returns => { type => 'string' },
     code => sub {
         my ($p) = @_;
+        check_digest($p);
         my $rpc = PVE::RPCEnvironment::get();
         return $rpc->fork_worker('betterdockersettings', task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
-            PVE::Tools::run_command([$helper, 'storage-limit', $p->{id}, $p->{node}, $p->{size_mib}]);
+            PVE::Tools::run_command([$helper, 'storage-limit', $p->{id}, $p->{node}, $p->{size_mib}, $p->{digest} // '']);
         });
     },
 });

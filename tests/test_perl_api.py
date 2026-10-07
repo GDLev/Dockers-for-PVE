@@ -27,7 +27,7 @@ sub check { $main::grants{$_[2] . ':' . $_[3]->[0]} // 0 }
 ''')
             (base / 'PVE/AccessControl.pm').write_text('package PVE::AccessControl; 1;')
             (base / 'PVE/Cluster.pm').write_text('package PVE::Cluster; sub check_vmid_unused { 1 } sub cfs_lock_file { $_[2]->(); } 1;')
-            (base / 'PVE/Tools.pm').write_text('package PVE::Tools; sub run_command { my ($cmd, %opts) = @_; $opts{outfunc}->($ARGV[0]); } 1;')
+            (base / 'PVE/Tools.pm').write_text('package PVE::Tools; sub run_command { my ($cmd, %opts) = @_; $opts{outfunc}->($ARGV[0]); } sub assert_if_modified { die "detected modified configuration" if defined($_[0]) && $_[0] ne $_[1]; } 1;')
             # Avoid relying on a locally installed Perl JSON distribution.
             (base / 'JSON.pm').write_text('''
 package JSON;
@@ -99,11 +99,12 @@ for my $route (@main::registered) {
     die "route lacks authorization: $route->{name}" unless $@ =~ /Permission denied/;
 }
 $main::grants{'/vms/101:VM.Audit'} = 1;
-*PVE::API2::BetterDocker::output = sub { '{"deployment":{"environment":"secret"},"services":[],"containers":[]}' };
+*PVE::API2::BetterDocker::output = sub { '{"deployment":{"environment":"secret"},"digest":"private-fingerprint","services":[],"containers":[]}' };
 my ($management) = grep { $_->{name} eq 'management' } @main::registered;
 my $public = $management->{code}->(\%param);
 die 'auditor can read source secrets' if exists($public->{deployment});
 die 'auditor can configure Docker' if $public->{capabilities}->{configure};
+die 'auditor can read config digest' if exists($public->{digest});
 my ($logs) = grep { $_->{name} eq 'logs' } @main::registered;
 eval { $logs->{code}->(\%param); };
 die 'auditor can read logs' unless $@ =~ /Permission denied/;
@@ -113,9 +114,29 @@ eval { $power->{code}->(\%param); };
 die 'audit implies power grant' unless $@ =~ /Permission denied/;
 $main::grants{'/vms/101:VM.PowerMgmt'} = 1;
 die 'power permission rejected' unless $power->{code}->(\%param) eq 'allowed';
+for my $command ('shutdown', 'reboot', 'force-stop') {
+ $param{action} = $command;
+ die 'native power command rejected' unless $power->{code}->(\%param) eq 'allowed';
+}
+# Worker identity is derived from RPC state, not from inherited environment values.
+local $ENV{BETTERDOCKER_TASK_USER} = 'root@pam';
+PVE::API2::BetterDocker::register_docker_method({ name => 'action', code => sub {
+ die 'forged task owner' unless $ENV{BETTERDOCKER_TASK_USER} eq 'audit@pve';
+ die 'forged Sys.Modify grant' unless $ENV{BETTERDOCKER_TASK_SYS_MODIFY} eq '0';
+ return 'allowed';
+} });
+die 'identity wrapper rejected' unless $main::registered[-1]->{code}->(\%param) eq 'allowed';
+*PVE::API2::BetterDocker::output = sub { '{"operation":{"active":true,"action":"shutdown","user":"other@pve"},"services":[],"containers":[]}' };
+die 'other owner can overrule' if $management->{code}->(\%param)->{capabilities}->{overrule_shutdown};
+*PVE::API2::BetterDocker::output = sub { '{"operation":{"active":true,"action":"shutdown","user":"audit@pve!job"},"services":[],"containers":[]}' };
+die 'own token cannot overrule' unless $management->{code}->(\%param)->{capabilities}->{overrule_shutdown};
 $param{action} = 'delete';
 eval { $power->{code}->(\%param); };
 die 'power grants destructive configuration' unless $@ =~ /Permission denied/;
+PVE::API2::BetterDocker::register_docker_method({ name => 'destroy', code => sub { 'allowed' } });
+my $destroy = $main::registered[-1];
+eval { $destroy->{code}->(\%param); };
+die 'power grants DELETE access' unless $@ =~ /Permission denied/;
 PVE::API2::BetterDocker::register_docker_method({ name => 'snapshot', code => sub { 'allowed' } });
 my $snapshot = $main::registered[-1];
 $param{action} = 'create';
@@ -132,5 +153,13 @@ die 'native snapshot grant rejected' unless $snapshot->{code}->(\%param) eq 'all
 $param{action} = 'delete';
 $main::grants{'/nodes/pve:Sys.Console'} = 1;
 die 'host administrator rejected' unless $power->{code}->(\%param) eq 'allowed';
+for my $name ('update', 'settings', 'reset_settings', 'storage_limit', 'revert_settings') {
+ my ($route) = grep { $_->{name} eq $name } @main::registered;
+ die 'missing optional digest' unless $route->{parameters}->{properties}->{digest}->{optional};
+ *PVE::API2::BetterDocker::output = sub { die 'unexpected helper before digest' unless $_[0]->[0] eq 'detail'; return '{"digest":"changed"}'; };
+ eval { $route->{code}->({ id => 'a' x 32, node => 'pve', digest => '0' x 64 }); };
+ die "missing API preflight: $name" unless $@ =~ /detected modified configuration/;
+}
+
 
 ''' , '101', 'a' * 32], check=True)

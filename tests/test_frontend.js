@@ -170,7 +170,9 @@ assert.equal(summaryItems.filter(item => item.xtype === 'proxmoxRRDChart').lengt
 const resourceView = configPanel.items.find(card => card.itemId === 'resources');
 assert.equal(resourceView.layout, 'fit');
 assert.equal(resourceView.items.length, 1, 'mounts and limits share the native-style resource grid');
-assert.equal(resourceView.items[0].hideHeaders, true);
+assert.equal(resourceView.items[0].xtype, 'pveBetterDockerPendingProperties');
+assert.equal(definitions['PVE.betterdocker.PendingProperties'].hideHeaders, true);
+assert.equal(definitions['PVE.betterdocker.PendingProperties'].extend, 'Proxmox.grid.PendingObjectGrid');
 console.log('Native status widgets, Notes, RRD charts and full-size resource grid passed');
 const summaryFields = {};
 context.Proxmox.Utils.format_duration_long = value => String(value);
@@ -209,11 +211,11 @@ context.Ext.create = (name, options) => { createdWindows.push({ name, options })
 configPanel.reloadDocker = () => {};
 const shutdownButton = configPanel.tbar.find(button => button.itemId === 'stopButton');
 shutdownButton.handler();
-assert.equal(consoleRequest.params.action, 'stop');
+assert.equal(consoleRequest.params.action, 'shutdown');
 consoleRequest.success({ result: { data: 'UPID:stop' } });
 configPanel.pendingTask = null;
 shutdownButton.menu[0].handler();
-assert.equal(consoleRequest.params.action, 'restart');
+assert.equal(consoleRequest.params.action, 'reboot');
 consoleRequest.success({ result: { data: 'UPID:restart' } });
 configPanel.pendingTask = null;
 assert.equal(createdWindows.length, 0, 'shutdown and restart must not open TaskViewer');
@@ -228,7 +230,7 @@ const menuWorkspace = { selectById: id => navigation.push(id), query: () => [
 const commandMenu = { pveSelNode: clickedRecord, workspace: menuWorkspace, callParent };
 definitions['PVE.betterdocker.CmdMenu'].initComponent.call(commandMenu);
 assert(commandMenu.items.find(item => item.text === 'Start').disabled);
-commandMenu.items.find(item => item.text === 'Restart').handler();
+commandMenu.items.find(item => item.text === 'Reboot').handler();
 assert.equal(consoleRequest.url, '/nodes/pve-other/docker/' + 'c'.repeat(32) + '/action');
 const beforeRestart = createdWindows.length;
 consoleRequest.success({ result: { data: 'UPID:restart-other' } });
@@ -246,6 +248,8 @@ context.Ext.defer = (callback, delay) => {
 };
 context.Ext.create = (name, options) => {
     menuArguments = { name, options };
+    if (name === 'Proxmox.window.SafeDestroy') { return {}; }
+    if (name === 'PVE.betterdocker.GuestStop') { return { show() {} }; }
     const menu = Object.assign({
         callParent,
         on(event, callback) { assert.equal(event, 'hide'); this.onHide = callback; },
@@ -265,8 +269,8 @@ assert.deepEqual(shownAt, [100, 200]);
 assert.equal(menuArguments.name, 'PVE.betterdocker.CmdMenu');
 assert.equal(menuArguments.options.pveSelNode, clickedRecord);
 // Ext.menu.Item hides its parent before it reads and invokes its handler.
-for (const label of ['Start', 'Shutdown', 'Restart', 'Console', 'Edit deployment', 'Remove']) {
-    const record = { data: Object.assign({}, clickedRecord.data, { status: label === 'Start' ? 'stopped' : 'running' }) };
+for (const label of ['Start', 'Shutdown', 'Reboot', 'Stop', 'Console', 'Edit deployment', 'Remove']) {
+    const record = { data: Object.assign({}, clickedRecord.data, { status: ['Start', 'Remove'].includes(label) ? 'stopped' : 'running' }) };
     const menu = context.PVE.Utils.createCmdMenu(treeView, record, null, 0, { stopEvent() {}, getXY() { return [100, 200]; } });
     const item = menu.items.find(entry => entry.text === label);
     assert.equal(item.disabled, false);
@@ -279,10 +283,11 @@ for (const label of ['Start', 'Shutdown', 'Restart', 'Console', 'Edit deployment
         if (label !== 'Remove') { callback('yes'); }
     } };
     item.handler();
-    if (label === 'Remove') { assert(confirmed); }
+    if (label === 'Remove') { assert.equal(menuArguments.name, 'Proxmox.window.SafeDestroy'); assert.equal(menuArguments.options.item.id, record.data.name); }
+    else if (label === 'Stop') { assert.equal(menuArguments.name, 'PVE.betterdocker.GuestStop'); menuArguments.options.onConfirm(false); assert.equal(consoleRequest.params.action, 'force-stop'); }
     else if (label === 'Console') { assert.equal(navigation.at(-1), 'console'); }
     else if (label === 'Edit deployment') { assert.equal(consoleRequest.method, 'GET'); }
-    else { assert.equal(consoleRequest.params.action, { Start: 'start', Shutdown: 'stop', Restart: 'restart' }[label]); }
+    else { assert.equal(consoleRequest.params.action, { Start: 'start', Shutdown: 'shutdown', Reboot: 'reboot', Stop: 'force-stop' }[label]); }
     deferredMenuCleanup.shift()();
     assert(menu.destroyed, `${label}: the hidden menu must be cleaned up after the handler`);
 }
@@ -328,15 +333,15 @@ assert.equal(wizard.items[0].column1.find(item => item.name === 'vmid').emptyTex
 console.log('Readable DCT task descriptions and numeric ID wizard passed');
 
 for (const [handler, operation] of [
-    [shutdownButton.handler, 'stop'], [shutdownButton.menu[0].handler, 'restart'],
-    [commandMenu.items.find(item => item.text === 'Shutdown').handler, 'stop'],
-    [commandMenu.items.find(item => item.text === 'Restart').handler, 'restart'],
+    [shutdownButton.handler, 'shutdown'], [shutdownButton.menu[0].handler, 'reboot'],
+    [commandMenu.items.find(item => item.text === 'Shutdown').handler, 'shutdown'],
+    [commandMenu.items.find(item => item.text === 'Reboot').handler, 'reboot'],
 ]) {
     let answer;
     const previousRequest = consoleRequest;
     context.Ext.Msg.confirm = (title, message, callback) => {
         assert.equal(title, 'Confirm');
-        assert(message.includes(operation === 'stop' ? 'Shutdown' : 'Restart'));
+        assert(message.includes({ shutdown: 'Shutdown', reboot: 'Reboot', 'force-stop': 'Stop' }[operation]));
         answer = callback;
     };
     handler();
@@ -387,6 +392,15 @@ taskTick();
 consoleRequest.success({ result: { data: { status: 'stopped', exitstatus: 'OK' } } });
 assert.equal(taskErrorMask, false);
 assert.equal(configPanel.pendingTask, null);
+// Completion of the interrupted Shutdown must not unlock the newer Stop task.
+configPanel.tbar.find(button => button.itemId === 'startButton').handler();
+consoleRequest.success({ result: { data: 'UPID:old-shutdown' } });
+taskTick();
+const oldTaskPoll = consoleRequest;
+configPanel.pendingTask = 'UPID:new-stop';
+oldTaskPoll.success({ result: { data: { status: 'stopped', exitstatus: 'Shutdown interrupted by Stop.' } } });
+assert.equal(configPanel.pendingTask, 'UPID:new-stop');
+configPanel.pendingTask = null;
 console.log('Task completion refresh and conflicting operation exclusion passed');
 
 assert.equal(configPanel.items.find(card => card.itemId === 'tasks').xtype, 'proxmoxNodeTasks');
@@ -647,3 +661,163 @@ assert.equal(summaryFields['#diskValue'].text, 'Unavailable');
 assert.equal(summaryFields['#swapValue'].text, 'Unavailable');
 assert.equal(summaryBars['#diskValue'], false);
 console.log('Empty initial values, running/stopped/partial status and unavailable storage passed');
+
+// ExtJS chart configs apply explicitly present undefined values instead of defaults.
+// applyColors expects an array and crashes if an override passes undefined.
+for (const chart of summaryItems.filter(item => item.xtype === 'proxmoxRRDChart')) {
+    if (Object.hasOwn(chart, 'colors')) {
+        assert(Array.isArray(chart.colors));
+        assert.doesNotThrow(() => Array.from(chart.colors, color => color));
+    }
+    assert(Object.values(chart).every(value => value !== undefined), 'chart defaults must be omitted, not undefined');
+}
+console.log('ExtJS chart defaults are preserved and explicit color palettes are valid arrays');
+
+// Both toolbar actions preserve the project identity and use native removal gating.
+configPanel.pveSelNode.data.vmid = 101;
+const stage2Windows = [];
+context.Ext.create = (name, options) => { stage2Windows.push({ name, options }); return {}; };
+configPanel.pendingTask = null;
+const requestsBeforeRemove = statusRequests.length;
+configPanel.tbar.find(item => item.text === 'More').menu.find(item => item.text === 'Remove').handler();
+const removal = stage2Windows.at(-1);
+assert.equal(removal.name, 'Proxmox.window.SafeDestroy');
+assert.equal(removal.options.item.id, configPanel.pveSelNode.data.vmid);
+assert(removal.options.note.includes('retained'));
+assert.equal(removal.options.showProgress, true);
+assert.equal(statusRequests.length, requestsBeforeRemove, 'opening the dialog cannot remove a project');
+configPanel.tbar.find(item => item.itemId === 'consoleButton').menu[0].handler();
+const detachedConsole = stage2Windows.at(-1);
+assert.equal(detachedConsole.name, 'Ext.window.Window');
+assert.equal(detachedConsole.options.items[0].xtype, 'pveBetterDockerConsole');
+assert.equal(detachedConsole.options.items[0].apiUrl, removal.options.url);
+assert.equal(shutdownButton.menu[1].text, 'Stop');
+assert.equal(shutdownButton.menu[0].text, 'Reboot');
+console.log('Native removal dialog and separate console keep the selected DCT scope');
+
+// Stop uses the native MessageBox/checkbox pattern and sends override only after confirmation.
+const stopWindows = [];
+context.Ext.create = (name, options) => { stopWindows.push({ name, options }); return { show() {} }; };
+configPanel.pendingTask = null;
+const stopRequestBefore = statusRequests.length;
+shutdownButton.menu[1].handler();
+assert.equal(statusRequests.length, stopRequestBefore);
+const stopDialog = stopWindows.at(-1);
+assert.equal(stopDialog.name, 'PVE.betterdocker.GuestStop');
+assert.equal(stopDialog.options.activeShutdown, false);
+stopDialog.options.onConfirm(true);
+assert.equal(statusRequests.at(-1).params['overrule-shutdown'], 1);
+assert.equal(statusRequests.at(-1).params.action, 'force-stop');
+const guestStopClass = definitions['PVE.betterdocker.GuestStop'];
+let fieldConfig, confirmationConfig, destroyed = false, performed = false;
+const fakeStop = { activeShutdown: true, canOverrule: true, message: 'Stop DCT 105?',
+    onConfirm(override) { performed = override; }, destroy() { destroyed = true; },
+    callParent(args) { if (args) confirmationConfig = args[0]; },
+    promptContainer: { add(config) { fieldConfig = config; }, down() { return { isDisabled: () => false, getSubmitValue: () => true }; } } };
+guestStopClass.initComponent.call(fakeStop);
+assert.equal(fieldConfig.name, 'overrule-shutdown');
+assert.equal(fieldConfig.checked, true);
+guestStopClass.show.call(fakeStop);
+confirmationConfig.callback('no');
+assert.equal(performed, false);
+assert.equal(destroyed, true);
+destroyed = false;
+confirmationConfig.callback('yes');
+assert.equal(performed, true);
+assert.equal(destroyed, true);
+console.log('Stop override requires confirmation and cancellation submits no request');
+// Active Shutdown keeps Stop reachable, including its splitbutton parent.
+const overrideEvents = {}, disabledPower = {};
+const overridePanel = { pveSelNode: configPanel.pveSelNode, callParent, pendingTask: 'UPID:shutdown',
+    on(event, callback) { overrideEvents[event] = callback; }, query() { return []; },
+    down(id) {
+        if (id === '#summary') return { updateSnapshot() {}, down() { return null; } };
+        if (['#startButton', '#stopButton', '#restartButton', '#forceStopButton', '#consoleButton', '#removeButton'].includes(id)) {
+            return { setDisabled(value) { disabledPower[id] = Boolean(value); } };
+        }
+        return null;
+    } };
+definitions['PVE.betterdocker.Config'].initComponent.call(overridePanel);
+overrideEvents.afterrender();
+statusRequests.at(-1).success({ result: { data: Object.assign({}, summaryData, {
+    operation: { active: true, action: 'shutdown', service: null, user: 'root@pam' },
+    capabilities: { power: 1, configure: 1, overrule_shutdown: 1 },
+}) } });
+assert.equal(disabledPower['#stopButton'], false, 'parent menu must remain reachable');
+assert.equal(disabledPower['#forceStopButton'], false);
+assert.equal(disabledPower['#restartButton'], true);
+overridePanel.tbar.find(button => button.itemId === 'stopButton').menu[1].handler();
+assert.equal(stopWindows.at(-1).options.activeShutdown, true);
+assert.equal(stopWindows.at(-1).options.canOverrule, true);
+stopWindows.at(-1).options.onConfirm(true);
+assert.equal(statusRequests.at(-1).params['overrule-shutdown'], 1);
+overrideEvents.beforedestroy();
+console.log('Only Stop stays enabled during an authorized active Shutdown');
+// Deployment editor keeps the digest it loaded, rather than a later polling result.
+const digestRequests = [];
+context.Proxmox.Utils.API2Request = options => digestRequests.push(options);
+const editorDigest = '1'.repeat(64);
+const digestEditor = { digest: editorDigest, vmid: 105, projectId: 'e'.repeat(32), nodename: 'pve',
+    deployment: { name: 'digest-test', mode: 'compose', compose: 'services: {}', bridge: 'vmbr0', address: '192.0.2.250/20', ipv4mode: 'static' },
+    callParent, down() { return null; }, formPanel: { getForm() { return { isValid: () => true }; } },
+    getValues() { return { mode: 'compose', compose: 'services: {app: {image: busybox}}' }; } };
+definitions['PVE.betterdocker.DeploymentEdit'].initComponent.call(digestEditor);
+digestEditor.digest = '2'.repeat(64);
+digestEditor.submit();
+assert.equal(digestRequests.at(-1).method, 'PUT');
+assert(digestRequests.at(-1).url.endsWith('/docker'));
+digestRequests.at(-1).success({ result: { data: [] } });
+assert.equal(digestRequests.at(-1).params.digest, editorDigest);
+assert(digestRequests.at(-1).url.endsWith('/' + 'e'.repeat(32)));
+console.log('Deployment editing submits the digest captured when the editor opened');
+// Resource/DNS/options and disk editors retain their own version across status refreshes.
+const digestEvents = {}, capturedEditors = [];
+const digestPanel = { pveSelNode: configPanel.pveSelNode, callParent,
+    on(event, callback) { digestEvents[event] = callback; }, query() { return []; },
+    down(id) { return id === '#summary' ? { updateSnapshot() {}, down() { return null; } } : null; } };
+context.Ext.create = (name, options) => {
+    assert.equal(name, 'Proxmox.window.Edit');
+    const editor = Object.assign({ formPanel: { getForm() { return { isValid: () => true,
+        getValues: () => options.url.endsWith('/storage-limit') ? { size_mib: 256 } : options.title.includes('DNS') ?
+            { dns: '1.1.1.1', dns_search: 'example.test' } : options.title.includes('Options') ? { restart: 'always' } : { memory: 128, swap: 0 } }; } },
+        show() {}, close() {} }, options);
+    capturedEditors.push(editor); return editor;
+};
+definitions['PVE.betterdocker.Config'].initComponent.call(digestPanel);
+function loadDigest(digest) {
+    digestPanel.reloadDocker();
+    digestRequests.at(-1).success({ result: { data: Object.assign({}, summaryData, {
+        digest, operation: {}, capabilities: { configure: 1, power: 1 }, storage: { rootfs: {}, limit_mib: 0 },
+        services: [{ name: 'app', image: 'busybox', ports: [], mounts: [], overridden: true,
+            settings: { cpus: 1, memory: 32, swap: 0, cpuunits: 0, pids: 0, dns: [], dns_search: [], restart: 'no' } }],
+    }) } });
+}
+for (const [group, key] of [['resources', 'Memory'], ['dns', 'DNS servers'], ['options', 'Restart policy'], ['resources', 'Project data disk']]) {
+    loadDigest(editorDigest);
+    const grid = digestPanel.items.find(item => item.itemId === group).items[0];
+    grid.listeners.itemdblclick(null, { get: () => key });
+    const editor = capturedEditors.at(-1);
+    assert(editor);
+    loadDigest('2'.repeat(64));
+    editor.submit.call(editor);
+    assert.equal(digestRequests.at(-1).params.digest, editorDigest, group + ' must not use refreshed version');
+}
+digestEvents.beforedestroy();
+console.log('Resource, DNS, options and disk edits preserve the version from opening');
+
+const pendingProperties = definitions['PVE.betterdocker.PendingProperties'];
+const pendingLoads = [], pendingEvents = [];
+const pendingGrid = { rows: {}, rstore: { loadData(data) { pendingLoads.push(data); },
+    getRange() { return pendingLoads.at(-1); }, fireEvent(...args) { pendingEvents.push(args); } } };
+pendingProperties.setRows.call(pendingGrid, [{ key: 'CPU limit', value: 1, pending: 'Unlimited' },
+    { key: 'DNS servers', value: 'Docker default', pending: '1.1.1.1' }]);
+assert.equal(pendingLoads[0][0].pending, 'Unlimited');
+assert.equal(pendingEvents[0][0], 'load');
+assert.equal(pendingEvents[0][3], true, 'native DiffStore receives a successful load');
+assert.equal(pendingGrid.rows['DNS servers'].renderer('1.1.1.1'), '1.1.1.1');
+for (const [group, id] of [['resources', 'resourceGrid'], ['dns', 'dnsGrid'], ['options', 'optionGrid']]) {
+    const card = digestPanel.items.find(item => item.itemId === group);
+    assert.equal(card.items[0].xtype, 'pveBetterDockerPendingProperties');
+    assert.equal(card.tbar.find(button => button.itemId === id + 'Revert').xtype, 'pvePendingRevertButton');
+}
+console.log('Native pending model, DiffStore updates and Revert controls on all settings pages passed');
