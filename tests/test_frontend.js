@@ -377,7 +377,14 @@ shutdownButton.handler();
 assert.equal(consoleRequest, pendingRequest);
 taskTick();
 assert(consoleRequest.url.includes('/tasks/UPID%3Apending/status'));
+let taskErrorMask;
+context.Proxmox.Utils.setErrorMask = (_target, message) => { taskErrorMask = message; };
+consoleRequest.failure({ htmlStatus: 'Connection failed' });
+assert.equal(taskErrorMask, 'Connection failed');
+assert.equal(configPanel.pendingTask, 'UPID:pending', 'a connection error does not mean the task has finished');
+taskTick();
 consoleRequest.success({ result: { data: { status: 'stopped', exitstatus: 'OK' } } });
+assert.equal(taskErrorMask, false);
 assert.equal(configPanel.pendingTask, null);
 console.log('Task completion refresh and conflicting operation exclusion passed');
 
@@ -479,3 +486,86 @@ const otherLanguageWizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(otherLanguageWizard);
 assert.deepEqual(Array.from(otherLanguageWizard.items, item => item.title), ['General', 'Deployment', 'Network', 'Confirm']);
 console.log('Separate language catalogs, native translation priority and English fallback passed');
+
+// Missing capacities must not turn measured usage into zero or a false percentage.
+context.Proxmox.Utils.format_size = value => `${value} B`;
+const summaryBars = {};
+const unlimitedSummary = { down(id) { return id === '#statusPanel' ? { setTitle() {} } : {
+    updateValue(text) { summaryFields[id] = { text }; },
+    setPrintBar(value) { summaryBars[id] = value; },
+}; } };
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, {
+    ...summaryData, metrics: { ...summaryData.metrics, maxmem: 0, maxswap: 0, maxdisk: 0 },
+});
+assert.equal(summaryFields['#memoryValue'].text, '128 B');
+assert.equal(summaryFields['#swapValue'].text, '32 B');
+assert.equal(summaryFields['#diskValue'].text, '100 B');
+assert.equal(summaryBars['#memoryValue'], false);
+assert.equal(summaryBars['#swapValue'], false);
+assert.equal(summaryBars['#diskValue'], false);
+
+// Log instance choices stay within the selected service across refreshes.
+const logRequests = [], logEvents = {}, logControls = {};
+context.Proxmox.Utils.API2Request = options => { logRequests.push(options); };
+const logPanel = { apiUrl: '/nodes/pve/docker/project', callParent,
+    on(event, handler) { logEvents[event] = handler; }, down(id) { return logControls[id]; },
+};
+definitions['PVE.betterdocker.Logs'].initComponent.call(logPanel);
+for (const spec of [...logPanel.tbar, ...logPanel.bbar, ...logPanel.items]) {
+    if (!spec.itemId) { continue; }
+    const store = { loadData(rows) { this.rows = rows; } };
+    logControls['#' + spec.itemId] = { value: spec.value ?? spec.checked ?? '',
+        getValue() { return this.value; }, setValue(value) { this.value = value; }, getStore() { return store; },
+    };
+}
+logEvents.afterrender();
+const logTargets = { services: [{ name: 'web' }, { name: 'db' }], containers: [
+    { id: 'web-1', service: 'web', name: 'web-1' }, { id: 'db-1', service: 'db', name: 'db-1' },
+] };
+logRequests.find(request => request.url.endsWith('/management')).success({ result: { data: logTargets } });
+const instancePicker = logControls['#logContainer'];
+instancePicker.setValue('db-1');
+logControls['#logService'].setValue('web');
+logPanel.tbar.find(item => item.itemId === 'logService').listeners.select();
+assert.deepEqual(Array.from(instancePicker.getStore().rows, row => row.id), ['', 'web-1']);
+assert.equal(instancePicker.getValue(), '');
+instancePicker.setValue('web-1');
+logEvents.activate();
+logRequests.filter(request => request.url.endsWith('/management')).at(-1).success({ result: { data: logTargets } });
+assert.equal(instancePicker.getValue(), 'web-1');
+logRequests.filter(request => request.url.endsWith('/management')).at(-1).success({ result: { data: { services: logTargets.services, containers: [] } } });
+assert.equal(instancePicker.getValue(), '');
+
+// An image deployment exports text; Compose exports YAML.
+const deploymentExports = [];
+context.Blob = class {};
+context.URL = { createObjectURL: () => 'blob:test', revokeObjectURL() {} };
+context.document = { createElement: () => ({ click() { deploymentExports.push(this.download); } }) };
+lazyPanel.down = id => id === '#source' ? { getValue: () => 'Image: nginx' } : null;
+const exportButton = lazyPanel.items.find(item => item.itemId === 'deployment').tbar.find(item => item.text === 'Download');
+summaryData.deployment = { mode: 'image', image: 'nginx' };
+exportButton.handler();
+summaryData.deployment = { mode: 'compose', compose: 'services: {}' };
+exportButton.handler();
+assert.deepEqual(deploymentExports, ['deployment.txt', 'compose.yaml']);
+console.log('Measured usage without capacities, service-scoped log filters and deployment exports passed');
+
+// File read failures must preserve the editor and allow selecting the file again.
+(async () => {
+    const alerts = [];
+    context.Ext.Msg.alert = (title, message) => alerts.push({ title, message });
+    const importHandler = wizard.items[1].items[0].items[1].items[0].listeners.change;
+    let resets = 0, writes = 0;
+    const upload = { fileInputEl: { dom: { files: [{ size: 10, text: async () => { throw new Error('read failed'); } }] } },
+        reset() { resets++; }, up: () => ({ down: () => ({ setValue() { writes++; } }) }),
+    };
+    await importHandler.call(upload);
+    assert.equal(resets, 1);
+    assert.equal(writes, 0);
+    assert.equal(alerts[0].message, 'Could not read file');
+    upload.fileInputEl.dom.files[0].text = async () => 'services: {}';
+    await importHandler.call(upload);
+    assert.equal(resets, 2);
+    assert.equal(writes, 1);
+    console.log('Failed file import preserves content and permits retry');
+})().catch(error => { console.error(error); process.exitCode = 1; });

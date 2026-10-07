@@ -5,7 +5,7 @@ BetterDockers lets you manage Docker projects from the Proxmox VE web interface:
 Projects appear as **DCT** in the resource tree, with a guest ID and their own IPv4 address. Docker runs directly on the Proxmox node.
 
 > [!WARNING]
-> At its current stage of development, this project is recommended only for small installations, preferably on a single node. It is not recommended for commercial use or complex deployments. Production reliability and suitability for your environment are not guaranteed.
+> At its current stage of development, this project is recommended only for small installations, preferably on a single node. It is not recommended for commercial use or complex deployments. Do not rely on it for critical workloads.
 
 ![Docker project overview](assets/screenshots/demo.png)
 
@@ -83,7 +83,6 @@ Without a managed data disk, application data stays in the bind-mount directorie
 
 ## Support the project
 
-If you like this project and want to support it, you can leave a ⭐ on GitHub, buy me a coffee on Ko-fi, or contribute directly to the project.
-Contributions are always appreciated, and pull requests are more than welcome. Thanks for helping make the project better! ❤️
+Bug reports and pull requests are welcome. You can also support development on Ko-fi.
 
 [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/gdlev)

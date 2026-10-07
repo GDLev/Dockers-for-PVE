@@ -24,13 +24,13 @@ VMID_BLOCK = '''# BEGIN BETTERDOCKER
 # END BETTERDOCKER
 '''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.12" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.13" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker-locales/en.js?v=19.12"></script>
-<script src="/pve2/js/betterdocker-locales/pl.js?v=19.12"></script>
-<script src="/pve2/js/betterdocker.js?v=19.12"></script>
+<script src="/pve2/js/betterdocker-locales/en.js?v=19.13"></script>
+<script src="/pve2/js/betterdocker-locales/pl.js?v=19.13"></script>
+<script src="/pve2/js/betterdocker.js?v=19.13"></script>
 <!-- END BETTERDOCKER -->'''
 
 

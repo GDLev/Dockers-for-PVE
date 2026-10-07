@@ -12,17 +12,15 @@
     };
     const help = () => Ext.create('Ext.window.Window', { title: translate('Docker help'), modal: true,
         width: 660, height: 460, layout: 'fit', items: [{ xtype: 'component', scrollable: true, padding: 15,
-            html: '<h3>BetterDockers</h3><p>' + Ext.htmlEncode(translate('Each DCT is a Compose project running on the Proxmox host.')) + '</p>' +
-                '<p>' + Ext.htmlEncode(translate('Resources apply to each container of the selected service. GUI overrides persist across deployments. Restore Compose removes these overrides.')) + '</p>' +
-                '<p>' + Ext.htmlEncode(translate('Network settings are fixed after creation. Published ports use the dedicated project IP.')) + '</p>' +
-                '<p>' + Ext.htmlEncode(translate('Removal retains volumes, bind mounts and deployment files. VM/CT backup, HA and migration do not apply.')) + '</p>' +
-                ['Limits apply to each container of this service. Zero CPU, memory or PID limit means unlimited. With a memory limit, zero swap disables swap; -1 allows unlimited swap.',
-                    'Snapshots include configuration, container filesystems and owned writable data. Running services are frozen while data is captured, then resumed. RAM, external writable mounts and shared volumes are not supported. Rollback stops DCT and restores only the selected snapshot.',
-                    'Separate entries with commas. Empty fields use Docker defaults.',
-                    'Container disk limit excludes volumes and bind mounts. This host must support overlay2 on XFS with project quotas.',
-                    'Data disk includes writable project directories and owned local volumes. Stop all services first. Original data is retained as a recovery copy. Disks can only grow.',
-                    'A data disk mount failure prevents Docker from starting on this node. Images and Docker logs are not part of this data disk.'
-                ].map(text => '<p>' + Ext.htmlEncode(translate(text)) + '</p>').join('') +
+            html: [
+                ["Resources", "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited."],
+                ["Network", "Network settings are fixed after creation. Published ports use the DCT address."],
+                ["Container disk limit", "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded."],
+                ["Project data disk", "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node."],
+                ["Snapshots", "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped."],
+                ["Remove", "Persistent data and deployment files are retained. Native VM/CT backup, HA and migration are unavailable."],
+            ].map(([label, text]) => '<p><strong>' + Ext.htmlEncode(translate(label)) + '</strong><br>' +
+                Ext.htmlEncode(translate(text)) + '</p>').join('') +
                 '<p><a href="https://github.com/GDLev/Proxmox-BetterDockers" target="_blank" rel="noopener">' + Ext.htmlEncode(translate('Documentation')) + '</a></p>',
         }] }).show();
     function configureHelp(win) {
@@ -39,8 +37,14 @@
             const file = this.fileInputEl.dom.files[0];
             if (!file) { return; }
             if (file.size > maximum) { Ext.Msg.alert(translate('Error'), translate('File is too large')); this.reset(); return; }
-            const content = await file.text();
-            if (!this.destroyed) { this.up('window').down('[name=' + name + ']').setValue(content); this.reset(); }
+            try {
+                const content = await file.text();
+                if (!this.destroyed) { this.up('window').down('[name=' + name + ']').setValue(content); }
+            } catch (_) {
+                if (!this.destroyed) { Ext.Msg.alert(translate('Error'), translate('Could not read file')); }
+            } finally {
+                if (!this.destroyed) { this.reset(); }
+            }
         } } });
     const importRow = (label, name, maximum) => ({ xtype: 'container', layout: 'hbox', margin: '0 0 5 105',
         items: [importFile(label, name, maximum)] });
@@ -55,8 +59,11 @@
         const poll = () => {
             if (target.destroyed) { clearInterval(timer); return; }
             request({ url: '/nodes/' + encodeURIComponent(node) + '/tasks/' + encodeURIComponent(upid) + '/status',
-                method: 'GET', failure: () => {}, success: result => {
+                method: 'GET', failure: result => {
+                    if (!target.destroyed) { Proxmox.Utils.setErrorMask(target, result.htmlStatus); }
+                }, success: result => {
                     if (target.destroyed) { return; }
+                    Proxmox.Utils.setErrorMask(target, false);
                     if (result.result.data.status === 'stopped') {
                         clearInterval(timer); target.pendingTask = null;
                         if (target.reloadDocker) { target.reloadDocker(); }
@@ -73,7 +80,7 @@
         xtype: 'textfield', name, fieldLabel: translate(label), value, labelWidth: 100, anchor: '100%',
     }, extra || {});
     const request = options => Proxmox.Utils.API2Request(Object.assign({
-        failure: response => Ext.Msg.alert('Docker', response.htmlStatus),
+        failure: response => Ext.Msg.alert(translate('Error'), response.htmlStatus),
     }, options));
     const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
     const dockerTaskLabels = { create: 'Deploy', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
@@ -407,15 +414,16 @@
             update('serviceValue', data.containers.filter(item => item.state === 'running').length + ' ' + translate('running') + ' / ' +
                 data.containers.length + ' ' + translate('containers') + ' · ' + data.services.length + ' ' + translate('services'));
             update('cpuValue', Proxmox.Utils.render_cpu_usage(metrics.cpu, metrics.cpus), Math.min(1, metrics.cpu));
-            update('memoryValue', metrics.maxmem ? Proxmox.Utils.render_size_usage(metrics.mem, metrics.maxmem) : '0 B',
+            update('memoryValue', metrics.maxmem ? Proxmox.Utils.render_size_usage(metrics.mem, metrics.maxmem) : Proxmox.Utils.format_size(metrics.mem),
                 metrics.maxmem ? metrics.mem / metrics.maxmem : 0);
+            me.down('#memoryValue').setPrintBar(metrics.maxmem > 0);
             ['swap', 'disk'].forEach(key => {
                 const used = metrics[key], maximum = metrics['max' + key];
                 const available = typeof used === 'number' && typeof maximum === 'number';
                 const text = !available ? translate('Unavailable') : maximum > 0 ? Proxmox.Utils.render_size_usage(used, maximum) :
-                    '0.00% (' + Proxmox.Utils.format_size(used) + ' of 0 B)';
+                    Proxmox.Utils.format_size(used);
                 update(key + 'Value', text, available && maximum > 0 ? Math.min(1, used / maximum) : 0);
-                me.down('#' + key + 'Value').setPrintBar(available);
+                me.down('#' + key + 'Value').setPrintBar(available && maximum > 0);
             });
             update('ipValue', Ext.htmlEncode(data.address || translate('Waiting for DHCP')));
         },
@@ -479,7 +487,14 @@
         },
         initComponent: function () {
             const me = this;
-            let content = '', loading = false;
+            let content = '', loading = false, containers = [];
+            const updateContainers = () => {
+                const service = me.down('#logService').getValue();
+                const combo = me.down('#logContainer'), selected = combo.getValue();
+                const matching = containers.filter(container => !service || container.service === service);
+                combo.getStore().loadData([{ id: '', name: translate('All instances') }, ...matching]);
+                combo.setValue(matching.some(container => container.id === selected) ? selected : '');
+            };
             const render = () => {
                 const query = String(me.down('#logSearch').getValue() || '').toLowerCase();
                 const area = me.down('#logOutput');
@@ -506,12 +521,13 @@
                 if (me.destroyed) { return; }
                 me.down('#logService').getStore().loadData([{ name: '', label: translate('All services') },
                     ...response.result.data.services.map(s => ({ name: s.name, label: s.name }))]);
-                me.down('#logContainer').getStore().loadData([{ id: '', name: translate('All instances') }, ...response.result.data.containers]);
+                containers = response.result.data.containers;
+                updateContainers();
             } });
             me.tbar = [
                 { xtype: 'combobox', itemId: 'logService', emptyText: translate('All services'), width: 160, editable: false, queryMode: 'local',
                     value: '', displayField: 'label', valueField: 'name', store: { fields: ['name', 'label'], data: [] },
-                    listeners: { select: () => { me.down('#logContainer').setValue(''); me.reloadLogs(); } } },
+                    listeners: { select: () => { updateContainers(); me.reloadLogs(); } } },
                 { xtype: 'combobox', itemId: 'logContainer', emptyText: translate('All instances'), width: 180, editable: false, queryMode: 'local',
                     value: '', displayField: 'name', valueField: 'id', store: { fields: ['id', 'name'], data: [] },
                     listeners: { select: me.reloadLogs } },
@@ -882,7 +898,7 @@
                         selectedKey === 'PID limit' ? ['pids'] : selectedKey === 'Container disk limit' ? ['disk'] : ['cpus', 'cpuunits'];
                     fields = fields.filter(item => !item.name || names.includes(item.name));
                 }
-                const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate(group) + ' — ' + active.name,
+                const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate({ resources: 'Resources', dns: 'DNS', options: 'Options' }[group]) + ' - ' + active.name,
                     url: url + '/settings', method: 'PUT', width: 400, showReset: true,
                     onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
                     items: [{ xtype: 'inputpanel', items: fields }],
@@ -984,11 +1000,13 @@
                     Object.assign(grid('portGrid', [{ text: translate('Service'), dataIndex: 'service' }, { text: translate('IP address'), dataIndex: 'host_ip' },
                         { text: translate('Published port'), dataIndex: 'published' }, { text: translate('Container port'), dataIndex: 'target' },
                         { text: translate('Protocol'), dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: translate('Published ports'), flex: 1 })],
-                    [{ text: translate('Edit ports'), bdWrite: true, handler: editDeployment }, { xtype: 'tbtext', text: translate('Interface settings are read-only') }], { layout: { type: 'vbox', align: 'stretch' } }),
+                    [{ text: translate('Edit ports'), bdWrite: true, handler: editDeployment }], { layout: { type: 'vbox', align: 'stretch' } }),
                 card('DNS', 'dns', 'globe', [properties('dnsGrid')], [{ text: translate('Edit'), itemId: 'dnsEdit', disabled: true, handler: () => { const row = me.down('#dnsGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('dns', row.get('key')); } } }, '->', selector()], { layout: 'fit' }),
                 card('Options', 'options', 'cog', [properties('optionGrid')], [{ text: translate('Edit'), itemId: 'optionsEdit', disabled: true, handler: () => { const row = me.down('#optionGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('options', row.get('key')); } } }, '->', selector()], { layout: 'fit' }),
                 card('Deployment', 'deployment', 'file-code-o', [{ xtype: 'pveBetterDockerCodeArea', itemId: 'source', readOnly: true, fieldStyle: 'font-family:monospace' }],
-                    [{ text: translate('Edit'), bdWrite: true, handler: editDeployment }, { text: translate('Download YAML'), handler: () => download('compose.yaml', me.down('#source').getValue()) }], { layout: 'fit' }),
+                    [{ text: translate('Edit'), bdWrite: true, handler: editDeployment }, { text: translate('Download'), handler: () => {
+                        if (current?.deployment) { download(current.deployment.mode === 'compose' ? 'compose.yaml' : 'deployment.txt', me.down('#source').getValue()); }
+                    } }], { layout: 'fit' }),
                 { xtype: 'pveBetterDockerLogs', title: translate('Logs'), itemId: 'logs', iconCls: 'fa fa-file-text-o', apiUrl: url },
                 { xtype: 'proxmoxNodeTasks', title: translate('Task History'), itemId: 'tasks', iconCls: 'fa fa-list-alt',
                     nodename: info.node, preFilter: { vmid: info.vmid } },
