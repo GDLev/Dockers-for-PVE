@@ -150,6 +150,13 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 patcher.transform('unexpected package layout', kind)
 
+    def test_language_catalogs_are_loaded_before_the_interface(self):
+        page = patcher.transform('<script src="/pve2/js/pvemanagerlib.js"></script>', 'ui')
+        main = page.index('/pve2/js/betterdocker.js')
+        for language in ('en', 'pl'):
+            self.assertLess(page.index('/pve2/js/betterdocker-locales/' + language + '.js'), main)
+            self.assertTrue((Path('frontend/locales') / (language + '.js')).is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

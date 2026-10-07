@@ -1,90 +1,89 @@
 # Proxmox BetterDockers
 
-BetterDockers adds Docker management to the Proxmox VE web interface. Create projects from Docker Compose or a single image, manage services, view logs, open a console, set resource limits, and take snapshots.
+BetterDockers lets you manage Docker projects from the Proxmox VE web interface: deploy Compose files or images, control services, view logs, open consoles, set limits and take snapshots.
 
-Projects appear in the resource tree as **DCT**, each with its own guest ID and IPv4 address. Docker runs directly on the Proxmox node; a DCT has no separate operating system.
+Projects appear as **DCT** in the resource tree, with a guest ID and their own IPv4 address. Docker runs directly on the Proxmox node.
+
+> [!WARNING]
+> At its current stage of development, this project is recommended only for small installations, preferably on a single node. It is not recommended for commercial use or complex deployments. Production reliability and suitability for your environment are not guaranteed.
+
+![Docker project overview](assets/screenshots/demo.png)
 
 ## Installation
 
-You need Proxmox VE 8 or 9 and an internet connection. Live testing has been performed on **PVE 9.1.1**; PVE 8 still needs separate validation.
-
-Run this in the node's shell as **root**:
+Run as **root** on a Proxmox VE 8 or 9 node with internet access. Tested on PVE 9.1.1.
 
 ```bash
 curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash
 ```
 
-The installer downloads the project and required packages. It installs Docker Engine and Compose if a working installation is missing, then restarts the PVE web services.
+The installer adds the required dependencies, including Docker and Compose when needed, and restarts the PVE web services. Refresh the interface with **Ctrl+Shift+R**, then click **Create DCT**.
 
-Refresh the web interface with **Ctrl+Shift+R** and sign in as **root@pam**. Click **Create DCT**, enter your application configuration, and choose a network bridge. Use DHCP or an unused static address in the bridge's subnet.
-
-For a cluster, install the extension on every node. Run the same installation command again to update it.
-
-If you have downloaded the project files, install from that directory:
-
-```bash
-bash start.sh install
-```
-
-After a Proxmox update, the integration may need repair. Run `bash start.sh repair` from the project directory.
+Run the same command to update the extension. In a cluster, install it on every node.
 
 ## Uninstallation
 
-From the project directory, run as root:
-
-```bash
-bash start.sh uninstall
-```
-
-If you used the online installer and do not have the project files, download them temporarily:
+Run these commands as **root**. They download the project files needed by the uninstaller:
 
 ```bash
 betterdocker_dir=$(mktemp -d)
 curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/archive/HEAD/Proxmox-BetterDockers-HEAD.tar.gz \
-  | tar -xz --strip-components=1 -C "$betterdocker_dir"
+  -o "$betterdocker_dir/source.tar.gz" &&
+tar -xzf "$betterdocker_dir/source.tar.gz" --strip-components=1 -C "$betterdocker_dir" &&
 bash "$betterdocker_dir/start.sh" uninstall
-rm -rf -- "$betterdocker_dir"
 ```
 
-If you installed the `.deb` package, use:
+Uninstallation removes the web/API integration and restarts the PVE web services. **Docker, existing workloads, their data and network maintenance services remain on the node.** Removing a DCT through the interface also retains its persistent data; permanent data cleanup is a separate manual step.
 
-```bash
-apt remove proxmox-betterdockers
-```
+## Extension files
 
-Uninstallation removes the extension from the web interface and API, then restarts the PVE web services. **Docker, applications, data, and the services maintaining their network remain installed.**
+These paths are on the Proxmox node after installation.
 
-To remove applications too, remove their DCTs in the web interface first. Removing a DCT retains its project directory, volumes, snapshots, and data disk. Permanent cleanup is a separate host administration task.
+| Path | Contents |
+| --- | --- |
+| `/usr/local/lib/betterdocker/` | Deployment, networking and integration scripts. |
+| `/usr/share/perl5/PVE/API2/BetterDocker.pm` | Extension API. |
+| `/usr/share/pve-manager/js/betterdocker.js` | Web interface. |
+| `/usr/share/pve-manager/js/betterdocker-locales/` | Separate English and Polish translations. |
+| `/usr/share/pve-manager/css/betterdocker.css` | Interface styles. |
+| `/usr/share/pve-manager/images/betterdocker.svg` | DCT icon. |
+| `/etc/systemd/system/betterdocker-*` | Network maintenance and integration services and timers. |
+| `/var/backups/betterdocker/` | Files backed up by the installer. |
+
+The installer also updates `/usr/share/pve-manager/index.html.tpl`, `/usr/share/perl5/PVE/API2/Nodes.pm`, `/usr/share/perl5/PVE/API2/Cluster.pm` and `/usr/share/perl5/PVE/Cluster.pm` to register the extension with PVE.
+
+## DCT files
+
+`<id>` below is the internal project identifier, not the numeric guest ID shown in the resource tree. Project files and snapshots are local to the node running the DCT; only metadata under `/etc/pve/` is shared through the PVE cluster filesystem.
+
+| Path | Contents |
+| --- | --- |
+| `/etc/pve/betterdocker/<id>.json` | DCT metadata, including its guest ID and node. |
+| `/etc/pve/betterdocker/ids/<vmid>.json` | Reservation of the numeric guest ID. |
+| `/var/lib/betterdocker/projects/<id>/` | Deployment configuration, settings, notes and network state. |
+| `/var/lib/betterdocker/projects/<id>/compose.source.yaml` | Imported Compose configuration. |
+| `/var/lib/betterdocker/projects/<id>/.env` | Imported environment variables. |
+| `/var/lib/betterdocker/projects/<id>/compose.runtime.json` | Generated configuration used to run the services. |
+| `/var/lib/betterdocker/projects/<id>/storage.ext4` | Optional data disk image. |
+| `/var/lib/betterdocker/projects/<id>/storage-data/` | Mounted data disk containing managed application data. |
+| `/var/lib/betterdocker/snapshots/<id>/<name>/` | Snapshot configuration, container images and application data. |
+
+Without a managed data disk, application data stays in the bind-mount directories specified in Compose or in Docker volumes. Docker manages container layers, images and volumes in its configured storage location, usually `/var/lib/docker/`. External bind mounts can be elsewhere on the node.
 
 ## Limitations
 
-- **Isolation:** containers use Docker and the host kernel. The extension is intended for administrators; Compose configurations can grant containers access to host resources.
-- **PVE features:** DCTs do not support native VM/CT backups, HA, migration, replication, or a per-DCT firewall. Back up application data separately.
-- **Networking:** IPv4 uses an existing Linux bridge. IPv6, VLAN configuration, and separate project gateways are unsupported. DHCP requires a reachable server and a network that allows an additional MAC address. An address change can recreate running containers.
-- **Compose:** `build`, profiles, and `network_mode` are unsupported. Use existing images and explicit published ports, such as `8080:80`. The interface imports YAML and `.env`; other referenced files must already exist on the host.
-- **Resource changes:** CPU and memory limits apply to each instance of the selected service. Changing service settings or DNS can recreate containers and interrupt applications.
-- **Disk limits:** a container's writable-layer limit requires `overlay2` on XFS with project quotas. A separate project data disk can limit owned directories and local volumes; creating or enlarging it requires stopped services. Manual shrinking or removal through the interface is unsupported. Disk limits do not reserve physical host space, and retained data copies also consume space. A data disk mount failure can prevent Docker from starting on the node.
-- **Snapshots:** snapshots are full copies, so they can consume substantial space and freeze services for longer than native storage snapshots. They exclude RAM, Docker logs, and the contents of external read-only mounts. External writable paths, shared volumes, custom volume drivers, special files, and nested filesystems are unsupported. Restoring leaves the DCT stopped. If DHCP changes its address after restoration, another restoration may be needed.
-- **Proxmox updates:** the extension uses internal PVE components. Updates may require repairing the integration or updating the extension.
+- **Host access:** DCTs use Docker and the host kernel. Deployment configuration and consoles require host administration privileges.
+- **PVE features:** native VM/CT backup, HA, migration, replication and per-DCT firewall are unavailable. Back up application data separately.
+- **Networking:** IPv4 uses an existing Linux bridge and host routing. DHCP needs a reachable server and a network that allows an additional MAC address.
+- **Compose:** use existing images and explicit published ports. `build`, profiles and `network_mode` are unsupported. Only YAML and `.env` can be imported; other referenced files must already exist on the host.
+- **Resource limits:** CPU and memory limits apply per service instance. Changing settings can recreate containers. Writable-layer disk limits require `overlay2` on XFS with project quotas.
+- **Data disk:** creating or enlarging it requires stopped services and private project directories or local volumes. The interface supports enlargement only. It does not reserve physical host space. A mount failure can prevent Docker from starting on the node.
+- **Snapshots:** full copies consume additional space and freeze services while capturing data. RAM, Docker logs, external writable paths and shared volumes are unsupported. Restoration leaves the DCT stopped. A later DHCP address change may require restoring again.
+- **PVE updates:** changes to Proxmox can require an extension update or integration repair.
 
-For more detail, see the [LXC compatibility notes](docs/parity-lxc.md) and [validation results](docs/validation-pve9.md).
+## Support the project
 
-## Screenshots
+If you like this project and want to support it, you can leave a ⭐ on GitHub, buy me a coffee on Ko-fi, or contribute directly to the project.
+Contributions are always appreciated, and pull requests are more than welcome. Thanks for helping make the project better! ❤️
 
-Captured on a live Proxmox VE 9.1.1 demo node.
-
-**Project overview**
-
-![Docker project overview](docs/screenshots/demo-summary.jpg)
-
-**Compose services**
-
-![Nginx and Redis services](docs/screenshots/demo-services.jpg)
-
-**Resource limits and data disk**
-
-![Service resource limits and project data disk](docs/screenshots/demo-resources.jpg)
-
-**Snapshots**
-
-![Native snapshot tree](docs/screenshots/demo-snapshots.jpg)
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/gdlev)

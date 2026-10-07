@@ -21,6 +21,9 @@ const context = { window: null, console,
         override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
 };
 context.window = context;
+for (const language of ['en', 'pl']) {
+    vm.runInNewContext(fs.readFileSync('frontend/locales/' + language + '.js', 'utf8'), context);
+}
 vm.runInNewContext(fs.readFileSync('frontend/betterdocker.js', 'utf8'), context);
 const wizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(wizard);
@@ -457,3 +460,22 @@ snapshotRequest = null;
 definitions['PVE.betterdocker.SnapshotEdit'].submit.call(snapshotWindow);
 assert.equal(snapshotRequest, null);
 console.log('Native snapshot submission, immutable names and view-only access passed');
+
+const locales = context.PVE.betterdockerLocales;
+assert.deepEqual(Object.keys(locales.en.messages).sort(), Object.keys(locales.pl.messages).sort());
+context.gettext = value => ({ Summary: 'Podsumowanie', Deployment: 'Native deployment' })[value] || value;
+const nativeTranslationWizard = { callParent, down: () => null, query: () => [] };
+definitions['PVE.betterdocker.CreateWizard'].initComponent.call(nativeTranslationWizard);
+assert.equal(nativeTranslationWizard.items[1].title, 'Native deployment');
+const savedPolishDeployment = locales.pl.messages.Deployment;
+delete locales.pl.messages.Deployment;
+context.gettext = value => value === 'Summary' ? 'Podsumowanie' : value;
+const fallbackWizard = { callParent, down: () => null, query: () => [] };
+definitions['PVE.betterdocker.CreateWizard'].initComponent.call(fallbackWizard);
+assert.equal(fallbackWizard.items[1].title, locales.en.messages.Deployment);
+locales.pl.messages.Deployment = savedPolishDeployment;
+context.gettext = value => value === 'Summary' ? 'Zusammenfassung' : value;
+const otherLanguageWizard = { callParent, down: () => null, query: () => [] };
+definitions['PVE.betterdocker.CreateWizard'].initComponent.call(otherLanguageWizard);
+assert.deepEqual(Array.from(otherLanguageWizard.items, item => item.title), ['General', 'Deployment', 'Network', 'Confirm']);
+console.log('Separate language catalogs, native translation priority and English fallback passed');

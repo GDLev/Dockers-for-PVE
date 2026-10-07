@@ -24,7 +24,8 @@ case "$ACTION" in
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
         systemctl restart pvedaemon pveproxy
         rm -f /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
-            /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg
+            /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg \
+            /usr/share/pve-manager/js/betterdocker-locales/en.js /usr/share/pve-manager/js/betterdocker-locales/pl.js
         echo 'UI integration removed. Docker projects, volumes and network/lease maintenance are retained.'
         exit 0 ;;
     install|repair) ;;
@@ -61,6 +62,8 @@ TARGETS=(
     /usr/local/lib/betterdocker/patch.py
     /etc/systemd/system/betterdocker-integration.service
     /etc/systemd/system/betterdocker-integration.timer
+    /usr/share/pve-manager/js/betterdocker-locales/en.js
+    /usr/share/pve-manager/js/betterdocker-locales/pl.js
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -88,6 +91,7 @@ rollback() {
 }
 trap rollback ERR
 install -d -m 0755 /usr/local/lib/betterdocker
+install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
 install -m 0755 "$PROJECT_DIR/scripts/provision.py" "${TARGETS[0]}"
 install -m 0755 "$PROJECT_DIR/scripts/docker-install.sh" "${TARGETS[1]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/API2/BetterDocker.pm" "${TARGETS[2]}"
@@ -102,6 +106,8 @@ install -m 0644 "$PROJECT_DIR/systemd/betterdocker-dhcp@.service" "${TARGETS[10]
 install -m 0755 "$PROJECT_DIR/scripts/patch.py" "${TARGETS[11]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-integration.service" "${TARGETS[12]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-integration.timer" "${TARGETS[13]}"
+install -m 0644 "$PROJECT_DIR/frontend/locales/en.js" "${TARGETS[14]}"
+install -m 0644 "$PROJECT_DIR/frontend/locales/pl.js" "${TARGETS[15]}"
 bash /usr/local/lib/betterdocker/docker-install.sh
 systemctl daemon-reload
 systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer
