@@ -47,8 +47,8 @@ class MetricsTests(unittest.TestCase):
                       **{key + '_total': 0 for key in ('netin', 'netout', 'diskread', 'diskwrite')}}
             worker.record_metrics({'id': ID, 'metrics': sample})
             worker.record_metrics({'id': ID, 'metrics': dict(sample, time=3000000, cpu=0.9)})
-            average = worker.rrddata(ID, 'pve', 'month', 'AVERAGE')
-            maximum = worker.rrddata(ID, 'pve', 'month', 'MAX')
+            average = worker.rrddata(ID, 'pve', 'week', 'AVERAGE')
+            maximum = worker.rrddata(ID, 'pve', 'week', 'MAX')
             self.assertAlmostEqual(average[0]['cpu'], 0.5)
             self.assertEqual(maximum[0]['cpu'], 0.9)
             worker.record_metrics({'id': ID, 'metrics': dict(sample, time=3000000 + 8 * 86400)})
@@ -64,6 +64,12 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual((directory / 'notes.txt').stat().st_mode & 0o777, 0o600)
             with self.assertRaises(ValueError):
                 worker.notes(ID, 'pve', 'x' * 8193)
+
+    def test_chart_ranges_cannot_claim_more_than_the_retained_week(self):
+        with patch.object(worker, 'detail'):
+            for timeframe in ('month', 'year'):
+                with self.assertRaisesRegex(ValueError, 'Invalid chart range'):
+                    worker.rrddata(ID, 'pve', timeframe, 'AVERAGE')
 
     def test_swap_is_read_from_owned_cgroup_and_capped_by_host_capacity(self):
         with tempfile.TemporaryDirectory() as folder:

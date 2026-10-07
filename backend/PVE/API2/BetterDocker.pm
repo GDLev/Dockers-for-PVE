@@ -376,7 +376,7 @@ register_docker_method({
     name => 'rrddata', path => '{id}/rrddata', method => 'GET', protected => 1, proxyto => 'node', permissions => $root,
     description => 'Read recorded Docker metrics in the native chart format (seven-day retention).',
     parameters => { additionalProperties => 0, properties => {
-        node => $node, id => $id, timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year'] },
+        node => $node, id => $id, timeframe => { type => 'string', enum => ['hour', 'day', 'week'] },
         cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1, default => 'AVERAGE' },
     } },
     returns => { type => 'array', items => { type => 'object' } },

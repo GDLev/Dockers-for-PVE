@@ -154,11 +154,12 @@ context.PVE.panel.Config.prototype.activateCard = () => 'activated';
 assert.equal(dockerConfig.activateCard.call(activation, 'resources'), 'activated');
 console.log('Native Help fallback and layout recovery regression passed');
 
-const nativeStore = { startUpdate() {}, stopUpdate() {}, destroy() {} };
-context.Ext.create = () => nativeStore;
+const summaryEvents = {}, chartCalls = [], chartConfigs = [];
+const nativeStore = { startUpdate() { chartCalls.push('start'); }, stopUpdate() { chartCalls.push('stop'); }, destroy() {} };
+context.Ext.create = (name, config) => { if (name === 'Proxmox.data.RRDStore') { chartConfigs.push(config); } return nativeStore; };
 context.Ext.state = { Manager: { get: () => ({}), getProvider: () => ({}) } };
 const summaryView = { apiUrl: '/nodes/pve/docker/' + 'a'.repeat(32), projectName: 'app',
-    pveSelNode: configPanel.pveSelNode, callParent, on() {}, mon() {} };
+    pveSelNode: configPanel.pveSelNode, callParent, on(event, handler) { summaryEvents[event] = handler; }, mon() {} };
 definitions['PVE.betterdocker.Summary'].initComponent.call(summaryView);
 assert(summaryView.tbar.some(item => item.xtype === 'proxmoxRRDTypeSelector'));
 const summaryItems = summaryView.items[0].items;
@@ -571,3 +572,78 @@ console.log('Measured usage without capacities, service-scoped log filters and d
     assert.equal(writes, 1);
     console.log('Failed file import preserves content and permits retry');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Cached month/year selections must never request unavailable history.
+context.Proxmox.data = { RRDStore: { prototype: { setRRDUrl(timeframe, cf) {
+    this.requestRange = timeframe; this.requestCF = cf;
+} } } };
+const chartState = { timeframe: 'year' };
+chartConfigs[0].setRRDUrl.call(chartState, undefined, 'MAX');
+assert.equal(chartState.requestRange, 'hour');
+assert.equal(chartState.requestCF, 'MAX');
+chartConfigs[0].setRRDUrl.call(chartState, 'week', 'AVERAGE');
+assert.equal(chartState.requestRange, 'week');
+let chartSelection = 'year', allowedRanges;
+summaryView.tbar.find(item => item.xtype === 'proxmoxRRDTypeSelector').listeners.afterrender({
+    lookup: () => ({ getValue: () => chartSelection, setValue: value => { chartSelection = value; },
+        getStore: () => ({ filterBy: predicate => {
+            allowedRanges = ['hour', 'day', 'week', 'month', 'year'].filter(id => predicate({ get: () => id }));
+        } }),
+    }),
+});
+assert.deepEqual(allowedRanges, ['hour', 'day', 'week']);
+assert.equal(chartSelection, 'hour');
+summaryEvents.deactivate();
+assert.equal(chartCalls.at(-1), 'stop');
+summaryEvents.activate();
+assert.equal(chartCalls.at(-1), 'start');
+summaryEvents.hide();
+assert.equal(chartCalls.at(-1), 'stop');
+
+// A slow or disconnected backend must not accumulate polling requests.
+const statusEvents = {}, statusRequests = [];
+let statusTick, refreshInterval, statusVisible = true;
+context.document.hidden = false;
+context.setInterval = (handler, milliseconds) => { statusTick = handler; refreshInterval = milliseconds; return 99; };
+context.Proxmox.Utils.API2Request = options => statusRequests.push(options);
+const statusPanel = { pveSelNode: configPanel.pveSelNode, callParent, query: () => [], down: () => null,
+    on(event, handler) { statusEvents[event] = handler; }, isVisible: () => statusVisible,
+};
+definitions['PVE.betterdocker.Config'].initComponent.call(statusPanel);
+statusEvents.afterrender();
+assert.equal(refreshInterval, 1000);
+statusTick(); statusTick();
+assert.equal(statusRequests.length, 1, 'an outstanding request blocks additional polls');
+statusRequests[0].failure({ htmlStatus: 'Connection failed' });
+statusVisible = false;
+statusTick();
+assert.equal(statusRequests.length, 1);
+statusVisible = true;
+context.document.hidden = true;
+statusTick();
+assert.equal(statusRequests.length, 1);
+context.document.hidden = false;
+statusTick();
+assert.equal(statusRequests.length, 2, 'polling resumes after a connection failure');
+statusRequests[1].success({ result: { data: { ...summaryData, status: 'stopped', containers: [] } } });
+statusTick();
+assert.equal(statusRequests.length, 3);
+statusRequests[2].success({ result: { data: { ...summaryData, status: 'partial' } } });
+statusPanel.destroyed = true;
+statusTick();
+assert.equal(statusRequests.length, 3);
+console.log('Supported chart history, hidden chart lifecycle and non-overlapping status recovery passed');
+
+const initialWidgets = summaryItems[0].items[0].items.filter(item => item.xtype === 'pmxInfoWidget');
+assert(initialWidgets.every(item => item.text === ''), 'initial measurements remain empty');
+for (const [status, expected] of [['running', 'Running'], ['stopped', 'Stopped'], ['partial', 'Partially running']]) {
+    definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, { ...summaryData, status });
+    assert.equal(summaryFields['#statusValue'].text, expected);
+}
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, {
+    ...summaryData, metrics: { ...summaryData.metrics, disk: null, maxdisk: null, swap: null, maxswap: null },
+});
+assert.equal(summaryFields['#diskValue'].text, 'Unavailable');
+assert.equal(summaryFields['#swapValue'].text, 'Unavailable');
+assert.equal(summaryBars['#diskValue'], false);
+console.log('Empty initial values, running/stopped/partial status and unavailable storage passed');

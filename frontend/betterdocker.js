@@ -429,23 +429,34 @@
         },
         initComponent: function () {
             const me = this;
+            const chartRanges = ['hour', 'day', 'week'];
             const store = Ext.create('Proxmox.data.RRDStore', {
                 rrdurl: '/api2/json' + me.apiUrl + '/rrddata', model: 'pve-rrd-guest',
+                setRRDUrl: function (timeframe, cf) {
+                    const requested = timeframe || this.timeframe;
+                    this.timeframe = chartRanges.includes(requested) ? requested : 'hour';
+                    Proxmox.data.RRDStore.prototype.setRRDUrl.call(this, this.timeframe, cf);
+                },
             });
             const metric = (id, title, icon, bar) => ({ xtype: 'pmxInfoWidget', itemId: id, title: translate(title),
-                iconCls: icon, printBar: Boolean(bar), padding: '2 25', text: translate('Loading...') });
+                iconCls: icon, printBar: Boolean(bar), padding: '2 25', text: '' });
             const charts = [
                 ['CPU Usage', ['cpu'], ['CPU usage'], 'percent'],
                 ['Memory Usage', ['maxmem', 'mem'], ['Total', 'Used'], 'bytes'],
-                ['Network Traffic', ['netin', 'netout'], ['Incoming', 'Outgoing'], 'bytes'],
-                ['Disk IO', ['diskread', 'diskwrite'], ['Reads', 'Writes'], 'bytes'],
+                ['Network Traffic', ['netin', 'netout'], ['Incoming', 'Outgoing']],
+                ['Disk IO', ['diskread', 'diskwrite'], ['Reads', 'Writes']],
             ].map(([title, fields, fieldTitles, unit]) => ({ xtype: 'proxmoxRRDChart', title: translate(title),
                 pveSelNode: me.pveSelNode, store, fields, fieldTitles: fieldTitles.map(translate), unit,
-                powerOfTwo: title === 'Memory Usage' }));
-            me.tbar = ['->', { xtype: 'proxmoxRRDTypeSelector' }];
+                powerOfTwo: title === 'Memory Usage',
+                colors: title === 'Memory Usage' ? ['#94ae0a', '#115fa6', '#c4c0c0'] : undefined }));
+            me.tbar = ['->', { xtype: 'proxmoxRRDTypeSelector', listeners: { afterrender: selector => {
+                const timeframe = selector.lookup('timeframe');
+                timeframe.getStore().filterBy(record => chartRanges.includes(record.get('id')));
+                if (!chartRanges.includes(timeframe.getValue())) { timeframe.setValue('hour'); }
+            } } }];
             me.items = [{ xtype: 'container', itemId: 'itemcontainer', minWidth: 700, layout: 'column',
-                defaults: { minHeight: 350, padding: 5 }, items: [
-                    { xtype: 'container', height: 360, layout: { type: 'hbox', align: 'stretch' }, items: [
+                defaults: { minHeight: 360, padding: 5 }, items: [
+                    { xtype: 'container', height: 300, layout: { type: 'hbox', align: 'stretch' }, items: [
                         { xtype: 'panel', itemId: 'statusPanel', title: me.projectName, flex: 1, padding: '0 5 0 0',
                             layout: { type: 'vbox', align: 'stretch' }, items: [
                                 { xtype: 'box', height: 20 },
@@ -454,7 +465,9 @@
                                 metric('serviceValue', 'Services', 'fa fa-cubes fa-fw'),
                                 { xtype: 'box', height: 10 },
                                 metric('cpuValue', 'CPU usage', 'fa fa-fw pmx-itype-icon-processor pmx-icon', true),
-                                metric('memoryValue', 'Memory usage', 'fa fa-fw pmx-itype-icon-memory pmx-icon', true),
+                                Object.assign(metric('memoryValue', 'Memory usage', 'fa fa-fw pmx-itype-icon-memory pmx-icon', true), {
+                                    warningThreshold: 0.9, criticalThreshold: 0.975,
+                                }),
                                 metric('swapValue', 'SWAP usage', 'fa fa-refresh fa-fw', true),
                                 Object.assign(metric('diskValue', 'Container root filesystems', 'fa fa-hdd-o fa-fw', true), {
                                     listeners: { afterrender: widget => { widget.diskTooltip = Ext.create('Ext.tip.ToolTip', { target: widget.getEl(),
@@ -472,6 +485,10 @@
                 ], listeners: { resize: container => Proxmox.Utils.updateColumns(container) } }];
             me.callParent();
             store.startUpdate();
+            me.on('activate', () => store.startUpdate());
+            me.on('deactivate', () => store.stopUpdate());
+            me.on('show', () => store.startUpdate());
+            me.on('hide', () => store.stopUpdate());
             me.on('destroy', () => { store.stopUpdate(); store.destroy(); });
             me.mon(Ext.state.Manager.getProvider(), 'statechange', (_, key) => {
                 if (key === 'summarycolumns') { Proxmox.Utils.updateColumns(me.down('#itemcontainer')); }
@@ -1034,7 +1051,13 @@
             me.callParent();
             const nativeHelp = me.down('proxmoxHelpButton');
             if (nativeHelp) { nativeHelp.setHandler(help); }
-            me.on('afterrender', () => { reload(); me.poll = setInterval(reload, 10000); }, me, { single: true });
+            me.on('afterrender', () => {
+                reload();
+                me.poll = setInterval(() => {
+                    if (!document.hidden && me.isVisible(true)) { reload(); }
+                }, 1000);
+            }, me, { single: true });
+            me.on('show', reload);
             me.on('beforedestroy', () => clearInterval(me.poll));
         },
     });

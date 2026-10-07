@@ -488,7 +488,7 @@ def record_metrics(info):
 
 def rrddata(identifier, node, timeframe, cf):
     detail(identifier, node)
-    seconds = {'hour': 3600, 'day': 86400, 'week': 604800, 'month': 2592000, 'year': 31536000}
+    seconds = {'hour': 3600, 'day': 86400, 'week': 604800}
     if timeframe not in seconds or cf not in ('AVERAGE', 'MAX'):
         raise ValueError('Invalid chart range or consolidation function')
     path = ROOT / identifier / 'metrics.json'
