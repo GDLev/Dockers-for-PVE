@@ -9,6 +9,7 @@ from pathlib import Path
 NODE_BLOCK = '''# BEGIN BETTERDOCKER
 use PVE::API2::BetterDocker;
 __PACKAGE__->register_method({ subclass => 'PVE::API2::BetterDocker', path => 'docker' });
+# lifecycle integration 1
 # END BETTERDOCKER
 '''
 CLUSTER_BLOCK = '''# BEGIN BETTERDOCKER
@@ -24,19 +25,26 @@ VMID_BLOCK = '''# BEGIN BETTERDOCKER
 # END BETTERDOCKER
 '''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.26" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.30" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker-locales/en.js?v=19.26"></script>
-<script src="/pve2/js/betterdocker-locales/pl.js?v=19.26"></script>
-<script src="/pve2/js/betterdocker.js?v=19.26"></script>
+<script src="/pve2/js/betterdocker-locales/en.js?v=19.30"></script>
+<script src="/pve2/js/betterdocker-locales/pl.js?v=19.30"></script>
+<script src="/pve2/js/betterdocker.js?v=19.30"></script>
 <!-- END BETTERDOCKER -->'''
+
+
+NODE_LIFECYCLE = [
+    ("    return $resList;\n}", "    PVE::API2::BetterDocker::append_lifecycle_list($resList, $nodename, $autostart, $vmfilter);\n"),
+    ("                        } else {\n                            die \"unknown VM type '$d->{type}'\\n\";", "                        } elsif ($d->{type} eq 'docker') {\n                            print STDERR \"Starting DCT $vmid\\n\";\n                            $upid = PVE::API2::BetterDocker::node_start($vmid, $nodename);\n                            next if !$upid;\n"),
+    ('    } else {\n        die "unknown VM type \'$type\'\\n";\n    }\n};\n\n__PACKAGE__->register_method({\n    name => \'stopall\',', "    } elsif ($type eq 'docker') {\n        return PVE::API2::BetterDocker::node_stop($vmid, $nodename, $timeout, $force_stop);\n"),
+]
 
 
 def transform(text, kind, remove=False):
     block = NODE_BLOCK if kind == 'node' else CLUSTER_BLOCK if kind == 'cluster' else VMID_BLOCK if kind == 'vmid' else UI_BLOCK
-    if not remove and block in text:
+    if not remove and block in text and (kind != 'node' or all(addition in text for _, addition in NODE_LIFECYCLE)):
         return text
     pattern = (r'# BEGIN BETTERDOCKER\n.*?# END BETTERDOCKER\n' if kind in ('node', 'cluster', 'vmid')
                else r'<!-- BEGIN BETTERDOCKER -->\n.*?<!-- END BETTERDOCKER -->\n?')
@@ -58,7 +66,12 @@ def transform(text, kind, remove=False):
         anchor = '__PACKAGE__->register_method({'
         if anchor not in text:
             raise RuntimeError('API registration anchor missing')
-        return text.replace(anchor, NODE_BLOCK + '\n' + anchor, 1)
+        text = text.replace(anchor, NODE_BLOCK + '\n' + anchor, 1)
+        for target, addition in NODE_LIFECYCLE:
+            if text.count(target) != 1:
+                raise RuntimeError('Unsupported Nodes.pm lifecycle; refusing patch')
+            text = text.replace(target, '# BEGIN BETTERDOCKER\n' + addition + '# END BETTERDOCKER\n' + target, 1)
+        return text
     anchor = re.search(r'<script\b[^>]*src=[\'"]/pve2/js/pvemanagerlib\.js[^\'"]*[\'"][^>]*></script>', text)
     if not anchor:
         raise RuntimeError('Unsupported index.html.tpl; refusing patch')

@@ -610,6 +610,8 @@ def project_storage_limit(identifier, node, size_mib, digest=None):
             raise ValueError('Stop all project services before changing the data disk')
         folder = ROOT / identifier
         previous = storage_config(identifier)
+        if not previous:
+            check_protection(detail(identifier, node), "can't replace DCT data mounts")
         if previous and size_mib <= previous['size_mib']:
             raise ValueError('Data disks can only be enlarged; shrinking or removing a disk is not supported')
         image, point = folder / 'storage.ext4', folder / 'storage-data'
@@ -761,6 +763,7 @@ def revert_settings(identifier, node, service, keys, digest=None):
         values = load_settings(directory).get(service, service_values(config['services'][service]))
         values = dict(values, disk=values.get('disk', 0))
         names = keys.split(',')
+        authorize_config_keys(names)
         if not names or any(key not in values for key in names):
             raise ValueError('Invalid setting to revert')
         pending = load_pending(directory)
@@ -875,14 +878,26 @@ def update_live_containers(containers, arguments):
         raise
 
 
+def authorize_config_keys(keys):
+    allowed = os.environ.get('BETTERDOCKER_CONFIG_KEYS', '*')
+    if allowed != '*' and set(keys) - set(allowed.split(',')):
+        raise ValueError('Permission denied: configuration field requires additional privileges')
+
+
 def service_settings(identifier, node, service, values, digest=None):
-    values = validate_settings(values)
+    validate_settings(values)
     if values.get('disk') and not rootfs_quota_support()['supported']:
         raise ValueError('Container disk limit requires overlay2 on XFS with project quotas; volumes use a separate data disk')
     with locked():
         detail(identifier, node)
         assert_configuration_digest(identifier, node, digest)
-        _service_settings(identifier, node, service, values)
+        rows = pending_settings(identifier, node, service)
+        effective = {row['key']: row.get('pending', row['value']) for row in rows}
+        proposed = validate_settings(dict(effective, **values))
+        if 'disk' not in values and not proposed.get('disk'):
+            proposed.pop('disk', None)
+        authorize_config_keys(key for key in proposed if proposed[key] != effective.get(key))
+        _service_settings(identifier, node, service, proposed)
 
 
 def _service_settings(identifier, node, service, values):
@@ -898,7 +913,9 @@ def _service_settings(identifier, node, service, values):
     pending = load_pending(directory)
     containers = [c for c in container_records(identifier) if c['service'] == service]
     active = any(c['state'] not in ('created', 'exited', 'dead', 'stopped') for c in containers)
-    changed = {key: value for key, value in values.items() if current.get(key) != value}
+    changed = {key: value for key, value in values.items() if current.get(key, 0 if key == 'disk' else None) != value}
+    if 'disk' in changed:
+        check_protection(detail(identifier, node), "can't update DCT container disk")
     if not changed:
         pending.pop(service, None)
         save_pending(directory, pending)
@@ -1251,10 +1268,19 @@ def create(data, node, identifier=None):
     print(f"Created {data['name']} at {info['address']}")
 
 
-def configuration_digest(directory, deployment):
+def configuration_digest(directory, deployment, protection=False, tags='', lifecycle=None):
     # Runtime files include assigned IPs and Docker state, not source configuration.
     state = {'deployment': deployment, 'settings': load_settings(directory),
              'storage': json.loads((directory / 'storage.json').read_text()) if (directory / 'storage.json').exists() else None}
+    if lifecycle:
+        state['lifecycle'] = lifecycle
+    if protection:
+        state['protection'] = True
+    if tags:
+        state['tags'] = tags
+    notes_path = directory / 'notes.txt'
+    if notes_path.exists() and notes_path.read_text():
+        state['description'] = notes_path.read_text()
     pending = load_pending(directory)
     if pending:
         state['pending'] = pending
@@ -1277,7 +1303,204 @@ def detail(identifier, node):
         raise ValueError('Project belongs to another node')
     directory = ROOT / identifier
     deployment = json.loads((directory / 'request.json').read_text())
-    return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment))
+    return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup') if info.get(key)}))
+
+
+def parse_startup(value):
+    if not isinstance(value, str):
+        raise ValueError('Invalid startup order')
+    result = {}
+    for entry in value.split(','):
+        if not entry.strip():
+            continue
+        match = re.fullmatch(r'(?:(order|up|down)=)?([0-9]+)', entry)
+        if not match:
+            raise ValueError('Invalid startup order')
+        result[match[1] or 'order'] = int(match[2])
+    return result
+
+
+def access_state(identifier, node):
+    info = detail(identifier, node)
+    return {'status': info['status'], 'protection': int(bool(info.get('protection'))),
+            'operation': operation_state(identifier),
+            'active_containers': int(any(item['state'] in ('running', 'restarting', 'paused')
+                                         for item in container_records(identifier)))}
+
+
+def lifecycle_config(identifier, node):
+    info = detail(identifier, node)
+    return {'onboot': int(bool(info.get('onboot'))), 'startup': info.get('startup', '')}
+
+
+def restore_restart_policy(identifier, service=None):
+    marker = ROOT.parent / 'restart-paused' / (identifier + '.json')
+    if not marker.exists():
+        return
+    config = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
+    for item in container_records(identifier):
+        if item['state'] == 'running' and (service is None or item['service'] == service):
+            policy = config['services'][item['service']].get('restart', 'no')
+            run(['docker', 'update', '--restart=' + policy, item['id']], capture_output=True)
+
+
+def daemon_prepare(node):
+    # Record before changing Docker policies, so an interrupted stop can be retried.
+    path = ROOT.parent / 'lifecycle.json'
+    with locked():
+        rows = []
+        for info in summaries():
+            if info['node'] != node:
+                continue
+            records = container_records(info['id'])
+            if records:
+                write_json(ROOT.parent / 'restart-paused' / (info['id'] + '.json'), {'paused': True})
+            for item in records:
+                host = json.loads(capture(['docker', 'inspect', item['id']]))[0]['HostConfig']
+                rows.append({'project': info['id'], 'id': item['id'], 'state': item['state'],
+                             'policy': host['RestartPolicy']})
+        previous = json.loads(path.read_text()) if path.exists() else {}
+        saved = {row['id']: row for row in previous.get('containers', [])}
+        for row in rows:
+            if row['policy']['Name'] == 'no' and row['id'] in saved:
+                row['policy'] = saved[row['id']]['policy']
+        write_json(path, {'boot_id': (PROC / 'sys/kernel/random/boot_id').read_text().strip(), 'containers': rows})
+        os.chmod(path, 0o600)
+        if rows:
+            run(['docker', 'update', '--restart=no', *[row['id'] for row in rows]], capture_output=True)
+
+
+def daemon_resume(node):
+    path = ROOT.parent / 'lifecycle.json'
+    if not path.exists():
+        return
+    with locked():
+        state = json.loads(path.read_text())
+        if state['boot_id'] != (PROC / 'sys/kernel/random/boot_id').read_text().strip():
+            # PVE's startall owns boot ordering. Policies are restored by project Start.
+            path.unlink()
+            return
+        owned = {item['id'] for info in summaries() if info['node'] == node
+                 for item in container_records(info['id'])}
+        for row in state['containers']:
+            if row['id'] not in owned:
+                continue
+            if row['state'] in ('running', 'restarting', 'paused'):
+                run(['docker', 'start', row['id']], capture_output=True)
+            policy = row['policy']['Name'] or 'no'
+            if policy == 'on-failure' and row['policy'].get('MaximumRetryCount'):
+                policy += ':' + str(row['policy']['MaximumRetryCount'])
+            run(['docker', 'update', '--restart=' + policy, row['id']], capture_output=True)
+        for project in {row['project'] for row in state['containers']}:
+            (ROOT.parent / 'restart-paused' / (project + '.json')).unlink(missing_ok=True)
+        path.unlink()
+
+
+def daemon_unmanage(node):
+    with locked():
+        for info in summaries():
+            if info['node'] != node:
+                continue
+            config = json.loads((ROOT / info['id'] / 'compose.runtime.json').read_text())
+            for item in container_records(info['id']):
+                policy = config['services'][item['service']].get('restart', 'no')
+                run(['docker', 'update', '--restart=' + policy, item['id']], capture_output=True)
+            (ROOT.parent / 'restart-paused' / (info['id'] + '.json')).unlink(missing_ok=True)
+        (ROOT.parent / 'lifecycle.json').unlink(missing_ok=True)
+
+
+def lifecycle_stop(identifier, node, timeout=180, force=1):
+    with operation(identifier, 'shutdown'):
+        try:
+            action(identifier, node, 'shutdown', timeout)
+        except ValueError as error:
+            if not int(force) or not str(error).startswith('Shutdown timed out.'):
+                raise
+            action(identifier, node, 'force-stop')
+
+
+def project_config(identifier, node, changes, digest=None):
+    if not isinstance(changes, dict) or set(changes) - {'description', 'tags', 'protection', 'onboot', 'startup'}:
+        raise ValueError('Invalid project configuration')
+    if 'description' in changes and (not isinstance(changes['description'], str) or len(changes['description']) > 8192):
+        raise ValueError('Notes cannot exceed 8192 characters')
+    if 'tags' in changes:
+        if not isinstance(changes['tags'], str):
+            raise ValueError('Invalid tags')
+        entries = sorted(set(tag.strip().lower() for tag in re.split(r'[;,]', changes['tags']) if tag.strip()))
+        if len(entries) > 32 or any(not re.fullmatch(r'[a-z0-9_][a-z0-9_.+-]{0,63}', tag) for tag in entries):
+            raise ValueError('Invalid tags')
+        changes = dict(changes, tags=';'.join(entries))
+    if 'onboot' in changes:
+        if changes['onboot'] not in (0, 1):
+            raise ValueError('Start at boot must be 0 or 1')
+        changes = dict(changes, onboot=int(changes['onboot']))
+    if 'startup' in changes:
+        parsed = parse_startup(changes['startup'])
+        changes = dict(changes, startup=','.join(f'{key}={parsed[key]}' for key in ('order', 'up', 'down') if key in parsed))
+    if 'protection' in changes:
+        if changes['protection'] not in (0, 1):
+            raise ValueError('Protection must be 0 or 1')
+        changes = dict(changes, protection=int(changes['protection']))
+    with locked():
+        info = detail(identifier, node)
+        assert_configuration_digest(identifier, node, digest)
+        authorize_config_keys(changes)
+        info.pop('deployment', None)
+        path = ROOT / identifier / 'notes.txt'
+        previous = path.read_text() if path.exists() else None
+        try:
+            if 'description' in changes:
+                fd, temporary = tempfile.mkstemp(prefix='.notes-', dir=path.parent)
+                try:
+                    with os.fdopen(fd, 'w') as handle:
+                        handle.write(changes['description'])
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+            info.update({key: value for key, value in changes.items() if key != 'description'})
+            if set(changes) - {'description'}:
+                write_json(METADATA / (identifier + '.json'), info)
+        except Exception:
+            if 'description' in changes:
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(previous)
+                    os.chmod(path, 0o600)
+            raise
+
+
+def check_protection(info, message="can't remove DCT"):
+    if info.get('protection'):
+        raise ValueError(message + ' - protection mode enabled')
+
+
+def project_protection(identifier, node, value=None, digest=None):
+    with locked():
+        info = detail(identifier, node)
+        if value is not None:
+            if str(value) not in ('0', '1'):
+                raise ValueError('Protection must be 0 or 1')
+            assert_configuration_digest(identifier, node, digest)
+            info.pop('deployment', None)
+            info['protection'] = int(value)
+            write_json(METADATA / (identifier + '.json'), info)
+            info = detail(identifier, node)
+        return {'protection': int(bool(info.get('protection'))), 'digest': info['digest']}
+
+
+def check_protected_layout(info, before, after):
+    if not info.get('protection'):
+        return
+    def layout(config):
+        return {name: {'image': service.get('image'), 'build': service.get('build'),
+                       'replicas': service.get('deploy', {}).get('replicas', 1),
+                       'volumes': service.get('volumes', []), 'storage_opt': service.get('storage_opt', {})}
+                for name, service in config['services'].items()}
+    if layout(before) != layout(after) or before.get('volumes', {}) != after.get('volumes', {}):
+        check_protection(info, "can't update DCT services or disks")
 
 
 def refresh(node):
@@ -1351,6 +1574,8 @@ def action(identifier, node, operation, timeout=60):
         commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['restart'], 'delete': ['down']}
         if operation not in commands and operation not in ('shutdown', 'reboot', 'force-stop'):
             raise ValueError('Unsupported operation')
+        if operation == 'delete':
+            check_protection(info)
         if operation == 'delete' and any(item['state'] in ('running', 'restarting', 'paused')
                                           for item in container_records(identifier)):
             raise ValueError('DCT is running. Stop it before removal.')
@@ -1385,6 +1610,8 @@ def action(identifier, node, operation, timeout=60):
                 run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
             else:
                 run(compose_base(directory, identifier) + commands[operation], timeout=1800)
+        if operation in ('start', 'restart', 'reboot'):
+            restore_restart_policy(identifier)
         if operation == 'delete':
             # Reserve the metadata until the owned alias is successfully released.
             remove_network(info)
@@ -1423,6 +1650,8 @@ def update(identifier, node, data, digest=None):
         with tempfile.TemporaryDirectory(prefix='betterdocker-update-', dir=ROOT) as folder:
             staging = Path(folder)
             config = prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory)
+            check_protected_layout(existing, json.loads((directory / 'compose.runtime.json').read_text()),
+                                   json.loads((staging / 'compose.runtime.json').read_text()))
             for filename in ('compose.source.yaml', '.env', 'compose.runtime.json'):
                 os.replace(staging / filename, directory / filename)
         (directory / 'snapshot-restored.json').unlink(missing_ok=True)
@@ -1552,7 +1781,7 @@ def project_tags(identifier, node, tags=None):
         info = detail(identifier, node)
         info.pop('deployment', None)
         if tags is not None:
-            entries = sorted(set(tag.strip().lower() for tag in tags.split(';') if tag.strip()))
+            entries = sorted(set(tag.strip().lower() for tag in re.split(r'[;,]', tags) if tag.strip()))
             if len(entries) > 32 or any(not re.fullmatch(r'[a-z0-9_][a-z0-9_.+-]{0,63}', tag) for tag in entries):
                 raise ValueError('Invalid tags')
             info['tags'] = ';'.join(entries)
@@ -1592,6 +1821,8 @@ def service_action(identifier, node, service, verb, timeout=60):
                     run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
                 else:
                     run(compose_base(directory, identifier) + command + [service], timeout=1800)
+        if verb in ('start', 'restart', 'reboot'):
+            restore_restart_policy(identifier, service)
         refresh(node)
 
 
@@ -1623,6 +1854,7 @@ def reset_settings(identifier, node, service, digest=None):
             with tempfile.TemporaryDirectory(prefix='betterdocker-reset-', dir=ROOT) as folder:
                 staging = Path(folder)
                 prepare(dict(info['deployment'], address=info.get('address') or '0.0.0.0'), identifier, staging, directory)
+                check_protected_layout(info, json.loads(original), json.loads((staging / 'compose.runtime.json').read_text()))
                 os.replace(staging / 'compose.runtime.json', directory / 'compose.runtime.json')
             run(compose_base(directory, identifier) + ['up', '--no-start', '--no-deps', service], timeout=1800)
             marker = directory / 'snapshot-restored.json'
@@ -1770,7 +2002,8 @@ def snapshot_config(identifier, node, name):
     # Native snapshot details are an inventory, not a way to read deployment secrets.
     result = {'description': state.get('descriptions', {}).get(name, manifest['description']),
               'snaptime': manifest['created'], 'hostname': metadata.get('name', ''),
-              'net0': 'bridge=' + metadata.get('bridge', '') + ',ip=' + metadata.get('address', '')}
+              'net0': 'bridge=' + metadata.get('bridge', '') + ',ip=' + metadata.get('address', ''),
+              'protection': int(bool(metadata.get('protection')))}
     for service, settings in sorted(config['services'].items()):
         for key in ('image', 'cpus', 'cpu_shares', 'mem_limit', 'memswap_limit', 'pids_limit', 'restart'):
             if key in settings:
@@ -2213,7 +2446,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['validate', 'create', 'detail', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -2254,6 +2487,22 @@ def main():
             os.execvp(command[0], command)
     elif args.operation == 'detail':
         print(json.dumps(detail(*values)))
+    elif args.operation == 'lifecycle':
+        print(json.dumps(lifecycle_config(*values)))
+    elif args.operation == 'daemon-unmanage':
+        daemon_unmanage(values[0] if values else current_node())
+    elif args.operation == 'daemon-prepare':
+        daemon_prepare(values[0] if values else current_node())
+    elif args.operation == 'daemon-resume':
+        daemon_resume(values[0] if values else current_node())
+    elif args.operation == 'lifecycle-stop':
+        lifecycle_stop(*values)
+    elif args.operation == 'config':
+        project_config(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3] if len(values) > 3 else None)
+    elif args.operation == 'access-state':
+        print(json.dumps(access_state(*values)))
+    elif args.operation == 'protection':
+        print(json.dumps(project_protection(*values)))
     elif args.operation == 'check-digest':
         assert_configuration_digest(*values)
     elif args.operation == 'action':

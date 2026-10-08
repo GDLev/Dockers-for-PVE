@@ -5,6 +5,9 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "Start at boot": "Uruchom przy starcie",
+            "Start/Shutdown order": "Kolejność uruchamiania/zamykania",
+
             "Volumes, bind mounts and deployment files are retained.": "Wolumeny, bind mounty i pliki wdrożenia są zachowywane.",
             "Open in separate window": "Otwórz w osobnym oknie",
             "Could not read file": "Nie można odczytać pliku",
@@ -71,6 +74,7 @@
             "PID limit": "Limit PID",
             "DNS servers": "Serwery DNS",
             "Search domains": "Domeny wyszukiwania",
+            "Protection": "Ochrona",
             "Restart policy": "Polityka restartu",
             "Image": "Obraz",
             "Container root filesystems": "Systemy plików kontenerów",

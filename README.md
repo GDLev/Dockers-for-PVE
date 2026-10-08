@@ -73,13 +73,15 @@ Without a managed data disk, application data stays in the bind-mount directorie
 
 ## Limitations
 
-- **Host access:** DCTs use Docker and the host kernel. Deployment configuration and consoles require host administration privileges.
-- **PVE features:** native VM/CT backup, HA, migration, replication and per-DCT firewall are unavailable. Back up application data separately.
+- **Permissions:** CPU, memory, DNS and options can be delegated with `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network` and `VM.Config.Options` on `/vms/<vmid>`. Viewing a DCT requires `VM.Audit`; power operations use `VM.PowerMgmt`.
+- **Host access:** DCTs use Docker and the host kernel. Compose, images, disks, deployment removal, logs and consoles require root or node `Sys.Console`. Per-DCT configuration permissions do not grant those operations.
+- **PVE features:** native resource pools, guest hook scripts, VM/CT backup, HA, migration, replication and per-DCT firewall are unavailable. Back up application data separately.
 - **Networking:** IPv4 uses an existing Linux bridge and host routing. DHCP needs a reachable server and a network that allows an additional MAC address.
 - **Compose:** use existing images and explicit published ports. `build`, profiles and `network_mode` are unsupported. Only YAML and `.env` can be imported; other referenced files must already exist on the host.
 - **Resource limits:** CPU and memory limits apply per service instance. Supported resource limits and restart policies can be changed while running. Settings that cannot be changed while running remain pending until Start or Reboot. Revert discards pending changes. Deployment edits, data disk changes and Restore Compose require stopping the affected service or DCT. Writable-layer disk limits require `overlay2` on XFS with project quotas.
 - **Data disk:** creating or enlarging it requires stopped services and private project directories or local volumes. The interface supports enlargement only. It does not reserve physical host space. A mount failure can prevent Docker from starting on the node.
 - **Snapshots:** full copies consume additional space and freeze services while capturing data. RAM, Docker logs, external writable paths and shared volumes are unsupported. Restoration leaves the DCT stopped. A later DHCP address change may require restoring again.
+- **Startup:** Options controls Start at boot and start/shutdown order. Node Start All/Stop All includes DCTs. Order applies to stopped guests; already running services are skipped. Controlled Docker restarts preserve which instances were running. After an abrupt power loss or daemon crash, Docker restart policies can run before PVE ordering.
 - **PVE updates:** changes to Proxmox can require an extension update or integration repair.
 
 ## Support the project

@@ -16,7 +16,7 @@ const nodeConfigClass = { prototype: { initComponent() { this.nativeInitialized 
 const context = { window: null, console,
     PVE: { node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
-    Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
+    Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { format_boolean: value => value ? 'Yes' : 'No', override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
         override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
 };
@@ -84,7 +84,7 @@ context.TextEncoder = TextEncoder;
 context.location = { protocol: 'https:', host: 'pve.example:8006' };
 context.setInterval = () => 1;
 context.clearInterval = () => {};
-context.Proxmox.Utils = { API2Request: options => { consoleRequest = options; } };
+context.Proxmox.Utils = { format_boolean: value => value ? 'Yes' : 'No', API2Request: options => { consoleRequest = options; } };
 context.Terminal = class {
     constructor() { this.cols = 80; this.rows = 24; }
     loadAddon() {} open() {} focus() {} write() {}
@@ -254,6 +254,7 @@ context.Ext.create = (name, options) => {
         callParent,
         on(event, callback) { assert.equal(event, 'hide'); this.onHide = callback; },
         showAt(xy) { shownAt = xy; },
+        down(id) { const item = this.items.find(entry => '#' + entry.itemId === id); return { setDisabled: value => { item.disabled = value; } }; },
         destroy() {
             this.destroyed = true;
             this.items.forEach(item => { item.handler = null; });
@@ -273,6 +274,7 @@ for (const label of ['Start', 'Shutdown', 'Reboot', 'Stop', 'Console', 'Edit dep
     const record = { data: Object.assign({}, clickedRecord.data, { status: ['Start', 'Remove'].includes(label) ? 'stopped' : 'running' }) };
     const menu = context.PVE.Utils.createCmdMenu(treeView, record, null, 0, { stopEvent() {}, getXY() { return [100, 200]; } });
     const item = menu.items.find(entry => entry.text === label);
+    if (label === 'Remove') { consoleRequest.success({ result: { data: { protection: 0, status: 'stopped', capabilities: { power: 1, configure: 1, console: 1 } } } }); }
     assert.equal(item.disabled, false);
     menu.onHide();
     assert(!menu.destroyed, `${label}: hide must leave the item alive until its click handler runs`);
@@ -784,10 +786,10 @@ context.Ext.create = (name, options) => {
     capturedEditors.push(editor); return editor;
 };
 definitions['PVE.betterdocker.Config'].initComponent.call(digestPanel);
-function loadDigest(digest) {
+function loadDigest(digest, capabilities = { configure: 1, power: 1 }) {
     digestPanel.reloadDocker();
     digestRequests.at(-1).success({ result: { data: Object.assign({}, summaryData, {
-        digest, operation: {}, capabilities: { configure: 1, power: 1 }, storage: { rootfs: {}, limit_mib: 0 },
+        digest, operation: {}, capabilities, storage: { rootfs: {}, limit_mib: 0 },
         services: [{ name: 'app', image: 'busybox', ports: [], mounts: [], overridden: true,
             settings: { cpus: 1, memory: 32, swap: 0, cpuunits: 0, pids: 0, dns: [], dns_search: [], restart: 'no' } }],
     }) } });
@@ -821,3 +823,72 @@ for (const [group, id] of [['resources', 'resourceGrid'], ['dns', 'dnsGrid'], ['
     assert.equal(card.tbar.find(button => button.itemId === id + 'Revert').xtype, 'pvePendingRevertButton');
 }
 console.log('Native pending model, DiffStore updates and Revert controls on all settings pages passed');
+
+let protectionRequest;
+context.Proxmox.Utils.API2Request = options => { protectionRequest = options; };
+const protectionMenu = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), type: 'docker', name: 'app', node: 'pve', status: 'stopped', protection: true } }, callParent() {},
+    down() { return { setDisabled: value => { this.items.find(item => item.itemId === 'removeButton').disabled = value; } }; } };
+definitions['PVE.betterdocker.CmdMenu'].initComponent.call(protectionMenu);
+assert.equal(protectionMenu.items.find(item => item.text === 'Remove').disabled, true, 'Remove waits for current configuration');
+protectionRequest.success({ result: { data: { protection: 0, status: 'stopped', capabilities: { power: 1, configure: 1, console: 1 } } } });
+assert.equal(protectionMenu.items.find(item => item.text === 'Remove').disabled, false, 'stale tree protection must not override the current configuration');
+protectionRequest.success({ result: { data: { protection: 1, status: 'stopped', capabilities: { power: 1, configure: 1, console: 1 } } } });
+assert.equal(protectionMenu.items.find(item => item.text === 'Remove').disabled, true);
+console.log('Protection in the context menu follows current backend configuration, including stale tree clones');
+
+const delegatedMenu = { pveSelNode: clickedRecord, workspace: menuWorkspace, callParent() {},
+    down(id) { const item = this.items.find(entry => '#' + entry.itemId === id); return { setDisabled: value => { item.disabled = value; } }; } };
+context.Proxmox.UserName = 'delegate@pve';
+definitions['PVE.betterdocker.CmdMenu'].initComponent.call(delegatedMenu);
+protectionRequest.success({ result: { data: { status: 'running', protection: 0, operation: {},
+    capabilities: { power: 1, configure: 0, console: 0 } } } });
+assert.equal(delegatedMenu.items.find(item => item.itemId === 'shutdown').disabled, false);
+assert.equal(delegatedMenu.items.find(item => item.itemId === 'console').disabled, true);
+assert.equal(delegatedMenu.items.find(item => item.itemId === 'deployment').disabled, true);
+assert.equal(delegatedMenu.items.find(item => item.itemId === 'removeButton').disabled, true);
+context.Proxmox.UserName = 'root@pam';
+console.log('Context menu uses per-project power grants without exposing host actions');
+
+context.Proxmox.Utils.API2Request = options => digestRequests.push(options);
+context.Proxmox.UserName = 'delegate@pve';
+loadDigest(editorDigest, { configure: 0, cpu: 1, memory: 0, network: 0, options: 0, power: 1 });
+const resourceRows = digestPanel.items.find(item => item.itemId === 'resources').items[0];
+const beforeDeniedEdit = capturedEditors.length;
+resourceRows.listeners.itemdblclick(null, { get: () => 'Memory' });
+assert.equal(capturedEditors.length, beforeDeniedEdit, 'CPU privilege must not open a memory editor');
+resourceRows.listeners.itemdblclick(null, { get: () => 'CPU limit' });
+assert.equal(capturedEditors.at(-1).items[0].items.map(item => item.name).join(','), 'cpus,cpuunits');
+const notesView = { canEdit: false, callParent() { throw new Error('read-only Notes editor opened'); } };
+assert.doesNotThrow(() => definitions['PVE.betterdocker.Notes'].run_editor.call(notesView));
+context.Proxmox.UserName = 'root@pam';
+console.log('Delegated CPU editor excludes memory and disk; read-only Notes cannot open its editor');
+
+const startupEditors = [];
+context.Ext.create = (name, options) => { startupEditors.push({ name, options }); return { show() {} }; };
+loadDigest(editorDigest, { configure: 0, options: 0, cpu: 1 });
+const lifecycleRows = digestPanel.items.find(item => item.itemId === 'options').items[0];
+lifecycleRows.listeners.itemdblclick(null, { get: () => 'Start/Shutdown order' });
+assert.equal(startupEditors.length, 0);
+loadDigest(editorDigest, { configure: 0, options: 1 });
+lifecycleRows.listeners.itemdblclick(null, { get: () => 'Start/Shutdown order' });
+assert.equal(startupEditors[0].name, 'PVE.window.StartupEdit');
+assert(startupEditors[0].options.url.endsWith('/config'));
+lifecycleRows.listeners.itemdblclick(null, { get: () => 'Start at boot' });
+assert.equal(startupEditors[1].options.items[0].name, 'onboot');
+console.log('Native startup editor and Start at boot require Options privileges');
+
+for (const action of ['startall', 'stopall', 'migrateall', 'suspendall']) {
+    let rendered, loaded, removed;
+    const window = { action, nodename: 'pve', down() { return null; } };
+    const selector = { columnsDeclaration: [{ dataIndex: 'type', renderer: value => 'native-' + value }],
+        callParent() {}, on(event, callback) { rendered = callback; }, up() { return window; },
+        getStore() { return {}; }, mon(store, event, callback) { loaded = callback; } };
+    definitions['PVE.betterdocker.VMSelectorIntegration'].initComponent.call(selector);
+    rendered();
+    const docker = { get() { return 'docker'; } }, lxc = { get() { return 'lxc'; } };
+    loaded({ remove(records) { removed = records; } }, [docker, lxc]);
+    assert.equal(selector.columnsDeclaration[0].renderer('docker'), 'DCT');
+    assert.equal(selector.columnsDeclaration[0].renderer('lxc'), 'native-lxc');
+    assert.equal(removed?.length || 0, ['startall', 'stopall'].includes(action) ? 0 : 1);
+}
+console.log('Native bulk power selector includes DCT and excludes it from unsupported operations');

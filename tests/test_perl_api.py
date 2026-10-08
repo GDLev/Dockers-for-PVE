@@ -25,6 +25,8 @@ sub get_user { $user }
 sub check { $main::grants{$_[2] . ':' . $_[3]->[0]} // 0 }
 1;
 ''')
+            (base / 'PVE/GuestHelpers.pm').write_text('package PVE::GuestHelpers; sub assert_tag_permissions { 1 } 1;')
+            (base / 'PVE/JSONSchema.pm').write_text('package PVE::JSONSchema; 1;')
             (base / 'PVE/AccessControl.pm').write_text('package PVE::AccessControl; 1;')
             (base / 'PVE/Cluster.pm').write_text('package PVE::Cluster; sub check_vmid_unused { 1 } sub cfs_lock_file { $_[2]->(); } 1;')
             (base / 'PVE/Tools.pm').write_text('package PVE::Tools; sub run_command { my ($cmd, %opts) = @_; $opts{outfunc}->($ARGV[0]); } sub assert_if_modified { die "detected modified configuration" if defined($_[0]) && $_[0] ne $_[1]; } 1;')
@@ -32,7 +34,7 @@ sub check { $main::grants{$_[2] . ':' . $_[3]->[0]} // 0 }
             (base / 'JSON.pm').write_text('''
 package JSON;
 use Exporter 'import';
-our @EXPORT_OK = qw(decode_json);
+our @EXPORT_OK = qw(decode_json encode_json);
 use JSON::PP ();
 sub decode_json { JSON::PP::decode_json($_[0]); }
 1;
@@ -150,6 +152,25 @@ die 'native rollback grant rejected' unless $snapshot->{code}->(\%param) eq 'all
 $main::grants{'/vms/101:VM.Snapshot'} = 1;
 $param{action} = 'create';
 die 'native snapshot grant rejected' unless $snapshot->{code}->(\%param) eq 'allowed';
+# Grant only CPU configuration. It must not imply host access or other fields.
+$main::grants{'/vms/101:VM.Config.CPU'} = 1;
+my $caps = PVE::API2::BetterDocker::capabilities('a' x 32, 'pve');
+die 'CPU configuration missing' unless $caps->{cpu} && $caps->{settings};
+die 'CPU grant implies host or memory' if $caps->{configure} || $caps->{console} || $caps->{memory} || $caps->{network} || $caps->{options};
+PVE::API2::BetterDocker::register_docker_method({ name => 'settings', code => sub {
+ die 'wrong worker field grant' unless $ENV{BETTERDOCKER_CONFIG_KEYS} eq 'cpus,cpuunits'; return 'allowed';
+} });
+local $ENV{BETTERDOCKER_CONFIG_KEYS} = '*';
+die 'CPU settings rejected' unless $main::registered[-1]->{code}->(\%param) eq 'allowed';
+for my $name ('update', 'destroy', 'termproxy', 'logs', 'storage_limit', 'reset_settings', 'preview') {
+ my ($route) = grep { $_->{name} eq $name } @main::registered;
+ eval { $route->{code}->(\%param); };
+ die "CPU grants host route: $name" unless $@ =~ /Permission denied/;
+}
+*PVE::API2::BetterDocker::output = sub { '{"deployment":{"environment":"secret"},"digest":"fingerprint","services":[],"containers":[]}' };
+my $delegated = $management->{code}->(\%param);
+die 'delegate reads deployment' if exists($delegated->{deployment});
+die 'delegate lacks edit digest' unless $delegated->{digest} eq 'fingerprint';
 $param{action} = 'delete';
 $main::grants{'/nodes/pve:Sys.Console'} = 1;
 die 'host administrator rejected' unless $power->{code}->(\%param) eq 'allowed';

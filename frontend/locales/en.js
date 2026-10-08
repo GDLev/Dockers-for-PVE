@@ -4,6 +4,9 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Start at boot": "Start at boot",
+            "Start/Shutdown order": "Start/Shutdown order",
+
             "Volumes, bind mounts and deployment files are retained.": "Volumes, bind mounts and deployment files are retained.",
             "Open in separate window": "Open in separate window",
             "Could not read file": "Could not read file",
@@ -70,6 +73,7 @@
             "PID limit": "PID limit",
             "DNS servers": "DNS servers",
             "Search domains": "Search domains",
+            "Protection": "Protection",
             "Restart policy": "Restart policy",
             "Image": "Image",
             "Container root filesystems": "Container root filesystems",

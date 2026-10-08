@@ -20,6 +20,12 @@ case "$ACTION" in
     uninstall)
         command -v python3 >/dev/null || { echo 'Python 3 is required for uninstall.' >&2; exit 1; }
         systemctl disable --now betterdocker-integration.timer 2>/dev/null || true
+        if [[ -f /etc/systemd/system/betterdocker-lifecycle.service ]]; then
+            systemctl disable --now betterdocker-lifecycle.service
+            /usr/local/lib/betterdocker/provision.py daemon-unmanage
+            rm -f /etc/systemd/system/betterdocker-lifecycle.service /etc/systemd/system/pve-guests.service.d/betterdocker.conf
+            systemctl daemon-reload
+        fi
         python3 "$PROJECT_DIR/scripts/patch.py" remove
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
         systemctl restart pvedaemon pveproxy
@@ -64,6 +70,8 @@ TARGETS=(
     /etc/systemd/system/betterdocker-integration.timer
     /usr/share/pve-manager/js/betterdocker-locales/en.js
     /usr/share/pve-manager/js/betterdocker-locales/pl.js
+    /etc/systemd/system/betterdocker-lifecycle.service
+    /etc/systemd/system/pve-guests.service.d/betterdocker.conf
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -86,6 +94,7 @@ rollback() {
     if [[ ! -e "$BACKUP_DIR/addon-8" ]]; then systemctl disable --now betterdocker-refresh.timer || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-13" ]]; then systemctl disable --now betterdocker-integration.timer || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-6" ]]; then systemctl disable --now betterdocker-addresses.service || true; fi
+    if [[ ! -e "$BACKUP_DIR/addon-16" ]]; then systemctl disable --now betterdocker-lifecycle.service || true; fi
     systemctl daemon-reload || true
     systemctl restart pvedaemon pveproxy || true
 }
@@ -108,9 +117,12 @@ install -m 0644 "$PROJECT_DIR/systemd/betterdocker-integration.service" "${TARGE
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-integration.timer" "${TARGETS[13]}"
 install -m 0644 "$PROJECT_DIR/frontend/locales/en.js" "${TARGETS[14]}"
 install -m 0644 "$PROJECT_DIR/frontend/locales/pl.js" "${TARGETS[15]}"
+install -d -m 0755 /etc/systemd/system/pve-guests.service.d
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-lifecycle.service" "${TARGETS[16]}"
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-pve-guests.conf" "${TARGETS[17]}"
 bash /usr/local/lib/betterdocker/docker-install.sh
 systemctl daemon-reload
-systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer
+systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer betterdocker-lifecycle.service
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'

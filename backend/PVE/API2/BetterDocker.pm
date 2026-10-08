@@ -4,11 +4,14 @@ use strict;
 use warnings;
 use base qw(PVE::RESTHandler);
 use File::Temp qw(tempfile);
-use JSON qw(decode_json);
+use JSON qw(decode_json encode_json);
 use PVE::RPCEnvironment;
 use PVE::Tools;
 use PVE::Cluster;
 use PVE::AccessControl;
+use PVE::GuestHelpers;
+use PVE::JSONSchema;
+use POSIX qw(LONG_MAX);
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 
 my $helper = '/usr/local/lib/betterdocker/provision.py';
@@ -109,10 +112,17 @@ sub capabilities {
     my $vmid = defined($identifier) ? task_id($identifier, $node) : undef;
     my $host = $root_user || $rpc->check($user, "/nodes/$node", ['Sys.Console'], 1);
     my $audit = $host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Audit'], 1));
+    my $granted = sub { my ($priv) = @_; return $host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", [$priv], 1)) ? 1 : 0; };
+    my $cpu = $granted->('VM.Config.CPU');
+    my $memory = $granted->('VM.Config.Memory');
+    my $network = $granted->('VM.Config.Network');
+    my $options = $granted->('VM.Config.Options');
     return { audit => $audit ? 1 : 0, configure => $host ? 1 : 0, console => $host ? 1 : 0,
-        snapshot => ($host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Snapshot'], 1))) ? 1 : 0,
-        rollback => ($host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Snapshot'], 1)) || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.Snapshot.Rollback'], 1))) ? 1 : 0,
-        power => ($host || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['VM.PowerMgmt'], 1))) ? 1 : 0,
+        cpu => $cpu, memory => $memory, network => $network, options => $options,
+        settings => ($cpu || $memory || $network || $options) ? 1 : 0,
+        snapshot => $granted->('VM.Snapshot'),
+        rollback => ($granted->('VM.Snapshot') || $granted->('VM.Snapshot.Rollback')) ? 1 : 0,
+        power => $granted->('VM.PowerMgmt'),
         permissions => ($root_user || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['Permissions.Modify'], 1))) ? 1 : 0 };
 }
 
@@ -125,7 +135,9 @@ sub register_docker_method {
         my ($param) = @_;
         my $caps = capabilities($param->{id}, $param->{node});
         my $scope = $name eq 'list' && $param->{diagnostics} ? 'configure' :
-                    $name =~ /^(list|management|rrddata|notes|capabilities|snapshots|snapshot_config)$/ ? 'audit' :
+                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config)$/ ? 'audit' :
+                    ($name eq 'settings' || $name eq 'revert_settings') ? 'settings' :
+                    $name eq 'set_notes' ? 'options' :
                     ($name eq 'snapshot' && $param->{action} eq 'restore') ? 'rollback' :
                     ($name eq 'snapshot' || $name eq 'snapshot_edit') ? 'snapshot' :
                     ($name eq 'action' && $param->{action} ne 'delete') || $name eq 'service_action' ? 'power' : 'configure';
@@ -134,11 +146,68 @@ sub register_docker_method {
         my $rpc = PVE::RPCEnvironment::get();
         my $user = $rpc->get_user();
         local $ENV{BETTERDOCKER_TASK_USER} = $user;
+        # Passed only by this wrapper; the worker checks changed fields under its lock.
+        my @keys;
+        push @keys, qw(cpus cpuunits) if $caps->{cpu};
+        push @keys, qw(memory swap) if $caps->{memory};
+        push @keys, qw(dns dns_search) if $caps->{network};
+        push @keys, qw(pids restart protection description tags onboot startup) if $caps->{options};
+        local $ENV{BETTERDOCKER_CONFIG_KEYS} = $caps->{configure} ? '*' : join(',', @keys);
         local $ENV{BETTERDOCKER_TASK_SYS_MODIFY} = ($user eq 'root@pam' ||
             $rpc->check($user, "/nodes/$param->{node}", ['Sys.Modify'], 1)) ? '1' : '0';
         return $code->($param);
     };
     __PACKAGE__->register_method($method);
+}
+
+# Extend only the native power list, not get_vmlist consumers such as vzdump/HA.
+sub append_lifecycle_list {
+    my ($list, $node, $autostart, $filter) = @_;
+    my %wanted = map { $_ => 1 } PVE::Tools::split_list($filter // '');
+    for my $item (@{summaries()}) {
+        next if $item->{node} ne $node || !$item->{vmid};
+        next if defined($filter) && !$wanted{$item->{vmid}};
+        next if $autostart && !$item->{onboot};
+        my $startup = $item->{startup} ? PVE::JSONSchema::pve_parse_startup_order($item->{startup}) : {};
+        die "Invalid DCT startup configuration\n" unless $startup;
+        my $vmid = worker_id($item->{vmid});
+        my $order = $startup->{order} // LONG_MAX;
+        die "Guest ID collision for DCT $vmid\n" if grep { exists($_->{$vmid}) } values %$list;
+        $list->{$order}->{$vmid} = { %$startup, type => 'docker', node => $node };
+    }
+    return $list;
+}
+
+sub lifecycle_identifier {
+    my ($vmid, $node) = @_;
+    for my $item (@{summaries()}) {
+        if ($item->{node} eq $node && ($item->{vmid} // 0) == $vmid && $item->{id} =~ /\A([0-9a-f]{32})\z/) {
+            return $1;
+        }
+    }
+    die "DCT not found on node\n";
+}
+
+sub node_start {
+    my ($vmid, $node) = @_;
+    my $id = lifecycle_identifier($vmid, $node);
+    my $state = decode_json(output(['access-state', $id, $node]));
+    return undef if $state->{status} eq 'running';
+    return __PACKAGE__->map_method_by_name('action')->{code}->({ id => $id, node => $node, action => 'start' });
+}
+
+sub node_stop {
+    my ($vmid, $node, $timeout, $force) = @_;
+    my $id = lifecycle_identifier($vmid, $node);
+    die "Permission denied\n" unless capabilities($id, $node)->{power};
+    my $state = decode_json(output(['access-state', $id, $node]));
+    return undef unless $state->{active_containers};
+    my $rpc = PVE::RPCEnvironment::get();
+    my $user = $rpc->get_user();
+    return $rpc->fork_worker('betterdockershutdown', worker_id($vmid), $user, sub {
+        local $ENV{BETTERDOCKER_TASK_USER} = $user;
+        output(['lifecycle-stop', $id, $node, $timeout, $force ? 1 : 0]);
+    });
 }
 
 # Called after Cluster.pm has registered its resource method. No new daemon is exposed.
@@ -179,7 +248,7 @@ sub hook_resources {
                 id => "docker/$item->{id}", vmid => $item->{vmid}, type => 'docker', name => $item->{name},
                 text => $item->{vmid} ? "$item->{vmid} ($item->{name})" : $item->{name},
                 node => $item->{node}, status => $status, uptime => ($status eq 'running' || $status eq 'partial') ? ($item->{metrics}->{uptime} // 0) : 0,
-                tags => $item->{tags} // '',
+                tags => $item->{tags} // '', protection => $item->{protection} // 0,
                 cpu => $item->{metrics}->{cpu} // 0, maxcpu => $item->{metrics}->{cpus} // 0,
                 mem => $item->{metrics}->{mem} // 0, maxmem => $item->{metrics}->{maxmem} // 0,
                 hastate => 'unmanaged',
@@ -278,6 +347,7 @@ register_docker_method({
         my $rpcenv = PVE::RPCEnvironment::get();
         $param->{action} =~ /\A(start|stop|restart|shutdown|reboot|force-stop|delete)\z/ or die "Invalid Docker action\n";
         my $action = $1;
+        die "can't remove DCT - protection mode enabled\n" if $action eq 'delete' && decode_json(output(['detail', $param->{id}, $param->{node}]))->{protection};
         die "Overrule is only available for Stop\n" if $param->{'overrule-shutdown'} && $action ne 'force-stop';
         (my $task_action = $action) =~ s/-//g;
         return $rpcenv->fork_worker('betterdocker' . $task_action, task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
@@ -294,6 +364,7 @@ register_docker_method({
     code => sub {
         my ($param) = @_;
         my $rpcenv = PVE::RPCEnvironment::get();
+        die "can't remove DCT - protection mode enabled\n" if decode_json(output(['detail', $param->{id}, $param->{node}]))->{protection};
         return $rpcenv->fork_worker('betterdockerdelete', task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
             PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, 'delete']);
         });
@@ -326,8 +397,27 @@ register_docker_method({
             $info->{capabilities}->{power} && ($ENV{BETTERDOCKER_TASK_SYS_MODIFY} eq '1' ||
             ($owner ne '' && $owner eq $actor))) ? 1 : 0;
         delete $info->{deployment} unless $info->{capabilities}->{configure};
-        delete $info->{digest} unless $info->{capabilities}->{configure};
+        delete $info->{digest} unless $info->{capabilities}->{settings};
         return $info; },
+});
+
+register_docker_method({
+    name => 'capabilities', path => '{id}/capabilities', method => 'GET', protected => 1, proxyto => 'node',
+    description => 'Read permissions and current operation state for this project.',
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+    returns => { type => 'object' },
+    code => sub {
+        my ($p) = @_;
+        my $state = decode_json(output(['access-state', $p->{id}, $p->{node}]));
+        $state->{capabilities} = capabilities($p->{id}, $p->{node});
+        my $op = $state->{operation} // {};
+        my $owner = $op->{user} // ''; my $actor = $ENV{BETTERDOCKER_TASK_USER};
+        $owner =~ s/!.*$//; $actor =~ s/!.*$//;
+        $state->{capabilities}->{overrule_shutdown} = ($op->{active} && $op->{action} eq 'shutdown' &&
+            !$op->{service} && $state->{capabilities}->{power} &&
+            ($ENV{BETTERDOCKER_TASK_SYS_MODIFY} eq '1' || ($owner ne '' && $owner eq $actor))) ? 1 : 0;
+        return $state;
+    },
 });
 
 register_docker_method({
@@ -458,8 +548,15 @@ register_docker_method({
     description => 'Read project notes.',
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
     returns => { type => 'object' },
-    code => sub { my ($p) = @_; return { %{decode_json(output(['notes', $p->{id}, $p->{node}]))},
-        %{decode_json(output(['tags', $p->{id}, $p->{node}]))} }; },
+    code => sub {
+        my ($p) = @_;
+        my $config = { %{decode_json(output(['notes', $p->{id}, $p->{node}]))},
+            %{decode_json(output(['tags', $p->{id}, $p->{node}]))},
+            %{decode_json(output(['protection', $p->{id}, $p->{node}]))},
+            %{decode_json(output(['lifecycle', $p->{id}, $p->{node}]))} };
+        delete $config->{digest} unless capabilities($p->{id}, $p->{node})->{settings};
+        return $config;
+    },
 });
 
 register_docker_method({
@@ -467,16 +564,27 @@ register_docker_method({
     description => 'Save project notes.',
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
         description => { type => 'string', maxLength => 8192, optional => 1 },
-        tags => { type => 'string', maxLength => 2048, optional => 1 } } },
+        tags => { type => 'string', maxLength => 2048, optional => 1 },
+        protection => { type => 'boolean', optional => 1 },
+        onboot => { type => 'boolean', optional => 1 },
+        startup => { type => 'string', format => 'pve-startup-order', optional => 1 },
+        delete => { type => 'string', enum => ['startup'], optional => 1 }, digest => $digest } },
     returns => { type => 'null' },
     code => sub {
         my ($p) = @_;
+        check_digest($p);
+        if (defined($p->{tags}) && !capabilities($p->{id}, $p->{node})->{configure}) {
+            my $old = decode_json(output(['tags', $p->{id}, $p->{node}]))->{tags};
+            PVE::GuestHelpers::assert_tag_permissions(task_id($p->{id}, $p->{node}), $old, $p->{tags},
+                PVE::RPCEnvironment::get(), PVE::RPCEnvironment::get()->get_user());
+        }
+        my %changes = map { $_ => $p->{$_} } grep { defined($p->{$_}) } qw(description tags protection onboot startup);
+        $changes{protection} = $p->{protection} ? 1 : 0 if defined($p->{protection});
+        $changes{onboot} = $p->{onboot} ? 1 : 0 if defined($p->{onboot});
+        $changes{startup} = '' if $p->{delete};
         my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
-        chmod 0600, $path; print $fh ($p->{description} // ''); close $fh;
-        eval {
-            output(['notes', $p->{id}, $p->{node}, $path]) if defined($p->{description});
-            output(['tags', $p->{id}, $p->{node}, $p->{tags}]) if defined($p->{tags});
-        };
+        chmod 0600, $path; print $fh encode_json(\%changes); close $fh;
+        eval { output(['config', $p->{id}, $p->{node}, $path, $p->{digest} // '']); };
         my $err = $@; unlink $path; die $err if $err;
         return undef;
     },

@@ -137,7 +137,7 @@ class WorkerTests(unittest.TestCase):
             add.assert_called_once_with(records[0], wait=False)
 
     def test_patch_is_idempotent_and_removable(self):
-        for kind, source in [('node', "use PVE::API2::LXC;\n__PACKAGE__->register_method({ path => 'lxc' });\n1;\n"),
+        for kind, source in [('node', "use PVE::API2::LXC;\n__PACKAGE__->register_method({ path => 'lxc' });\n" + "\n".join(target for target, _ in patcher.NODE_LIFECYCLE) + "\n1;\n"),
                              ('vmid', 'sub check_vmid_unused {\n    my ($vmid, $noerr) = @_;\n    return 1;\n}\n'),
                              ('cluster', "__PACKAGE__->register_method({ name => 'resources' });\n1;\n"),
                              ('ui', '<head>\n<script src="/pve2/js/pvemanagerlib.js?ver=9"></script>\n</head>')]:

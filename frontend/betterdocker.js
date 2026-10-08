@@ -142,7 +142,7 @@
         const canOverrule = activeShutdown || Proxmox.UserName === 'root@pam' || Boolean(caps?.nodes?.['Sys.Modify']);
         Ext.create('PVE.betterdocker.GuestStop', { message, activeShutdown, canOverrule, onConfirm: execute }).show();
     };
-    const dockerAction = (info, operation, target) => {
+    const dockerAction = (info, operation, target, menuState) => {
         const execute = (overrule = false) => request({
             url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1] + '/action',
             method: 'POST', params: Object.assign({ action: operation }, overrule ? { 'overrule-shutdown': 1 } : {}), waitMsgTarget: target,
@@ -152,7 +152,7 @@
             const label = translate({ shutdown: 'Shutdown', reboot: 'Reboot', 'force-stop': 'Stop' }[operation]);
             const guest = (info.vmid ? 'DCT ' + info.vmid : 'Docker') + ' (' + info.name + ')';
             if (operation === 'force-stop') {
-                const state = target?.snapshotState;
+                const state = target?.snapshotState || menuState;
                 confirmStop(Ext.htmlEncode(label + ' ' + guest + '?'), state?.operation?.service ? null : state, execute);
                 return;
             }
@@ -459,9 +459,35 @@
         },
     });
 
+    Ext.define('PVE.betterdocker.VMSelectorIntegration', {
+        override: 'PVE.form.VMSelector',
+        initComponent: function () {
+            const me = this;
+            me.columnsDeclaration = me.columnsDeclaration.map(column => column.dataIndex === 'type' ?
+                Object.assign({}, column, { renderer: function (value, ...args) {
+                    return value === 'docker' ? 'DCT' : column.renderer.call(this, value, ...args);
+                } }) : column);
+            me.callParent();
+            me.on('afterrender', function () {
+                const win = me.up('window');
+                const power = win?.nodename && ['startall', 'stopall'].includes(win.action);
+                me.mon(me.getStore(), 'load', (store, records) => {
+                    if (!power) { store.remove(records.filter(record => record.get('type') === 'docker')); }
+                });
+                if (power) {
+                    const type = win.down('#typefilter');
+                    if (type) { type.getStore().add({ [type.valueField]: 'docker', [type.displayField]: 'DCT' }); }
+                    const status = win.down('#statusfilter');
+                    if (status) { status.getStore().add({ [status.valueField]: 'partial', [status.displayField]: translate('Partially running') }); }
+                }
+            }, me, { single: true });
+        },
+    });
+
     Ext.define('PVE.betterdocker.Notes', {
         extend: 'Proxmox.panel.NotesView', alias: 'widget.pveBetterDockerNotes',
-        maxLength: 8192,
+        maxLength: 8192, canEdit: false,
+        run_editor: function () { if (this.canEdit) { this.callParent(); } },
         cbindData: function () {
             this.url = '/api2/extjs' + this.apiUrl + '/config';
             this.pveType = 'docker';
@@ -855,7 +881,19 @@
             let current;
             let selectedService;
             let loading = false;
-            const editable = () => current && current.capabilities ? Boolean(current.capabilities.configure) : Proxmox.UserName === 'root@pam';
+            const can = scope => current && current.capabilities ? Boolean(current.capabilities[scope] ?? current.capabilities.configure) : Proxmox.UserName === 'root@pam';
+            const editable = () => can('configure');
+            const rowEditable = (key, group) => {
+                if (key === 'Settings source') { return false; }
+                if (key === 'Container disk limit') { return editable() && !current?.protection && Boolean(current?.storage?.rootfs?.supported); }
+                if (key === 'Project data disk') { return editable() && (!current?.protection || Boolean(current?.storage?.limit_mib)); }
+                const scope = { Memory: 'memory', Swap: 'memory', 'CPU limit': 'cpu', 'CPU units': 'cpu',
+                    'PID limit': 'options', 'DNS servers': 'network', 'Search domains': 'network',
+                    'Restart policy': 'options', Protection: 'options', 'Start at boot': 'options', 'Start/Shutdown order': 'options' }[key];
+                if (scope) { return can(scope); }
+                if (key) { return editable(); }
+                return group === 'resources' ? ['cpu', 'memory', 'options', 'configure'].some(can) : can(group === 'dns' ? 'network' : 'options');
+            };
             const locked = () => Boolean(me.pendingTask || current && current.operation && current.operation.active);
             const canOverrule = service => Boolean(current?.capabilities?.overrule_shutdown &&
                 (current.operation?.service || null) === (service || null));
@@ -880,7 +918,7 @@
                 if (consoleButton) { consoleButton.setDisabled(!current.containers.some(item => item.state === 'running') || current.capabilities && !current.capabilities.console); }
                 me.query('[bdWrite=true]').forEach(button => button.setDisabled(locked() || !editable()));
                 const removeButton = me.down('#removeButton');
-                if (removeButton) { removeButton.setDisabled(running || !['stopped', 'error', 'network-error'].includes(current.status) || locked() || !editable()); }
+                if (removeButton) { removeButton.setDisabled(Boolean(current.protection) || running || !['stopped', 'error', 'network-error'].includes(current.status) || locked() || !editable()); }
                 const op = current.operation || {};
                 const operationLabel = me.down('#operationLabel');
                 if (operationLabel) { operationLabel.setText(op.active || me.pendingTask ? '<i class="fa fa-lock"></i> ' + Ext.htmlEncode(translate('Operation in progress')) : op.failed ? Ext.htmlEncode(translate(op.message)) : ''); }
@@ -888,7 +926,7 @@
                 const snapshots = me.down('#snapshots');
                 if (snapshots && snapshots.rendered) { snapshots.updateActions(); if (!snapshots.isHidden()) { snapshots.loadSnapshots(); } }
                 const tags = me.down('#dockerTags');
-                if (tags) { tags.loadTags(current.tags || ''); tags.canEdit = editable(); if (tags.getViewModel) { tags.getViewModel().set('canEdit', editable() && !locked()); } }
+                if (tags) { tags.loadTags(current.tags || ''); tags.canEdit = can('options'); if (tags.getViewModel) { tags.getViewModel().set('canEdit', can('options') && !locked()); } }
                 rows('serviceGrid', current.containers.concat(current.services.filter(service => !current.containers.some(container => container.service === service.name)).map(service => ({
                     id: '', name: '—', service: service.name, image: service.image, state: 'stopped', health: 'none', restarts: 0, exitcode: '—',
                 }))).map(container => Object.assign({}, container, { ports: (current.services.find(service => service.name === container.service)?.ports || [])
@@ -905,6 +943,11 @@
                     mtu: current.mtu || 'Same as bridge', address: current.address || 'Waiting for DHCP',
                     mode: current.ipv4mode === 'dhcp' ? 'DHCP' : 'Static' }]);
                 rows('portGrid', current.services.flatMap(item => item.ports.map(port => Object.assign({ service: item.name }, port))));
+                const notes = me.down('#summary')?.down('#notesview');
+                if (notes) {
+                    notes.canEdit = can('options') && !locked();
+                    if (notes.query) { notes.query('tool').filter(tool => tool.initialConfig?.tooltip === gettext('Edit notes')).forEach(tool => tool.setVisible(notes.canEdit)); }
+                }
                 const active = service();
                 if (active) {
                     const values = active.settings;
@@ -915,11 +958,13 @@
                         { key: 'Settings source', value: active.overridden ? 'GUI override' : 'Compose' },
                     ]).concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
                     rows('dnsGrid', ['DNS servers', 'Search domains'].map(key => pendingRow(key, values, active.pending)));
-                    rows('optionGrid', [pendingRow('Restart policy', values, active.pending), { key: 'Image', value: active.image }]);
+                    rows('optionGrid', [{ key: 'Start at boot', value: Proxmox.Utils.format_boolean(current.onboot || 0) }, { key: 'Start/Shutdown order', value: current.startup || 'order=any' }, { key: 'Protection', value: Proxmox.Utils.format_boolean(current.protection) }, pendingRow('Restart policy', values, active.pending), { key: 'Image', value: active.image }]);
                     ['resourceGrid', 'dnsGrid', 'optionGrid'].forEach(id => {
                         const grid = me.down('#' + id), button = me.down('#' + id + 'Revert');
                         const row = grid?.getSelectionModel().getSelection()[0];
-                        if (button) { button.setDisabled(!row || !grid.hasPendingChanges(row.get('key')) || !editable() || locked()); }
+                        if (button) { button.setDisabled(!row || !grid.hasPendingChanges(row.get('key')) || !rowEditable(row.get('key')) || locked()); }
+                        const edit = me.down('#' + { resourceGrid: 'resourceEdit', dnsGrid: 'dnsEdit', optionGrid: 'optionsEdit' }[id]);
+                        if (edit) { edit.setDisabled(!row || !rowEditable(row.get('key')) || locked()); }
                     });
                 }
                 if (current.deployment) { set('source', current.deployment.mode === 'compose' ? current.deployment.compose :
@@ -966,9 +1011,30 @@
             };
             const editSettings = (group, selectedKey) => {
                 const active = service();
-                if (!active || !editable() || locked()) { return; }
+                if (!active || !rowEditable(selectedKey, group) || locked()) { return; }
                 if (selectedKey === 'Settings source') { return; }
                 if (selectedKey === 'Project data disk') { editDataDisk(); return; }
+                if (selectedKey === 'Start/Shutdown order') {
+                    Ext.create('PVE.window.StartupEdit', { url: url + '/config', method: 'PUT',
+                        listeners: { destroy: reload } }).show();
+                    return;
+                }
+                if (selectedKey === 'Protection' || selectedKey === 'Start at boot') {
+                    const name = selectedKey === 'Protection' ? 'protection' : 'onboot';
+                    const digest = current.digest;
+                    const win = Ext.create('Proxmox.window.Edit', {
+                        subject: gettext(selectedKey), url: url + '/config', method: 'PUT', width: 400,
+                        items: [{ xtype: 'proxmoxcheckbox', name, uncheckedValue: 0, defaultValue: 0,
+                            fieldLabel: gettext('Enabled'), value: Boolean(current[name]) }],
+                        submit: function () {
+                            request({ url: url + '/config', method: 'PUT', waitMsgTarget: win,
+                                params: Object.assign({}, this.formPanel.getForm().getValues(), { digest }),
+                                success: () => { win.close(); reload(); } });
+                        },
+                    });
+                    win.show();
+                    return;
+                }
                 if (selectedKey === 'Image') { editDeployment(); return; }
                 if (selectedKey && selectedKey.startsWith('Mount Point')) { editDeployment(); return; }
                 const values = Object.assign({}, active.settings, active.pending), digest = current.digest;
@@ -988,6 +1054,8 @@
                         selectedKey === 'PID limit' ? ['pids'] : selectedKey === 'Container disk limit' ? ['disk'] : ['cpus', 'cpuunits'];
                     fields = fields.filter(item => !item.name || names.includes(item.name));
                 }
+                const fieldScope = { memory: 'memory', swap: 'memory', cpus: 'cpu', cpuunits: 'cpu', pids: 'options', disk: 'configure', dns: 'network', dns_search: 'network', restart: 'options' };
+                fields = fields.filter(item => !item.name || can(fieldScope[item.name]));
                 const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate({ resources: 'Resources', dns: 'DNS', options: 'Options' }[group]) + ' - ' + active.name,
                     url: url + '/settings', method: 'PUT', width: 400, showReset: true,
                     onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
@@ -996,7 +1064,7 @@
                         const form = this.formPanel.getForm();
                         if (!form.isValid()) { return; }
                         const changed = form.getValues();
-                        const settings = Object.assign({}, values);
+                        const settings = {};
                         Object.keys(changed).forEach(key => { settings[key] = group === 'resources' ? Number(changed[key]) : changed[key]; });
                         if (group === 'dns') {
                             ['dns', 'dns_search'].forEach(key => { settings[key] = changed[key].split(',').map(v => v.trim()).filter(Boolean); });
@@ -1036,7 +1104,7 @@
             const revertButton = gridId => ({ xtype: 'pvePendingRevertButton', itemId: gridId + 'Revert', bdWrite: true,
                 handler: function () {
                     const grid = me.down('#' + gridId), row = grid.getSelectionModel().getSelection()[0], active = service();
-                    if (!row || !active || !grid.hasPendingChanges(row.get('key')) || !editable() || locked()) { return; }
+                    if (!row || !active || !grid.hasPendingChanges(row.get('key')) || !rowEditable(row.get('key')) || locked()) { return; }
                     request({ url: url + '/pending', method: 'PUT', waitMsgTarget: grid,
                         params: { service: active.name, revert: settingKeys[row.get('key')].join(','), digest: current.digest },
                         success: response => { trackTask(response, me); task(response); } });
@@ -1052,7 +1120,7 @@
                 { xtype: 'tbtext', itemId: 'operationLabel', text: translate('') },
                 { xtype: 'pveTagEditContainer', itemId: 'dockerTags', cls: 'proxmox-tags-full', tags: info.tags || '', canEdit: Proxmox.UserName === 'root@pam',
                     listeners: { change: function (tags) {
-                        request({ url: url + '/config', method: 'PUT', params: { tags }, success: reload });
+                        request({ url: url + '/config', method: 'PUT', params: Object.assign({ tags }, current?.digest ? { digest: current.digest } : {}), success: reload });
                     } } }, '->',
                 { text: translate('Start'), itemId: 'startButton', iconCls: 'fa fa-play', handler: () => act('start') },
                 { xtype: 'splitbutton', text: translate('Shutdown'), itemId: 'stopButton', iconCls: 'fa fa-power-off', handler: () => act('shutdown'),
@@ -1140,9 +1208,9 @@
                     selectionchange: (_, records) => {
                         const grid = me.down('#' + { resources: 'resourceGrid', dns: 'dnsGrid', options: 'optionGrid' }[group]);
                         const revert = me.down('#' + grid.itemId + 'Revert');
-                        if (revert) { revert.setDisabled(!records.length || !grid.hasPendingChanges(records[0].get('key')) || !editable() || locked()); }
+                        if (revert) { revert.setDisabled(!records.length || !grid.hasPendingChanges(records[0].get('key')) || !rowEditable(records[0].get('key')) || locked()); }
                         const button = me.down('#' + (group === 'resources' ? 'resourceEdit' : group + 'Edit'));
-                        if (button) { button.setDisabled(!records.length || records[0].get('key') === 'Settings source' || !editable() || locked()); } } };
+                        if (button) { button.setDisabled(!records.length || !rowEditable(records[0].get('key')) || locked()); } } };
             });
             const services = me.items.find(item => item.itemId === 'services');
             me.updateServiceActions = records => {
@@ -1172,31 +1240,46 @@
             const running = info.status === 'running' || info.status === 'partial';
             const caps = Ext.state.Manager.get('GuiCap');
             const allowed = Proxmox.UserName === 'root@pam' || Boolean(caps && caps.nodes && caps.nodes['Sys.Console']);
-            const act = operation => dockerAction(info, operation);
+            const act = operation => dockerAction(info, operation, undefined, me.snapshotState);
             me.title = 'DCT ' + info.name;
             me.items = [
-                { text: translate('Start'), iconCls: 'fa fa-fw fa-play', disabled: !allowed || info.status === 'running', handler: () => act('start') },
-                { text: translate('Shutdown'), iconCls: 'fa fa-fw fa-power-off', disabled: !allowed || !running, handler: () => act('shutdown') },
-                { text: translate('Reboot'), iconCls: 'fa fa-fw fa-refresh', disabled: !allowed || !running, handler: () => act('reboot') },
-                { text: translate('Stop'), iconCls: 'fa fa-fw fa-stop', disabled: !allowed || !running, handler: () => act('force-stop') },
+                { text: translate('Start'), itemId: 'start', iconCls: 'fa fa-fw fa-play', disabled: !allowed || info.status === 'running', handler: () => act('start') },
+                { text: translate('Shutdown'), itemId: 'shutdown', iconCls: 'fa fa-fw fa-power-off', disabled: !allowed || !running, handler: () => act('shutdown') },
+                { text: translate('Reboot'), itemId: 'reboot', iconCls: 'fa fa-fw fa-refresh', disabled: !allowed || !running, handler: () => act('reboot') },
+                { text: translate('Stop'), itemId: 'force-stop', iconCls: 'fa fa-fw fa-stop', disabled: !allowed || !running, handler: () => act('force-stop') },
                 { xtype: 'menuseparator' },
-                { text: translate('Console'), iconCls: 'fa fa-fw fa-terminal', disabled: !allowed || !running || !me.workspace,
+                { text: translate('Console'), itemId: 'console', iconCls: 'fa fa-fw fa-terminal', disabled: !allowed || !running || !me.workspace,
                     handler: () => {
                         me.workspace.selectById(info.id);
                         const panel = me.workspace.query('pveBetterDockerConfig').find(item =>
                             !item.destroyed && item.pveSelNode.data.id === info.id);
                         if (panel) { panel.selectById('console'); }
                     } },
-                { text: translate('Edit deployment'), iconCls: 'fa fa-fw fa-pencil', disabled: !allowed,
+                { text: translate('Edit deployment'), itemId: 'deployment', iconCls: 'fa fa-fw fa-pencil', disabled: !allowed,
                     handler: () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1],
                         method: 'GET', success: response => Ext.create('PVE.betterdocker.DeploymentEdit', {
                             projectId: (info.realId || info.id).split('/')[1], vmid: info.vmid, nodename: info.node, deployment: response.result.data.deployment, digest: response.result.data.digest,
                         }).show() }) },
                 { xtype: 'menuseparator' },
-                { text: translate('Remove'), iconCls: 'fa fa-fw fa-trash', disabled: !allowed || info.status !== 'stopped',
+                { text: translate('Remove'), itemId: 'removeButton', iconCls: 'fa fa-fw fa-trash', disabled: true,
                     handler: () => removeProject(info) },
             ];
             me.callParent();
+            request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1] + '/capabilities',
+                method: 'GET', success: response => {
+                    if (me.destroyed) { return; }
+                    const state = response.result.data, rights = state.capabilities;
+                    me.snapshotState = state;
+                    const active = ['running', 'partial'].includes(state.status);
+                    const busy = Boolean(state.operation?.active);
+                    ['start', 'shutdown', 'reboot', 'force-stop'].forEach(verb => {
+                        const override = verb === 'force-stop' && rights.overrule_shutdown;
+                        me.down('#' + verb).setDisabled(!rights.power || busy && !override || (verb === 'start' ? state.status === 'running' : !active));
+                    });
+                    me.down('#console').setDisabled(!rights.console || !active || !me.workspace);
+                    me.down('#deployment').setDisabled(!rights.configure || busy);
+                    me.down('#removeButton').setDisabled(!rights.configure || Boolean(state.protection) || busy || state.status !== 'stopped');
+                } });
         },
     });
 

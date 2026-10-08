@@ -54,7 +54,7 @@ class ManagementTests(unittest.TestCase):
             lock.assert_not_called()
 
     def test_data_disk_rejects_running_and_external_mounts(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'locked'), patch.object(worker, 'detail'):
+        with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'locked'), patch.object(worker, 'detail', return_value={}):
             directory = Path(folder) / ID
             directory.mkdir()
             runtime = directory / 'compose.runtime.json'
