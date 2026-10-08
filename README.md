@@ -48,6 +48,7 @@ These paths are on the Proxmox node after installation.
 | `/usr/share/pve-manager/css/betterdocker.css` | Interface styles. |
 | `/usr/share/pve-manager/images/betterdocker.svg` | DCT icon. |
 | `/etc/systemd/system/betterdocker-*` | Network maintenance and integration services and timers. |
+| `/etc/apparmor.d/local/betterdocker-dhclient` | DHCP rules included by the distribution dhclient profile. Retained with network maintenance on uninstall. |
 | `/var/backups/betterdocker/` | Files backed up by the installer. |
 
 The installer also updates `/usr/share/pve-manager/index.html.tpl`, `/usr/share/perl5/PVE/API2/Nodes.pm`, `/usr/share/perl5/PVE/API2/Cluster.pm` and `/usr/share/perl5/PVE/Cluster.pm` to register the extension with PVE.
@@ -76,11 +77,11 @@ Without a managed data disk, application data stays in the bind-mount directorie
 - **Permissions:** CPU, memory, DNS and options can be delegated with `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network` and `VM.Config.Options` on `/vms/<vmid>`. Viewing a DCT requires `VM.Audit`; power operations use `VM.PowerMgmt`.
 - **Host access:** DCTs use Docker and the host kernel. Compose, images, disks, deployment removal, logs and consoles require root or node `Sys.Console`. Per-DCT configuration permissions do not grant those operations.
 - **PVE features:** native resource pools, guest hook scripts, VM/CT backup, HA, migration, replication and per-DCT firewall are unavailable. Back up application data separately.
-- **Networking:** IPv4 uses an existing Linux bridge and host routing. DHCP needs a reachable server and a network that allows an additional MAC address.
+- **Networking:** one IPv4 endpoint per DCT, used for published ports. Stop the DCT to change its bridge, static address/DHCP, MAC or MTU. Changes recreate stopped containers; volumes are retained, but writable container layers are replaced. Routing and outbound traffic use the host network. DHCP needs a reachable server and a network that allows an additional MAC address. Multiple interfaces, IPv6, VLAN tags, bandwidth limits, PVE guest firewall and SDN are unsupported. This endpoint does not provide LXC-style network isolation.
 - **Compose:** use existing images and explicit published ports. `build`, profiles and `network_mode` are unsupported. Only YAML and `.env` can be imported; other referenced files must already exist on the host.
 - **Resource limits:** CPU and memory limits apply per service instance. Supported resource limits and restart policies can be changed while running. Settings that cannot be changed while running remain pending until Start or Reboot. Revert discards pending changes. Deployment edits, data disk changes and Restore Compose require stopping the affected service or DCT. Writable-layer disk limits require `overlay2` on XFS with project quotas.
 - **Data disk:** creating or enlarging it requires stopped services and private project directories or local volumes. The interface supports enlargement only. It does not reserve physical host space. A mount failure can prevent Docker from starting on the node.
-- **Snapshots:** full copies consume additional space and freeze services while capturing data. RAM, Docker logs, external writable paths and shared volumes are unsupported. Restoration leaves the DCT stopped. A later DHCP address change may require restoring again.
+- **Snapshots:** full copies consume additional space and freeze services while capturing data. RAM, Docker logs, external writable paths and shared volumes are unsupported. Address, bridge and MAC edits require removing existing snapshots; network edits after rollback require redeployment. Restoration leaves the DCT stopped. A later DHCP address change may require restoring again.
 - **Startup:** Options controls Start at boot and start/shutdown order. Node Start All/Stop All includes DCTs. Order applies to stopped guests; already running services are skipped. Controlled Docker restarts preserve which instances were running. After an abrupt power loss or daemon crash, Docker restart policies can run before PVE ordering.
 - **PVE updates:** changes to Proxmox can require an extension update or integration repair.
 

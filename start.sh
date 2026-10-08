@@ -72,6 +72,8 @@ TARGETS=(
     /usr/share/pve-manager/js/betterdocker-locales/pl.js
     /etc/systemd/system/betterdocker-lifecycle.service
     /etc/systemd/system/pve-guests.service.d/betterdocker.conf
+    /etc/apparmor.d/local/betterdocker-dhclient
+    /etc/apparmor.d/local/usr.sbin.dhclient
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -95,6 +97,9 @@ rollback() {
     if [[ ! -e "$BACKUP_DIR/addon-13" ]]; then systemctl disable --now betterdocker-integration.timer || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-6" ]]; then systemctl disable --now betterdocker-addresses.service || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-16" ]]; then systemctl disable --now betterdocker-lifecycle.service || true; fi
+    if [[ -f /etc/apparmor.d/usr.sbin.dhclient ]] && command -v apparmor_parser >/dev/null; then
+        apparmor_parser -r /etc/apparmor.d/usr.sbin.dhclient || true
+    fi
     systemctl daemon-reload || true
     systemctl restart pvedaemon pveproxy || true
 }
@@ -120,6 +125,16 @@ install -m 0644 "$PROJECT_DIR/frontend/locales/pl.js" "${TARGETS[15]}"
 install -d -m 0755 /etc/systemd/system/pve-guests.service.d
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-lifecycle.service" "${TARGETS[16]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-pve-guests.conf" "${TARGETS[17]}"
+# Extend the distribution profile instead of disabling AppArmor for DHCP.
+if [[ -f /etc/apparmor.d/usr.sbin.dhclient ]] && command -v apparmor_parser >/dev/null; then
+    install -d -m 0755 /etc/apparmor.d/local
+    install -m 0644 "$PROJECT_DIR/systemd/betterdocker-dhclient.apparmor" "${TARGETS[18]}"
+    touch "${TARGETS[19]}"
+    if ! grep -Fxq '#include if exists <local/betterdocker-dhclient>' "${TARGETS[19]}"; then
+        printf '\n%s\n' '#include if exists <local/betterdocker-dhclient>' >> "${TARGETS[19]}"
+    fi
+    apparmor_parser -r /etc/apparmor.d/usr.sbin.dhclient
+fi
 bash /usr/local/lib/betterdocker/docker-install.sh
 systemctl daemon-reload
 systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer betterdocker-lifecycle.service

@@ -135,7 +135,7 @@ sub register_docker_method {
         my ($param) = @_;
         my $caps = capabilities($param->{id}, $param->{node});
         my $scope = $name eq 'list' && $param->{diagnostics} ? 'configure' :
-                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config)$/ ? 'audit' :
+                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config)$/ ? 'audit' :
                     ($name eq 'settings' || $name eq 'revert_settings') ? 'settings' :
                     $name eq 'set_notes' ? 'options' :
                     ($name eq 'snapshot' && $param->{action} eq 'restore') ? 'rollback' :
@@ -331,6 +331,44 @@ register_docker_method({
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
     returns => { type => 'object' },
     code => sub { my ($param) = @_; return decode_json(output(['detail', $param->{id}, $param->{node}])); },
+});
+
+register_docker_method({
+    name => 'network_config', path => '{id}/network', method => 'GET', protected => 1, proxyto => 'node',
+    description => 'Read the DCT IPv4 endpoint configuration.', permissions => $root,
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+    returns => { type => 'object' },
+    code => sub { my ($param) = @_; return decode_json(output(['network-config', $param->{id}, $param->{node}])); },
+});
+
+register_docker_method({
+    name => 'set_network', path => '{id}/network', method => 'PUT', protected => 1, proxyto => 'node',
+    description => 'Change the stopped DCT IPv4 endpoint; host configuration privileges are required.', permissions => $root,
+    parameters => { additionalProperties => 0, properties => {
+        node => $node, id => $id,
+        bridge => { type => 'string', pattern => '^[a-zA-Z0-9_.-]{1,15}$', optional => 1 },
+        ipv4mode => { type => 'string', enum => ['static', 'dhcp'], optional => 1 },
+        cidr => { type => 'string', maxLength => 64, optional => 1 },
+        hwaddr => { type => 'string', maxLength => 17, optional => 1 },
+        mtu => { type => 'integer', minimum => 0, maximum => 9216, optional => 1 },
+        digest => { type => 'string', pattern => '^[a-f0-9]{64}$', optional => 1 },
+    } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        check_digest($param);
+        my %values = map { exists($param->{$_}) ? ($_ => $param->{$_}) : () } qw(bridge ipv4mode cidr hwaddr mtu);
+        my ($fh, $path) = tempfile('betterdocker-network-XXXXXX', DIR => '/run', UNLINK => 0);
+        chmod 0600, $path;
+        print $fh encode_json(\%values); close $fh;
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $upid = eval { $rpcenv->fork_worker('betterdockernetwork', task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
+            eval { PVE::Tools::run_command([$helper, 'network', $param->{id}, $param->{node}, $path, $param->{digest} // '']); };
+            my $err = $@; unlink $path; die $err if $err;
+        }); };
+        if (my $err = $@) { unlink $path; die $err; }
+        return $upid;
+    },
 });
 
 register_docker_method({

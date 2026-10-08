@@ -892,3 +892,19 @@ for (const action of ['startall', 'stopall', 'migrateall', 'suspendall']) {
     assert.equal(removed?.length || 0, ['startall', 'stopall'].includes(action) ? 0 : 1);
 }
 console.log('Native bulk power selector includes DCT and excludes it from unsupported operations');
+
+// Network editor keeps native form/load/task handling and exposes supported fields only.
+let networkLoad, loadedNetwork, mtuCleared;
+const networkEditor = { nodename: 'pve', callParent() {}, load(options) { networkLoad = options; },
+    setValues(values) { loadedNetwork = values; }, down() { return { setValue(value) { mtuCleared = value; } }; } };
+definitions['PVE.betterdocker.NetworkEdit'].initComponent.call(networkEditor);
+networkLoad.success({ result: { data: { bridge: 'vmbr0', ipv4mode: 'static', cidr: '192.0.2.250/20', mtu: 0, digest: editorDigest } } });
+assert.equal(loadedNetwork.cidr, '192.0.2.250/20');
+assert.equal(networkEditor.digest, editorDigest);
+assert.equal(mtuCleared, '');
+const networkFields = [...networkEditor.items[0].column1, ...networkEditor.items[0].column2, ...networkEditor.items[0].advancedColumn1];
+for (const name of ['bridge', 'hwaddr', 'cidr', 'mtu']) assert(networkFields.some(field => field.name === name));
+for (const name of ['ip6', 'tag', 'rate', 'firewall', 'gw']) assert(!networkFields.some(field => field.name === name));
+assert.equal(definitions['PVE.betterdocker.NetworkEdit'].showTaskViewer, true);
+assert.equal(networkEditor.items[0].onGetValues({ ipv4mode: 'dhcp', mtu: '' }).cidr, '');
+console.log('Network editor uses native load/digest/task handling and supported fields only');

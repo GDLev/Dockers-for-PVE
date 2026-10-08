@@ -176,6 +176,8 @@ def validate(data):
     raw_mtu = data.get('mtu')
     if isinstance(raw_mtu, bool):
         raise ValueError('Invalid MTU')
+    if raw_mtu not in (None, '') and not re.fullmatch(r'[0-9]+', str(raw_mtu)):
+        raise ValueError('Invalid MTU')
     mtu = int(raw_mtu) if raw_mtu not in (None, '') else 0
     if mtu and not 576 <= mtu <= 9216:
         raise ValueError('MTU must be between 576 and 9216')
@@ -370,6 +372,7 @@ def container_records(identifier):
             continue
         records.append({'id': item['Id'], 'name': item['Name'].lstrip('/'),
                         'service': labels.get('com.docker.compose.service', ''),
+                        'number': labels.get('com.docker.compose.container-number', '1'),
                         'state': item['State']['Status'], 'started': item['State'].get('StartedAt', ''),
                         'image': item['Config']['Image'], 'pid': item['State'].get('Pid', 0),
                         'stop_signal': item['Config'].get('StopSignal') or 'SIGTERM',
@@ -1042,7 +1045,8 @@ def ensure_link(info):
     existing = next((link for link in links if link['ifname'] == interface), None)
     owner = 'betterdocker:' + info['id']
     if existing:
-        if existing.get('ifalias') != owner or existing.get('linkinfo', {}).get('info_kind') != 'macvlan':
+        if (existing.get('ifalias') != owner or existing.get('linkinfo', {}).get('info_kind') != 'macvlan' or
+                existing.get('link') != info['bridge']):
             raise ValueError('Project interface name is already used by another network device')
     else:
         run(['ip', 'link', 'add', 'link', info['bridge'], 'name', interface, 'address', info['hwaddr'],
@@ -1052,6 +1056,8 @@ def ensure_link(info):
     ipv6 = Path('/proc/sys/net/ipv6/conf') / interface / 'disable_ipv6'
     if ipv6.exists() and ipv6.read_text().strip() != '1':
         run(['sysctl', '-q', '-w', 'net.ipv6.conf.' + interface + '.disable_ipv6=1'])
+    if existing and existing.get('address', '').lower() != info['hwaddr'].lower():
+        raise ValueError('Project interface MAC differs from its configuration')
     if info.get('mtu'):
         run(['ip', 'link', 'set', 'dev', interface, 'mtu', str(info['mtu'])])
     run(['ip', 'link', 'set', 'dev', interface, 'up'])
@@ -1181,33 +1187,238 @@ def rebind_runtime(directory, address):
     write_json(path, config)
 
 
+def network_boot_id():
+    try:
+        return (PROC / 'sys/kernel/random/boot_id').read_text().strip()
+    except FileNotFoundError:
+        return ''
+
+
+def save_network_resume(path, instances):
+    write_json(path, {'boot_id': network_boot_id(), 'instances': instances})
+
+
+def read_network_resume(path):
+    state = json.loads(path.read_text())
+    return state['instances'] if isinstance(state, dict) else state
+
+
+def active_network_instances(identifier):
+    return [{'service': row['service'], 'number': row.get('number', '1'), 'paused': row['state'] == 'paused'}
+            for row in container_records(identifier) if row['state'] in ('running', 'restarting', 'paused')]
+
+
+def clear_network_resume(identifier, service=None):
+    path = ROOT / identifier / 'network-resume.json'
+    if not path.exists():
+        return
+    if service is None:
+        path.unlink()
+    else:
+        remaining = [row for row in read_network_resume(path) if row['service'] != service]
+        if remaining:
+            save_network_resume(path, remaining)
+        else:
+            path.unlink()
+
+
+def stop_network_instances(identifier):
+    records = [row for row in container_records(identifier) if row['state'] in ('running', 'restarting', 'paused')]
+    for row in records:
+        if row['state'] == 'paused':
+            run(['docker', 'unpause', row['id']], capture_output=True)
+    if records:
+        run(['docker', 'stop', *[row['id'] for row in records]], timeout=1800)
+
+
+def prepare_network_start(info):
+    # A lease can change between refresh and Start; reconcile published bindings first.
+    previous = info.get('address')
+    ensure_address(info)
+    if info.get('ipv4mode') == 'dhcp':
+        info['address'] = previous
+        sync_dhcp(info)
+    rebind_runtime(ROOT / info['id'], info['address'])
+    reconcile_network_runtime(info)
+
+
+def reconcile_network_runtime(info):
+    directory = ROOT / info['id']
+    marker = directory / 'network-reconcile.json'
+    if marker.exists():
+        require_stopped(container_records(info['id']))
+        run(compose_base(directory, info['id']) + ['up', '--no-start', '--force-recreate'], timeout=1800)
+        marker.unlink()
+
+
 def sync_dhcp(info):
     if info.get('ipv4mode') != 'dhcp':
         return True
     directory = ROOT / info['id']
+    marker = directory / 'network-resume.json'
+    if marker.exists():
+        state = json.loads(marker.read_text())
+        if isinstance(state, dict) and state['boot_id'] != network_boot_id():
+            marker.unlink()
+            info.pop('network_resume', None)
+            info['status'] = 'stopped'
+            write_json(METADATA / (info['id'] + '.json'), info)
     ensure_link(info)
     start_dhcp(info)
     assigned = lease(info)
     if not assigned:
-        if info['status'] in ('running', 'partial', 'creating'):
-            if (directory / 'compose.runtime.json').exists():
-                run(compose_base(directory, info['id']) + ['stop'], timeout=1800)
+        active = active_network_instances(info['id'])
+        if active:
+            if not marker.exists():
+                save_network_resume(marker, active)
+            stop_network_instances(info['id'])
             info['network_resume'] = True
             info['status'] = 'network-error'
             write_json(METADATA / (info['id'] + '.json'), info)
         return False
     changed = info.get('address') != assigned['address']
-    if changed or info.get('network_resume'):
+    if changed or marker.exists() or info.get('network_resume'):
+        # Persist the exact active replicas before a rebind. Never restart stopped siblings.
+        if not marker.exists():
+            save_network_resume(marker, active_network_instances(info['id']))
+        resume = read_network_resume(marker)
+        if (directory / 'snapshot-restored.json').exists() and changed:
+            raise ValueError('DCT address changed after rollback; restore a snapshot again to rebind preserved filesystems')
         rebind_runtime(directory, assigned['address'])
+        write_json(directory / 'network-reconcile.json', {'address': assigned['address']})
+        stop_network_instances(info['id'])
+        reconcile_network_runtime(info)
+        records = container_records(info['id'])
+        for saved in resume:
+            row = next((row for row in records if row['service'] == saved['service'] and
+                        row.get('number', '1') == saved['number']), None)
+            if row is None:
+                raise ValueError('DHCP recovery could not find a previously active instance')
+            run(['docker', 'start', row['id']], capture_output=True)
+            if saved.get('paused'):
+                run(['docker', 'pause', row['id']], capture_output=True)
+        restore_restart_policy(info['id'])
         info['address'] = assigned['address']
-        if info['status'] in ('running', 'partial', 'creating') or info.get('network_resume'):
-            if not restored_start(info['id']):
-                run(compose_base(directory, info['id']) + ['up', '-d'], timeout=1800)
         info.pop('network_resume', None)
-        if info['status'] == 'network-error':
-            info['status'] = 'creating'
+        info['status'] = 'creating' if resume else 'stopped'
         write_json(METADATA / (info['id'] + '.json'), info)
+        marker.unlink()
     return True
+
+
+NETWORK_KEYS = ('bridge', 'ipv4mode', 'cidr', 'hwaddr', 'mtu')
+
+
+def network_config(identifier, node):
+    info = detail(identifier, node)
+    return dict({key: info.get(key, '') for key in NETWORK_KEYS},
+                ipv4mode=info.get('ipv4mode', 'static'), mtu=info.get('mtu', 0),
+                cidr=(info.get('cidr') or info.get('address', '')) if info.get('ipv4mode', 'static') == 'static' else '', digest=info['digest'])
+
+
+def recover_network_transaction(identifier, node):
+    directory = ROOT / identifier
+    journal = directory / 'network-transaction.json'
+    if not journal.exists():
+        return False
+    if node != current_node():
+        raise ValueError('Project belongs to another node')
+    saved = json.loads(journal.read_text())
+    current = json.loads((METADATA / (identifier + '.json')).read_text())
+    if saved['metadata']['id'] != identifier or saved['metadata']['node'] != node:
+        raise ValueError('Invalid network recovery journal')
+    if current['node'] != node or current['id'] != identifier:
+        raise ValueError('Project belongs to another node')
+    # Address restoration runs before Docker at boot. An inactive daemon has no running containers.
+    daemon = run(['systemctl', 'is-active', 'docker.service'], capture_output=True, check=False)
+    if daemon.returncode == 0:
+        require_stopped(container_records(identifier))
+    remove_network(current)
+    for name, content in saved['files'].items():
+        if name not in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf'):
+            raise ValueError('Invalid network recovery file')
+        path = directory / name
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(content)
+            os.chmod(path, 0o600)
+    info = saved['metadata']
+    write_json(METADATA / (identifier + '.json'), info)
+    ensure_address(info, wait=False)
+    write_json(directory / 'network-reconcile.json', {'recovery': True})
+    journal.unlink()
+    return True
+
+
+def project_network(identifier, node, values, digest=None):
+    if not isinstance(values, dict) or set(values) - set(NETWORK_KEYS):
+        raise ValueError('Unsupported network setting')
+    # Routing/bridges are host configuration, not safe VM.Config.Network delegation.
+    authorize_config_keys(NETWORK_KEYS)
+    with locked():
+        recover_network_transaction(identifier, node)
+        info = detail(identifier, node)
+        assert_configuration_digest(identifier, node, digest)
+        directory = ROOT / identifier
+        require_stopped(container_records(identifier))
+        if (directory / 'network-resume.json').exists():
+            raise ValueError('Stop the DCT explicitly before changing a recovering DHCP network')
+        if (directory / 'snapshot-restored.json').exists():
+            raise ValueError('Redeploy or restore a snapshot before changing a restored DCT network')
+        before = {key: info.get(key, 'static' if key == 'ipv4mode' else 0 if key == 'mtu' else '') for key in NETWORK_KEYS}
+        requested = dict(before, **values)
+        data = validate(dict(info['deployment'], **requested, address=requested['cidr']))
+        requested = {key: data[key] for key in NETWORK_KEYS}
+        if requested == before:
+            return
+        if any(requested[key] != before[key] for key in NETWORK_KEYS if key != 'mtu') and any(snapshot_root(identifier).glob('*/manifest.json')):
+            raise ValueError('Remove snapshots before changing the address, bridge or MAC; snapshot network restoration is not supported')
+        _, subnets = bridge_addresses(data['bridge'])
+        if data['ipv4mode'] == 'static':
+            address = ipaddress.IPv4Interface(data['cidr'])
+            if not any(address.ip in subnet and address.network.prefixlen == subnet.prefixlen for subnet in subnets):
+                raise ValueError('IPv4/CIDR must match a connected subnet on the bridge; routing is inherited from the host')
+            check_address(data['address'], data['bridge'], identifier, info.get('interface'), probe=True)
+        if any(row.get('id') != identifier and row.get('hwaddr') == data['hwaddr'] for row in summaries()):
+            raise ValueError('This MAC address is already used by another project')
+        if not data['hwaddr']:
+            data['hwaddr'] = info['hwaddr']
+        bridge_links = json.loads(capture(['ip', '-j', 'link', 'show', 'dev', data['bridge']]))
+        if data['mtu'] and data['mtu'] > bridge_links[0]['mtu']:
+            raise ValueError('MTU cannot exceed the bridge MTU')
+        # The private journal is written before releasing the old link or DHCP client.
+        saved = {'metadata': {key: value for key, value in info.items() if key not in ('deployment', 'digest')},
+                 'files': {name: (directory / name).read_text() if (directory / name).exists() else None
+                           for name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf')}}
+        journal = directory / 'network-transaction.json'
+        write_json(journal, saved)
+        try:
+            remove_network(info)
+            (directory / 'dhcp-address.json').unlink(missing_ok=True)
+            (directory / 'dhclient.leases').unlink(missing_ok=True)
+            candidate = dict(saved['metadata'], **{key: data[key] for key in (*NETWORK_KEYS, 'address')},
+                             interface='bd' + identifier[:12], status='stopped')
+            candidate.pop('network_resume', None)
+            write_json(METADATA / (identifier + '.json'), candidate)
+            # Change only network fields. Keep the original Compose, .env and resource overrides.
+            deployment = dict(info['deployment'], **{key: data[key] for key in (*NETWORK_KEYS, 'address')})
+            write_json(directory / 'request.json', deployment)
+            ensure_address(candidate)
+            rebind_runtime(directory, candidate['address'])
+            write_json(directory / 'network-reconcile.json', {'address': candidate['address']})
+            reconcile_network_runtime(candidate)
+            write_json(METADATA / (identifier + '.json'), candidate)
+            clear_network_resume(identifier)
+            journal.unlink()
+        except Exception as error:
+            try:
+                recover_network_transaction(identifier, node)
+                reconcile_network_runtime(saved['metadata'])
+            except Exception as recovery:
+                raise ValueError(f'Network update failed: {error}; recovery failed: {recovery}') from error
+            raise
+        refresh(node)
 
 
 def remove_network(info):
@@ -1507,7 +1718,15 @@ def refresh(node):
     # Rebinding may recreate containers, so refresh the state list afterwards.
     projects = [info for info in summaries() if info['node'] == node]
     for info in projects:
-        sync_dhcp(info)
+        recover_network_transaction(info['id'], node)
+        info.update(json.loads((METADATA / (info['id'] + '.json')).read_text()))
+        try:
+            sync_dhcp(info)
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
+            # One broken lease must not freeze status refresh for every guest on the node.
+            info['status'] = 'network-error'
+            write_json(METADATA / (info['id'] + '.json'), info)
+            print(f"Network unavailable for DCT {info.get('vmid', info['id'])}: {error}", file=sys.stderr)
     entries = json.loads('[' + ','.join(capture(['docker', 'ps', '-a', '--filter', 'label=betterdocker.id',
                                               '--format', '{{json .}}']).splitlines()) + ']')
     for info in projects:
@@ -1569,6 +1788,7 @@ def graceful_shutdown(identifier, timeout=60, service=None):
 
 def action(identifier, node, operation, timeout=60):
     with locked():
+        recover_network_transaction(identifier, node)
         info = detail(identifier, node)
         directory = ROOT / identifier
         commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['restart'], 'delete': ['down']}
@@ -1583,10 +1803,11 @@ def action(identifier, node, operation, timeout=60):
                                             for item in container_records(identifier)):
             raise ValueError('DCT is not running')
         if operation in ('start', 'restart', 'reboot'):
-            ensure_address(info)
-            rebind_runtime(directory, info['address'])
+            prepare_network_start(info)
             info.pop('deployment', None)
             info.pop('network_resume', None)
+            reconcile_network_runtime(info)
+            clear_network_resume(identifier)
             info['status'] = 'creating'
             write_json(METADATA / (identifier + '.json'), info)
         if operation == 'start':
@@ -1621,6 +1842,7 @@ def action(identifier, node, operation, timeout=60):
         else:
             info.pop('deployment', None)
             if operation in ('stop', 'shutdown', 'force-stop'):
+                clear_network_resume(identifier)
                 info.pop('network_resume', None)
                 info['status'] = 'stopped'
                 write_json(METADATA / (identifier + '.json'), info)
@@ -1678,6 +1900,8 @@ def restore(node):
             storage_mount(path.parent.name)
         for info in summaries():
             if info['node'] == node:
+                if info.get('id') and recover_network_transaction(info['id'], node):
+                    info = json.loads((METADATA / (info['id'] + '.json')).read_text())
                 ensure_address(info, wait=False)
 
 
@@ -1791,14 +2015,14 @@ def project_tags(identifier, node, tags=None):
 
 def service_action(identifier, node, service, verb, timeout=60):
     with locked():
+        recover_network_transaction(identifier, node)
         info = detail(identifier, node)
         directory = ROOT / identifier
         config = json.loads((directory / 'compose.runtime.json').read_text())
         if service not in config['services'] or verb not in ('start', 'stop', 'restart', 'shutdown', 'reboot', 'force-stop'):
             raise ValueError('Invalid service operation')
         if verb in ('start', 'restart', 'reboot'):
-            ensure_address(info)
-            rebind_runtime(directory, info['address'])
+            prepare_network_start(info)
         if verb == 'start':
             apply_pending_settings(identifier, node, service)
         if verb in ('shutdown', 'reboot'):
@@ -1821,6 +2045,7 @@ def service_action(identifier, node, service, verb, timeout=60):
                     run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
                 else:
                     run(compose_base(directory, identifier) + command + [service], timeout=1800)
+        clear_network_resume(identifier, service)
         if verb in ('start', 'restart', 'reboot'):
             restore_restart_policy(identifier, service)
         refresh(node)
@@ -2446,7 +2671,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['network', 'network-config', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -2462,6 +2687,11 @@ def main():
         if args.operation == 'create':
             with operation(values[2], 'create'):
                 create(data, values[1], values[2])
+    elif args.operation == 'network-config':
+        print(json.dumps(network_config(*values)))
+    elif args.operation == 'network':
+        with operation(values[0], 'network'):
+            project_network(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3] if len(values) > 3 else None)
     elif args.operation == 'update':
         with operation(values[0], 'update'):
             update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())), values[3] if len(values) > 3 else None)

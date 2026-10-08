@@ -14,7 +14,7 @@
         width: 660, height: 460, layout: 'fit', items: [{ xtype: 'component', scrollable: true, padding: 15,
             html: [
                 ["Resources", "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited."],
-                ["Network", "Network settings are fixed after creation. Published ports use the DCT address."],
+                ["Network", "Stop the DCT before changing its IPv4 endpoint. Published ports use this address; routing and outbound traffic use the host network."],
                 ["Container disk limit", "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded."],
                 ["Project data disk", "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node."],
                 ["Snapshots", "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped."],
@@ -85,7 +85,7 @@
     }, options));
     const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
     const dockerTaskLabels = { create: 'Deploy', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
-        restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Remove', settings: 'Edit resources / options', console: 'Console', snapshotcreate: 'Take Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Remove Snapshot' };
+        restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Remove', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Take Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Remove Snapshot' };
     const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
     Object.entries(dockerTaskLabels).forEach(([action, label]) => {
         dockerTaskDescriptions['betterdocker' + action] = (type, id) =>
@@ -250,6 +250,45 @@
             me.on('afterrender', () => { me.inputEl.dom.spellcheck = false; });
         },
     });
+    Ext.define('PVE.betterdocker.NetworkEdit', {
+        extend: 'Proxmox.window.Edit', subject: translate('Network Device'), width: 600, showTaskViewer: true,
+        initComponent: function () {
+            const me = this;
+            me.items = [{ xtype: 'inputpanel',
+                column1: [
+                    { xtype: 'displayfield', fieldLabel: translate('Name'), value: 'net0' },
+                    field('hwaddr', 'MAC address', '', { vtype: 'MacAddress', emptyText: 'auto' }),
+                    field('bridge', 'Bridge', '', { xtype: 'PVE.form.BridgeSelector', nodename: me.nodename,
+                        bridgeType: 'bridge', allowBlank: false }),
+                ],
+                column2: [
+                    { xtype: 'radiogroup', fieldLabel: 'IPv4', columns: 2, items: [
+                        { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'), checked: true },
+                        { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: 'DHCP' },
+                    ], listeners: { change: function (group) {
+                        const address = group.up('window').down('[name=cidr]');
+                        if (address) { address.setDisabled(group.getValue().ipv4mode !== 'static'); }
+                    } } },
+                    field('cidr', 'IPv4/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false }),
+                ],
+                advancedColumn1: [field('mtu', 'MTU', '', { xtype: 'numberfield', minValue: 576, maxValue: 9216,
+                    allowDecimals: false, emptyText: translate('Same as bridge') })],
+                onGetValues: function (values) {
+                    if (values.ipv4mode === 'dhcp') { values.cidr = ''; }
+                    values.mtu = values.mtu || 0;
+                    return values;
+                },
+            }];
+            me.callParent();
+            me.load({ success: function (response) {
+                const values = response.result.data;
+                me.setValues(values);
+                me.digest = values.digest;
+                if (!values.mtu) { me.down('[name=mtu]').setValue(''); }
+            } });
+        },
+    });
+
     Ext.define('PVE.betterdocker.CreateWizard', {
         extend: 'PVE.window.Wizard', subject: 'Docker', title: translate('Create DCT'), width: 760, height: 570, resizable: false, constrain: true,
         initComponent: function () {
@@ -939,8 +978,10 @@
                 });
                 const summary = me.down('#summary');
                 if (summary) { summary.updateSnapshot(current); }
+                const networkEdit = me.down('#networkEdit');
+                if (networkEdit) { networkEdit.setDisabled(!editable() || running || locked()); }
                 rows('networkGrid', [{ name: 'net0', bridge: current.bridge, hwaddr: current.hwaddr || '',
-                    mtu: current.mtu || 'Same as bridge', address: current.address || 'Waiting for DHCP',
+                    mtu: current.mtu || 'Same as bridge', address: current.address ? (current.ipv4mode === 'dhcp' ? current.address : current.cidr || current.address) : '',
                     mode: current.ipv4mode === 'dhcp' ? 'DHCP' : 'Static' }]);
                 rows('portGrid', current.services.flatMap(item => item.ports.map(port => Object.assign({ service: item.name }, port))));
                 const notes = me.down('#summary')?.down('#notesview');
@@ -987,6 +1028,13 @@
                 });
             };
             me.reloadDocker = reload;
+            const editNetwork = () => {
+                if (!editable() || locked() || current?.containers.some(row => ['running', 'restarting', 'paused'].includes(row.state))) { return; }
+                const win = Ext.create('PVE.betterdocker.NetworkEdit', { url: url + '/network', method: 'PUT', nodename: info.node, taskDone: reload,
+                    apiCallDone: (success, response) => { if (success) { trackTask(response, me); } } });
+                win.on('destroy', reload);
+                win.show();
+            };
             const act = operation => { if (!locked() || operation === 'force-stop' && canOverrule()) { dockerAction(info, operation, me); } };
             const editDeployment = () => request({ url, method: 'GET', success: response => {
                 Ext.create('PVE.betterdocker.DeploymentEdit', { ownerPanel: me, projectId: identifier, vmid: info.vmid, nodename: info.node,
@@ -1180,11 +1228,12 @@
                     { text: translate('Name'), dataIndex: 'name', width: 80, flex: 0 }, { text: translate('Bridge'), dataIndex: 'bridge' },
                     { text: translate('MAC address'), dataIndex: 'hwaddr' }, { text: translate('IPv4'), dataIndex: 'address' },
                     { text: translate('IPv4 mode'), dataIndex: 'mode' }, { text: translate('MTU'), dataIndex: 'mtu' }],
-                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu']), { height: 90 }),
+                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu']), { flex: 1, listeners: { itemdblclick: editNetwork } }),
                     Object.assign(grid('portGrid', [{ text: translate('Service'), dataIndex: 'service' }, { text: translate('IP address'), dataIndex: 'host_ip' },
                         { text: translate('Published port'), dataIndex: 'published' }, { text: translate('Container port'), dataIndex: 'target' },
                         { text: translate('Protocol'), dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: translate('Published ports'), flex: 1 })],
-                    [{ text: translate('Edit ports'), bdWrite: true, handler: editDeployment }], { layout: { type: 'vbox', align: 'stretch' } }),
+                    [{ text: translate('Edit'), itemId: 'networkEdit', disabled: true, handler: editNetwork },
+                     { text: translate('Edit ports'), bdWrite: true, handler: editDeployment }], { layout: { type: 'vbox', align: 'stretch' } }),
                 card('DNS', 'dns', 'globe', [properties('dnsGrid')], [{ text: translate('Edit'), itemId: 'dnsEdit', disabled: true, handler: () => { const row = me.down('#dnsGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('dns', row.get('key')); } } }, revertButton('dnsGrid'), '->', selector()], { layout: 'fit' }),
                 card('Options', 'options', 'cog', [properties('optionGrid')], [{ text: translate('Edit'), itemId: 'optionsEdit', disabled: true, handler: () => { const row = me.down('#optionGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('options', row.get('key')); } } }, revertButton('optionGrid'), '->', selector()], { layout: 'fit' }),
                 card('Deployment', 'deployment', 'file-code-o', [{ xtype: 'pveBetterDockerCodeArea', itemId: 'source', readOnly: true, fieldStyle: 'font-family:monospace' }],

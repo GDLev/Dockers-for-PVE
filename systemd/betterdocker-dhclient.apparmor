@@ -1,0 +1,5 @@
+# Private BetterDocker DHCP files and its root-owned hook only.
+/var/lib/betterdocker/projects/[0-9a-f]*/dhclient.conf r,
+/var/lib/betterdocker/projects/[0-9a-f]*/dhclient.leases* lrw,
+/{,var/}run/betterdocker-dhcp-[0-9a-f]*.pid lrw,
+/usr/local/lib/betterdocker/dhcp-hook.py Uxr,
