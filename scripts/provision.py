@@ -64,6 +64,8 @@ def reserve_id(identifier, node, preferred=None):
 
 
 def release_id(identifier):
+    if storage_config(identifier).get('volid'):
+        return  # Retained PVE disks keep their numeric guest ID reserved.
     for vmid, entry in reserved_ids().items():
         if entry['id'] == identifier:
             (METADATA / 'ids' / f'{vmid}.json').unlink()
@@ -555,22 +557,246 @@ def storage_config(identifier):
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+
+def pve_storage(identifier, action, **values):
+    payload = dict(values, id=project_id(identifier), action=action)
+    try:
+        result = run(['perl', str(Path(__file__).with_name('storage.pl'))], input=json.dumps(payload),
+                     capture_output=True, timeout=1800)
+    except subprocess.CalledProcessError as error:
+        raise ValueError('PVE storage: ' + (error.stderr or 'operation failed').strip()) from error
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def storage_device(identifier, settings=None):
+    settings = settings or storage_config(identifier)
+    if settings.get('volid'):
+        return Path(pve_storage(identifier, 'inspect', volid=settings['volid'])['path'])
+    return ROOT / identifier / 'storage.ext4'
+
+
+def storage_unit(identifier, settings):
+    point = ROOT / identifier / 'storage-data'
+    image = storage_device(identifier, settings)
+    unit = capture(['systemd-escape', '--path', '--suffix=mount', str(point)]).strip()
+    if not re.fullmatch(r'[a-zA-Z0-9_.\\-]+\.mount', unit):
+        raise ValueError('Invalid storage mount unit')
+    options = 'nodev,nosuid' if image.is_block_device() else 'loop,nodev,nosuid'
+    (Path('/etc/systemd/system') / unit).write_text(
+        '[Unit]\nDescription=BetterDocker data disk\nBefore=docker.service\nAfter=betterdocker-addresses.service\n'
+        '\n[Mount]\nWhat=' + str(image) + '\nWhere=' + str(point) + '\nType=ext4\nOptions=' + options +
+        '\n\n[Install]\nRequiredBy=docker.service\n')
+    run(['systemctl', 'daemon-reload'], capture_output=True)
+    run(['systemctl', 'enable', unit], capture_output=True)
+
+
+def storage_unmount(identifier):
+    point = ROOT / identifier / 'storage-data'
+    unit = capture(['systemd-escape', '--path', '--suffix=mount', str(point)]).strip()
+    # Drop this disk's Requires link before stopping its mount unit.
+    # Otherwise systemd can stop the node's Docker daemon as a dependency.
+    run(['systemctl', 'disable', unit], check=False, capture_output=True)
+    run(['systemctl', 'daemon-reload'], capture_output=True)
+    run(['systemctl', 'stop', unit], check=False, capture_output=True)
+    if os.path.ismount(point):
+        run(['umount', str(point)])
+
+
+def recover_storage_transaction(identifier):
+    folder = ROOT / identifier
+    journal = folder / 'storage-transaction.json'
+    if not journal.exists():
+        if (folder / 'allocated-volume.json').exists():
+            raise ValueError('Interrupted allocation: inspect allocated-volume.json before retrying')
+        return
+    state = json.loads(journal.read_text())
+    daemon_active = run(['systemctl', 'is-active', 'docker.service'], check=False, capture_output=True).returncode == 0
+    if daemon_active:
+        require_stopped(container_records(identifier))
+    if state['operation'] == 'grow':
+        settings = state['before']
+        actual = pve_storage(identifier, 'inspect', volid=settings['volid'])
+        storage_mount(identifier)
+        device = capture(['findmnt', '-n', '-M', str(folder / 'storage-data'), '-o', 'SOURCE']).strip()
+        if not Path(actual['path']).is_block_device():
+            run(['losetup', '-c', device])
+        run(['resize2fs', device], timeout=1800)
+        settings['size_mib'] = actual['size_mib']
+        write_json(folder / 'storage.json', settings)
+    elif state.get('committed'):
+        storage_unit(identifier, storage_config(identifier))
+        info = json.loads((METADATA / (identifier + '.json')).read_text())
+        if state.get('reconcile'):
+            (folder / 'snapshot-restored.json').unlink(missing_ok=True)
+            write_json(folder / 'network-reconcile.json', {'storage': True})
+            if daemon_active:
+                reconcile_network_runtime(info)
+    else:
+        transfer = folder / 'storage-transfer'
+        if os.path.ismount(transfer):
+            run(['umount', str(transfer)])
+        if transfer.exists() and not any(transfer.iterdir()):
+            transfer.rmdir()
+        # Copy operations never alter the source disk. Restore its config first.
+        storage_unmount(identifier)
+        if state['before']:
+            write_json(folder / 'storage.json', state['before'])
+            storage_mount(identifier)
+            storage_unit(identifier, state['before'])
+        else:
+            (folder / 'storage.json').unlink(missing_ok=True)
+            point = folder / 'storage-data'
+            if point.exists() and not any(point.iterdir()):
+                point.rmdir()
+        (folder / 'compose.runtime.json').write_text(state['runtime'])
+        allocation = folder / 'allocated-volume.json'
+        if allocation.exists():
+            volid = json.loads(allocation.read_text())['volid']
+            pve_storage(identifier, 'free', volid=volid)
+    (folder / 'allocated-volume.json').unlink(missing_ok=True)
+    journal.unlink()
+
+
+def project_pve_storage(identifier, node, size_mib, digest, storage):
+    size_mib = int(size_mib)
+    if not 256 <= size_mib <= 1048576:
+        raise ValueError('Data disk must be between 256 and 1048576 MiB')
+    with locked():
+        info = detail(identifier, node)
+        require_stopped(container_records(identifier))
+        recover_storage_transaction(identifier)
+        assert_configuration_digest(identifier, node, digest)
+        check_protection(info, "can't change DCT data disk")
+        if any(snapshot_root(identifier).glob('*/manifest.json')):
+            raise ValueError('Remove snapshots before resizing or moving the data disk')
+        folder = ROOT / identifier
+        before = storage_config(identifier)
+        source_storage = before.get('storage', '')
+        storage = storage or source_storage
+        if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*', storage):
+            raise ValueError('Select a PVE storage')
+        journal = folder / 'storage-transaction.json'
+        if before.get('volid') and storage == source_storage:
+            if size_mib <= before['size_mib']:
+                raise ValueError('Disks may only grow')
+            write_json(journal, {'operation': 'grow', 'before': before})
+            pve_storage(identifier, 'resize', volid=before['volid'], size_mib=size_mib)
+            recover_storage_transaction(identifier)
+            return
+        if before and size_mib < before['size_mib']:
+            raise ValueError('Disks cannot shrink during a move')
+        runtime = folder / 'compose.runtime.json'
+        original = runtime.read_text()
+        config = json.loads(original)
+        if before:
+            storage_mount(identifier)
+            sources = {key: Path(value) for key, value in before['mapping'].items()}
+        else:
+            sources = {}
+            for service in config['services'].values():
+                for mount in service.get('volumes', []):
+                    if mount.get('read_only') or mount.get('type') == 'tmpfs':
+                        continue
+                    kind, source = mount.get('type'), mount.get('source', '')
+                    if kind == 'bind':
+                        path = Path(source)
+                        if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()) or path.resolve() == folder.resolve() or path.exists() and not path.is_dir():
+                            raise ValueError('Only private project data directories can be migrated')
+                    elif kind == 'volume':
+                        definition = config.get('volumes', {}).get(source, {})
+                        name = definition.get('name', 'bd-' + identifier + '_' + source)
+                        volume = json.loads(capture(['docker', 'volume', 'inspect', name]))[0]
+                        owned = {row['id'] for row in container_records(identifier)}
+                        users = set(capture(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'volume=' + name]).split())
+                        if definition.get('external') or definition.get('driver_opts') or volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier or users - owned:
+                            raise ValueError('External or shared volumes cannot be migrated')
+                        path = Path(volume['Mountpoint'])
+                    else:
+                        raise ValueError('Unsupported writable mount')
+                    sources[kind + ':' + source] = path
+        if not sources:
+            raise ValueError('No writable data directories or volumes')
+        mounted = json.loads(capture(['findmnt', '-J', '-l', '-o', 'TARGET']))['filesystems']
+        for source in sources.values():
+            if any(Path(item['target']).is_relative_to(source.resolve()) and Path(item['target']) != source.resolve() for item in mounted):
+                raise ValueError('Nested filesystems cannot be migrated')
+        needed = sum(int(capture(['du', '-sx', '-B1', str(path)]).split()[0]) for path in set(sources.values()) if path.exists())
+        if needed + 64 * 1048576 > size_mib * 1048576 * .9:
+            raise ValueError('Data disk is too small for existing data')
+        # Copy a mounted source into a private staging directory before switching mounts.
+        staging = folder / 'storage-transfer'
+        if staging.exists():
+            raise ValueError('An unfinished disk copy exists')
+        staging.mkdir(mode=0o700)
+        state = {'operation': 'copy', 'before': before, 'runtime': original}
+        write_json(journal, state)
+        try:
+            allocated = pve_storage(identifier, 'allocate', storage=storage, size_mib=size_mib)
+            state['target'] = allocated
+            write_json(journal, state)
+            device = Path(allocated['path'])
+            run(['mkfs.ext4', '-q', '-m', '0', str(device)])
+            options = 'nodev,nosuid' if device.is_block_device() else 'loop,nodev,nosuid'
+            run(['mount', '-o', options, str(device), str(staging)])
+            mapping = {}
+            for index, (key, source) in enumerate(sources.items()):
+                target = staging / ('data-' + str(index))
+                target.mkdir()
+                if source.exists():
+                    run(['cp', '-a', '--', str(source) + '/.', str(target)], timeout=86400)
+                mapping[key] = str(folder / 'storage-data' / target.name)
+            run(['umount', str(staging)])
+            storage_unmount(identifier)
+            allocated.pop('path', None)
+            allocated.update(vmid=info['vmid'], node=node, mapping=mapping, unused=before.get('unused', []) + ([before['volid']] if before.get('volid') else []))
+            write_json(folder / 'storage.json', allocated)
+            storage_mount(identifier)
+            # Existing runtime contains mapped source paths, so replace those explicitly.
+            for service in config['services'].values():
+                for mount in service.get('volumes', []):
+                    key = mount.get('type', '') + ':' + mount.get('source', '')
+                    if before:
+                        key = next((k for k, v in before['mapping'].items() if v == mount.get('source')), key)
+                    if key in mapping:
+                        mount.update(type='bind', source=mapping[key])
+                        mount.pop('volume', None); mount.pop('bind', None)
+            write_json(runtime, config)
+            state.update(committed=True, reconcile=config != json.loads(original))
+            write_json(journal, state)
+            storage_unit(identifier, allocated)
+            if state['reconcile']:
+                (folder / 'snapshot-restored.json').unlink(missing_ok=True)
+                write_json(folder / 'network-reconcile.json', {'storage': True})
+                reconcile_network_runtime(info)
+            (folder / 'allocated-volume.json').unlink(missing_ok=True)
+            journal.unlink()
+        except Exception:
+            if os.path.ismount(staging):
+                run(['umount', str(staging)])
+            recover_storage_transaction(identifier)
+            raise
+        finally:
+            if staging.exists() and not os.path.ismount(staging):
+                staging.rmdir()
+        print('Data disk ready: ' + allocated['volid'] + '. Previous disk and original sources retained.')
+
 def storage_mount(identifier):
     folder = ROOT / project_id(identifier)
     config = storage_config(identifier)
     if not config:
         return
     mountpoint = folder / 'storage-data'
-    image = folder / 'storage.ext4'
+    image = storage_device(identifier, config)
     # Mount by exact owned image; fail closed if an unrelated mount occupies the path.
     if os.path.ismount(mountpoint):
         device = capture(['findmnt', '-n', '-M', str(mountpoint), '-o', 'SOURCE']).strip()
-        backing = capture(['losetup', '-n', '-O', 'BACK-FILE', device]).strip()
+        backing = device if image.is_block_device() else capture(['losetup', '-n', '-O', 'BACK-FILE', device]).strip()
         if Path(backing).resolve() != image.resolve():
             raise ValueError('Project storage mount is occupied by another filesystem')
         return
     mountpoint.mkdir(mode=0o700, exist_ok=True)
-    run(['mount', '-o', 'loop,nodev,nosuid', str(image), str(mountpoint)])
+    options = 'nodev,nosuid' if image.is_block_device() else 'loop,nodev,nosuid'
+    run(['mount', '-o', options, str(image), str(mountpoint)])
 
 
 def apply_storage(config, identifier):
@@ -592,7 +818,8 @@ def apply_storage(config, identifier):
 
 def project_storage_status(identifier):
     settings = storage_config(identifier)
-    result = {'limit_mib': settings.get('size_mib', 0), 'rootfs': rootfs_quota_support(), 'mounted': False}
+    result = {'limit_mib': settings.get('size_mib', 0), 'rootfs': rootfs_quota_support(), 'mounted': False, 'volid': settings.get('volid', ''), 'storage': settings.get('storage', ''),
+              'native_snapshots': settings.get('native_snapshots', False), 'unused': settings.get('unused', [])}
     if settings:
         point = ROOT / identifier / 'storage-data'
         result['mounted'] = os.path.ismount(point)
@@ -602,7 +829,34 @@ def project_storage_status(identifier):
     return result
 
 
-def project_storage_limit(identifier, node, size_mib, digest=None):
+
+def purge_retained_storage(identifier):
+    """Explicit root maintenance after guest deletion; never called by DELETE DCT."""
+    project_id(identifier)
+    with locked():
+        if (METADATA / (identifier + '.json')).exists():
+            raise ValueError('Remove the DCT before permanently freeing retained disks')
+        if any(snapshot_root(identifier).glob('*/manifest.json')):
+            raise ValueError('Remove snapshots before freeing retained disks')
+        settings = storage_config(identifier)
+        if not settings.get('volid'):
+            raise ValueError('No retained PVE disks')
+        storage_unmount(identifier)
+        for volid in settings.get('unused', []) + [settings['volid']]:
+            pve_storage(identifier, 'free', volid=volid)
+            if volid in settings.get('unused', []):
+                settings['unused'].remove(volid)
+                write_json(ROOT / identifier / 'storage.json', settings)
+        unit = capture(['systemd-escape', '--path', '--suffix=mount', str(ROOT / identifier / 'storage-data')]).strip()
+        (Path('/etc/systemd/system') / unit).unlink(missing_ok=True)
+        run(['systemctl', 'daemon-reload'], capture_output=True)
+        (ROOT / identifier / 'storage.json').unlink()
+        release_id(identifier)
+        print('Retained PVE disks permanently removed. Original migration sources remain.')
+
+def project_storage_limit(identifier, node, size_mib, digest=None, storage=''):
+    if storage or storage_config(identifier).get('volid'):
+        return project_pve_storage(identifier, node, size_mib, digest, storage)
     size_mib = int(size_mib)
     if not 256 <= size_mib <= 1048576:
         raise ValueError('Project data disk must be between 256 and 1048576 MiB')
@@ -1372,8 +1626,11 @@ def project_network(identifier, node, values, digest=None):
         requested = {key: data[key] for key in NETWORK_KEYS}
         if requested == before:
             return
-        if any(requested[key] != before[key] for key in NETWORK_KEYS if key != 'mtu') and any(snapshot_root(identifier).glob('*/manifest.json')):
-            raise ValueError('Remove snapshots before changing the address, bridge or MAC; snapshot network restoration is not supported')
+        if any(requested[key] != before[key] for key in NETWORK_KEYS if key != 'mtu'):
+            for manifest in snapshot_root(identifier).glob('*/manifest.json'):
+                captured = manifest.parent / 'configuration' / 'metadata.json'
+                if not captured.exists() or not all(key in json.loads(captured.read_text()) for key in NETWORK_KEYS):
+                    raise ValueError('Remove snapshots without a restorable network configuration before changing the endpoint')
         _, subnets = bridge_addresses(data['bridge'])
         if data['ipv4mode'] == 'static':
             address = ipaddress.IPv4Interface(data['cidr'])
@@ -1499,6 +1756,9 @@ def configuration_digest(directory, deployment, protection=False, tags='', lifec
 
 
 def assert_configuration_digest(identifier, node, expected):
+    journal = ROOT / identifier / 'snapshot-transaction.json'
+    if journal.exists() and json.loads(journal.read_text()).get('action') == 'restore':
+        raise ValueError('Retry the interrupted snapshot rollback before changing configuration')
     if expected is None or expected == '':
         return  # Like PVE, older API clients may omit optimistic concurrency checks.
     if not re.fullmatch(r'[0-9a-f]{64}', expected):
@@ -1721,6 +1981,9 @@ def refresh(node):
         recover_network_transaction(info['id'], node)
         info.update(json.loads((METADATA / (info['id'] + '.json')).read_text()))
         try:
+            journal = ROOT / info['id'] / 'snapshot-transaction.json'
+            if journal.exists() and json.loads(journal.read_text()).get('action') == 'create':
+                recover_snapshot_transaction(info['id'])
             sync_dhcp(info)
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             # One broken lease must not freeze status refresh for every guest on the node.
@@ -1790,6 +2053,8 @@ def action(identifier, node, operation, timeout=60):
     with locked():
         recover_network_transaction(identifier, node)
         info = detail(identifier, node)
+        recover_storage_transaction(identifier)
+        recover_snapshot_transaction(identifier)
         directory = ROOT / identifier
         commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['restart'], 'delete': ['down']}
         if operation not in commands and operation not in ('shutdown', 'reboot', 'force-stop'):
@@ -1836,6 +2101,16 @@ def action(identifier, node, operation, timeout=60):
         if operation == 'delete':
             # Reserve the metadata until the owned alias is successfully released.
             remove_network(info)
+            if storage_config(identifier):
+                storage_unmount(identifier)
+                unit = capture(['systemd-escape', '--path', '--suffix=mount', str(directory / 'storage-data')]).strip()
+                run(['systemctl', 'disable', unit], check=False, capture_output=True)
+            if storage_config(identifier).get('volid'):
+                reservation = METADATA / 'ids' / (str(info['vmid']) + '.json')
+                owner = json.loads(reservation.read_text())
+                if owner['id'] != identifier:
+                    raise ValueError('DCT guest ID ownership changed')
+                write_json(reservation, dict(owner, name=info['name']))
             (METADATA / (identifier + '.json')).unlink()
             release_id(identifier)
             print(f'Project removed. Volumes and bind-mount data are retained at {directory}.')
@@ -1896,8 +2171,12 @@ def update(identifier, node, data, digest=None):
 
 def restore(node):
     with locked():
+        for info in summaries():
+            if info['node'] == node and info.get('id'):
+                recover_storage_transaction(info['id'])
         for path in ROOT.glob('*/storage.json'):
-            storage_mount(path.parent.name)
+            if (METADATA / (path.parent.name + '.json')).exists():
+                storage_mount(path.parent.name)
         for info in summaries():
             if info['node'] == node:
                 if info.get('id') and recover_network_transaction(info['id'], node):
@@ -2015,6 +2294,7 @@ def project_tags(identifier, node, tags=None):
 
 def service_action(identifier, node, service, verb, timeout=60):
     with locked():
+        recover_snapshot_transaction(identifier)
         recover_network_transaction(identifier, node)
         info = detail(identifier, node)
         directory = ROOT / identifier
@@ -2369,6 +2649,82 @@ def snapshot_check(identifier, name):
     return folder, manifest
 
 
+
+def recover_snapshot_transaction(identifier, restoring=False):
+    project = ROOT / identifier
+    journal = project / 'snapshot-transaction.json'
+    if not journal.exists():
+        return
+    state = json.loads(journal.read_text())
+    if state['action'] == 'restore':
+        if not restoring:
+            raise ValueError('Interrupted rollback: retry restoration of snapshot ' + state['name'])
+        return
+    owned = {row['id']: row for row in container_records(identifier)}
+    for cid in state.get('active', []):
+        if cid in owned and owned[cid]['state'] == 'paused':
+            run(['docker', 'unpause', cid], capture_output=True)
+    complete = (snapshot_root(identifier) / state['name'] / 'manifest.json').exists()
+    if complete and state.get('tree_state') is not None:
+        tree = snapshot_tree_state(identifier)
+        tree.setdefault('parents', {}).setdefault(state['name'], state['tree_state'].get('current', ''))
+        if not state.get('recovery'):
+            tree['current'] = state['name']
+        snapshot_tree_write(identifier, tree)
+    if not complete and state.get('native'):
+        pve_storage(identifier, 'snapshot-delete', volid=state['native']['volid'], name=state['name'])
+    temporary = state.get('temporary')
+    if temporary:
+        path = Path(temporary)
+        if path.parent != snapshot_root(identifier) or not path.name.startswith('.creating-') or path.is_symlink():
+            raise ValueError('Invalid snapshot recovery path')
+        if path.exists():
+            shutil.rmtree(path)
+    for tag in state.get('tags', []):
+        if not re.fullmatch('betterdocker-snapshot/' + identifier + ':[0-9a-f]{32}', tag):
+            raise ValueError('Invalid snapshot recovery image')
+        run(['docker', 'image', 'rm', tag], check=False, capture_output=True)
+    journal.unlink()
+
+
+def snapshot_restore_network(identifier, node, configs, current, check_only=False):
+    saved = json.loads((configs / 'metadata.json').read_text())
+    if not all(key in saved for key in NETWORK_KEYS):
+        return dict(saved, **{key: current[key] for key in ('id', 'vmid', 'node', 'address') if key in current})
+    request = json.loads((configs / 'request.json').read_text())
+    data = validate(dict(request, **{key: saved[key] for key in NETWORK_KEYS}, address=saved.get('cidr', '')))
+    candidate = dict(saved, id=identifier, vmid=current['vmid'], node=node, interface=current['interface'], status='stopped')
+    changed = any(candidate.get(key) != current.get(key) for key in NETWORK_KEYS)
+    if changed:
+        _, subnets = bridge_addresses(data['bridge'])
+        if data['ipv4mode'] == 'static':
+            address = ipaddress.IPv4Interface(data['cidr'])
+            if not any(address.ip in subnet and address.network.prefixlen == subnet.prefixlen for subnet in subnets):
+                raise ValueError('Snapshot address no longer matches the bridge subnet')
+            check_address(data['address'], data['bridge'], identifier, current.get('interface'), probe=True)
+        if any(row.get('id') != identifier and row.get('hwaddr') == data['hwaddr'] for row in summaries()):
+            raise ValueError('Snapshot MAC address is already in use')
+        bridge = json.loads(capture(['ip', '-j', 'link', 'show', 'dev', data['bridge']]))[0]
+        if data['mtu'] and data['mtu'] > bridge['mtu']:
+            raise ValueError('Snapshot MTU exceeds the bridge MTU')
+    if check_only:
+        return candidate
+    if changed:
+        project = ROOT / identifier
+        journal = project / 'network-transaction.json'
+        if not journal.exists():
+            write_json(journal, {'metadata': {key: value for key, value in current.items() if key not in ('deployment', 'digest')},
+                'files': {name: (project / name).read_text() if (project / name).exists() else None
+                          for name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf')}})
+        remove_network(current)
+        for name in ('dhcp-address.json', 'dhclient.leases'):
+            (project / name).unlink(missing_ok=True)
+        write_json(METADATA / (identifier + '.json'), candidate)
+        ensure_address(candidate)
+    elif candidate.get('ipv4mode') == 'dhcp':
+        candidate['address'] = current['address']
+    return candidate
+
 def snapshot_capture(identifier, node, name, description='', recovery=False, quiesced=False, resume=None):
     snapshot_name(name)
     if len(description) > 4096:
@@ -2404,7 +2760,20 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
         raise ValueError('Snapshot name already exists')
     temporary = Path(tempfile.mkdtemp(prefix='.creating-', dir=root))
     tags = []
+    journal = ROOT / identifier / 'snapshot-transaction.json'
+    transaction = json.loads(journal.read_text()) if journal.exists() else {'action': 'create', 'name': name, 'active': []}
+    transaction.update(temporary=str(temporary), tree_state=tree_state, recovery=recovery)
+    write_json(journal, transaction)
+    native = None
     try:
+        settings = storage_config(identifier)
+        if settings.get('native_snapshots'):
+            native = {'volid': settings['volid'], 'name': name}
+            transaction['native'] = native
+            write_json(journal, transaction)
+            pve_storage(identifier, 'snapshot', **native)
+            point = ROOT / identifier / 'storage-data'
+            mounts = [entry for entry in mounts if Path(entry['source']) != point]
         files = temporary / 'configuration'
         files.mkdir(mode=0o700)
         for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'storage.json', 'notes.txt'):
@@ -2420,8 +2789,10 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             run(['cp', '-a', '--reflink=auto', '--', entry['source'], str(temporary / entry['copy'])], timeout=86400)
         for index, container in enumerate(containers):
             tag = 'betterdocker-snapshot/' + identifier + ':' + uuid.uuid4().hex
-            run(['docker', 'commit', '--pause=false', container['Id'], tag], timeout=86400, capture_output=True)
             tags.append(tag)
+            transaction['tags'] = tags
+            write_json(journal, transaction)
+            run(['docker', 'commit', '--pause=false', container['Id'], tag], timeout=86400, capture_output=True)
             container['SnapshotImage'] = capture(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag]).strip()
             container['SnapshotTag'] = tag
         if resume:
@@ -2435,7 +2806,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
         size = sum(path.stat().st_size for path in temporary.rglob('*') if path.is_file() and not path.is_symlink())
         write_json(temporary / 'manifest.json', {'version': 1, 'id': identifier, 'name': name,
                    'created': int(time.time()), 'description': description, 'recovery': recovery,
-                   'mounts': mounts, 'size': size})
+                   'mounts': mounts, 'size': size, 'native_storage': native})
         write_json(temporary / 'checksums.json', snapshot_digest(temporary))
         os.replace(temporary, final)
         state = tree_state
@@ -2448,6 +2819,9 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             shutil.rmtree(temporary)
         for tag in tags:
             run(['docker', 'image', 'rm', tag], check=False, capture_output=True)
+        if native and not final.exists():
+            pve_storage(identifier, 'snapshot-delete', **native)
+        journal.unlink(missing_ok=True)
     print('Snapshot created: ' + name)
     return name
 
@@ -2483,7 +2857,15 @@ def snapshot_apply(identifier, node, name, check_only=False):
     saved = json.loads((folder / 'containers.json').read_text())
     configs = folder / 'configuration'
     before_storage = storage_config(identifier)
+    native = manifest.get('native_storage')
     saved_storage = json.loads((configs / 'storage.json').read_text()) if (configs / 'storage.json').exists() else {}
+    if saved_storage.get('volid') != before_storage.get('volid'):
+        raise ValueError('Snapshot data disk differs from the current disk')
+    if native:
+        if native['volid'] != before_storage.get('volid') or native['name'] != name:
+            raise ValueError('Snapshot disk ownership changed')
+        pve_storage(identifier, 'rollback-check', **native)
+    snapshot_restore_network(identifier, node, configs, current, check_only=True)
     mounted_targets = json.loads(capture(['findmnt', '-J', '-l', '-o', 'TARGET']))['filesystems']
     for entry in manifest['mounts']:
         source = Path(entry['source'])
@@ -2513,7 +2895,18 @@ def snapshot_apply(identifier, node, name, check_only=False):
     if existing:
         run(['docker', 'rm', *[row['Id'] for row in existing]], timeout=1800, capture_output=True)
     project = ROOT / identifier
+    metadata = snapshot_restore_network(identifier, node, configs, current)
     replaced_disk = None
+    if native:
+        storage_mount(identifier)
+        storage_unmount(identifier)
+        pve_storage(identifier, 'rollback', **native)
+        write_json(project / 'storage.json', saved_storage)
+        storage_mount(identifier)
+        storage_unit(identifier, saved_storage)
+    elif before_storage.get('volid'):
+        write_json(project / 'storage.json', saved_storage)
+        storage_mount(identifier)
     if before_storage and (not saved_storage or before_storage['size_mib'] != saved_storage['size_mib']):
         storage_mount(identifier)  # verifies that the loop device is owned by this DCT
         unit = capture(['systemd-escape', '--path', '--suffix=mount', str(project / 'storage-data')]).strip()
@@ -2532,7 +2925,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
             (project / 'storage-data').rmdir()
             (Path('/etc/systemd/system') / unit).unlink(missing_ok=True)
             run(['systemctl', 'daemon-reload'], capture_output=True)
-    if saved_storage:
+    if saved_storage and not saved_storage.get('volid'):
         if not before_storage:
             image = project / 'storage.ext4'
             if image.exists():
@@ -2566,9 +2959,6 @@ def snapshot_apply(identifier, node, name, check_only=False):
             shutil.copy2(source, target)
         else:
             target.unlink(missing_ok=True)
-    metadata = json.loads((configs / 'metadata.json').read_text())
-    # Identity and the current DHCP lease belong to the existing DCT, not to a new guest.
-    metadata.update({key: current[key] for key in ('id', 'vmid', 'node', 'address') if key in current})
     metadata.update(status='stopped')
     metadata.pop('network_resume', None)
     write_json(METADATA / (identifier + '.json'), metadata)
@@ -2609,6 +2999,9 @@ def snapshot_apply(identifier, node, name, check_only=False):
     state = snapshot_tree_state(identifier)
     state['current'] = name
     snapshot_tree_write(identifier, state)
+    for filename in ('network-transaction.json', 'network-reconcile.json', 'network-resume.json'):
+        (project / filename).unlink(missing_ok=True)
+    (project / 'snapshot-transaction.json').unlink(missing_ok=True)
     refresh(node)
     if replaced_disk:
         replaced_disk.unlink()
@@ -2618,13 +3011,27 @@ def project_snapshot(identifier, node, verb, name, description=''):
     snapshot_name(name)
     with locked():
         detail(identifier, node)
+        recover_storage_transaction(identifier)
+        recover_snapshot_transaction(identifier, restoring=verb == 'restore')
+        if verb == 'restore':
+            recover_network_transaction(identifier, node)
+        journal = ROOT / identifier / 'snapshot-transaction.json'
+        if journal.exists() and json.loads(journal.read_text()).get('action') == 'restore' and json.loads(journal.read_text())['name'] != name:
+            raise ValueError('Retry the interrupted rollback using its original snapshot')
         if verb == 'create':
-            with snapshot_quiesce(identifier) as resume:
-                snapshot_capture(identifier, node, name, description, quiesced=True, resume=resume)
+            write_json(journal, {'action': 'create', 'name': name, 'active': [row['id'] for row in container_records(identifier) if row['state'] == 'running']})
+            try:
+                with snapshot_quiesce(identifier) as resume:
+                    snapshot_capture(identifier, node, name, description, quiesced=True, resume=resume)
+            finally:
+                recover_snapshot_transaction(identifier)
         elif verb == 'delete':
             folder = snapshot_root(identifier) / name
             if folder.is_symlink() or not (folder / 'manifest.json').exists():
                 raise ValueError('Snapshot does not exist')
+            manifest = json.loads((folder / 'manifest.json').read_text())
+            if manifest.get('native_storage'):
+                pve_storage(identifier, 'snapshot-delete', **manifest['native_storage'])
             state = snapshot_tree_state(identifier)
             parent = state.get('parents', {}).get(name, '')
             state['parents'] = {child: parent if ancestor == name else ancestor for child, ancestor in state.get('parents', {}).items() if child != name}
@@ -2644,6 +3051,7 @@ def project_snapshot(identifier, node, verb, name, description=''):
             active = [row['id'] for row in records if row['state'] in ('running', 'paused')]
             if active:
                 run(['docker', 'stop', '--time', '0', *active], timeout=1800, capture_output=True)
+            write_json(journal, {'action': 'restore', 'name': name})
             snapshot_apply(identifier, node, name)
             print('Snapshot restored; DCT remains stopped.')
         else:
@@ -2671,7 +3079,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['network', 'network-config', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['network', 'network-config', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -2766,6 +3174,11 @@ def main():
     elif args.operation == 'snapshot':
         with operation(values[0], 'snapshot-' + values[2]):
             project_snapshot(*values)
+    elif args.operation == 'storage-config':
+        detail(*values)
+        print(json.dumps(storage_config(values[0])))
+    elif args.operation == 'purge-retained-storage':
+        purge_retained_storage(*values)
     elif args.operation == 'storage-limit':
         with operation(values[0], 'settings'):
             project_storage_limit(*values)

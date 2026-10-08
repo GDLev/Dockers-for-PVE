@@ -242,6 +242,57 @@
     });
 
 
+    Ext.define('PVE.betterdocker.StorageVolumes', {
+        extend: 'Ext.grid.GridPanel', alias: 'widget.pveBetterDockerStorageVolumes',
+        onlineHelp: 'chapter_storage',
+        initComponent: function () {
+            const me = this, node = me.pveSelNode.data.node, storage = me.pveSelNode.data.storage;
+            me.store = Ext.create('Ext.data.Store', {
+                fields: ['volid', 'vmid', 'dct_name', 'dct_status', 'format', 'size'],
+                proxy: { type: 'proxmox', url: '/api2/json/nodes/' + encodeURIComponent(node) + '/storage/' + encodeURIComponent(storage) + '/content',
+                    extraParams: { dct: 1 } },
+                sorters: [{ property: 'vmid', direction: 'ASC' }, { property: 'volid', direction: 'ASC' }],
+            });
+            me.columns = [
+                { text: gettext('Name'), dataIndex: 'volid', flex: 1, renderer: Ext.htmlEncode },
+                { text: translate('DCT ID'), dataIndex: 'vmid', width: 80 },
+                { text: translate('Project name'), dataIndex: 'dct_name', width: 170, renderer: Ext.htmlEncode },
+                { text: gettext('Status'), dataIndex: 'dct_status', width: 100,
+                    renderer: value => translate({ 'in-use': 'In use', unused: 'Unused', retained: 'Retained' }[value] || value) },
+                { text: gettext('Format'), dataIndex: 'format', width: 80 },
+                { text: gettext('Size'), dataIndex: 'size', width: 100, renderer: Proxmox.Utils.format_size },
+            ];
+            me.tbar = [{ text: gettext('Reload'), iconCls: 'fa fa-refresh', handler: () => me.store.load() }];
+            me.callParent();
+            Proxmox.Utils.monStoreErrors(me, me.store);
+            me.on('activate', () => me.store.load());
+        },
+    });
+    if (PVE.storage && PVE.storage.ImageView) {
+        const imageInit = PVE.storage.ImageView.prototype.initComponent;
+        Ext.override(PVE.storage.ImageView, {
+            initComponent: function () {
+                imageInit.apply(this, arguments);
+                this.store.getProxy().setExtraParam('dct', 0);
+            },
+        });
+    }
+    if (PVE.storage && PVE.storage.Browser) {
+        const configInit = PVE.panel.Config.prototype.initComponent;
+        Ext.override(PVE.panel.Config, {
+            initComponent: function () {
+                if (this.pveSelNode?.data.type === 'storage' && Array.isArray(this.items)) {
+                    const index = this.items.findIndex(item => item.itemId === 'contentRootdir');
+                    if (index >= 0) {
+                        this.items.splice(index + 1, 0, { title: translate('Docker Volumes'), xtype: 'pveBetterDockerStorageVolumes',
+                            iconCls: 'fa bd-docker-icon', itemId: 'contentDocker' });
+                    }
+                }
+                configInit.apply(this, arguments);
+            },
+        });
+    }
+
     Ext.define('PVE.betterdocker.CodeArea', {
         extend: 'Ext.form.field.TextArea', alias: 'widget.pveBetterDockerCodeArea', fieldCls: 'bd-source',
         initComponent: function () {
@@ -510,9 +561,12 @@
             me.on('afterrender', function () {
                 const win = me.up('window');
                 const power = win?.nodename && ['startall', 'stopall'].includes(win.action);
-                me.mon(me.getStore(), 'load', (store, records) => {
+                const filterGuests = (store, records) => {
                     if (!power) { store.remove(records.filter(record => record.get('type') === 'docker')); }
-                });
+                };
+                const store = me.getStore();
+                me.mon(store, 'load', filterGuests);
+                filterGuests(store, store.getRange());
                 if (power) {
                     const type = win.down('#typefilter');
                     if (type) { type.getStore().add({ [type.valueField]: 'docker', [type.displayField]: 'DCT' }); }
@@ -925,7 +979,7 @@
             const rowEditable = (key, group) => {
                 if (key === 'Settings source') { return false; }
                 if (key === 'Container disk limit') { return editable() && !current?.protection && Boolean(current?.storage?.rootfs?.supported); }
-                if (key === 'Project data disk') { return editable() && (!current?.protection || Boolean(current?.storage?.limit_mib)); }
+                if (key === 'Project data disk') { return editable() && !current?.protection && !current?.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state)); }
                 const scope = { Memory: 'memory', Swap: 'memory', 'CPU limit': 'cpu', 'CPU units': 'cpu',
                     'PID limit': 'options', 'DNS servers': 'network', 'Search domains': 'network',
                     'Restart policy': 'options', Protection: 'options', 'Start at boot': 'options', 'Start/Shutdown order': 'options' }[key];
@@ -995,7 +1049,7 @@
                     const restore = me.down('#restoreCompose'); if (restore) { restore.setDisabled(!active.overridden || !editable() || locked()); }
                     rows('resourceGrid', ['Memory', 'Swap', 'CPU limit', 'CPU units', 'PID limit', 'Container disk limit']
                         .map(key => pendingRow(key, values, active.pending)).concat([
-                        { key: 'Project data disk', value: current.storage?.limit_mib ? current.storage.limit_mib + ' MiB' + (current.storage.mounted ? ' (' + Proxmox.Utils.format_size(current.storage.used) + ' / ' + Proxmox.Utils.format_size(current.storage.available) + ' ' + translate('Available') + ')' : ' — ' + translate('Unavailable')) : 'Unlimited' },
+                        { key: 'Project data disk', value: current.storage?.limit_mib ? (current.storage.volid ? current.storage.volid + ', ' : '') + current.storage.limit_mib + ' MiB' + (current.storage.mounted ? ' (' + Proxmox.Utils.format_size(current.storage.used) + ' / ' + Proxmox.Utils.format_size(current.storage.available) + ' ' + translate('Available') + ')' : ' — ' + translate('Unavailable')) : 'Unlimited' },
                         { key: 'Settings source', value: active.overridden ? 'GUI override' : 'Compose' },
                     ]).concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
                     rows('dnsGrid', ['DNS servers', 'Search domains'].map(key => pendingRow(key, values, active.pending)));
@@ -1046,8 +1100,16 @@
                 const win = Ext.create('Proxmox.window.Edit', {
                     title: translate('Edit data disk'), url: url + '/storage-limit', method: 'PUT', width: 400,
                     onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
-                    items: [{ xtype: 'inputpanel', items: [field('size_mib', 'Data disk (MiB)', existing || 1024,
-                        { xtype: 'numberfield', minValue: existing ? existing + 1 : 256, maxValue: 1048576, allowDecimals: false, allowBlank: false })] }],
+                    showTaskViewer: true,
+                    items: [{ xtype: 'inputpanel', items: [
+                        { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Storage'), nodename: info.node,
+                            storageContent: 'rootdir', value: current.storage?.storage || undefined, allowBlank: Boolean(existing),
+                            listeners: { afterrender: selector => {
+                                selector.getStore().addFilter(record => ['dir', 'lvmthin'].includes(record.get('type')) && !record.get('shared'));
+                            } } },
+                        field('size_mib', 'Data disk (MiB)', existing || 1024,
+                            { xtype: 'numberfield', minValue: existing || 256, maxValue: 1048576, allowDecimals: false, allowBlank: false }),
+                    ] }],
                     submit: function () {
                         const form = this.formPanel.getForm();
                         if (!form.isValid()) { return; }

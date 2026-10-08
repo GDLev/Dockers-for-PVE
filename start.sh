@@ -53,6 +53,7 @@ cp -a /usr/share/perl5/PVE/API2/Nodes.pm "$BACKUP_DIR/Nodes.pm"
 cp -a /usr/share/pve-manager/index.html.tpl "$BACKUP_DIR/index.html.tpl"
 cp -a /usr/share/perl5/PVE/API2/Cluster.pm "$BACKUP_DIR/Cluster.pm"
 cp -a /usr/share/perl5/PVE/Cluster.pm "$BACKUP_DIR/Cluster-lib.pm"
+cp -a /usr/share/perl5/PVE/VZDump.pm "$BACKUP_DIR/VZDump.pm"
 TARGETS=(
     /usr/local/lib/betterdocker/provision.py
     /usr/local/lib/betterdocker/docker-install.sh
@@ -74,6 +75,7 @@ TARGETS=(
     /etc/systemd/system/pve-guests.service.d/betterdocker.conf
     /etc/apparmor.d/local/betterdocker-dhclient
     /etc/apparmor.d/local/usr.sbin.dhclient
+    /usr/local/lib/betterdocker/storage.pl
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -86,6 +88,7 @@ rollback() {
     cp -a "$BACKUP_DIR/index.html.tpl" /usr/share/pve-manager/index.html.tpl
     cp -a "$BACKUP_DIR/Cluster.pm" /usr/share/perl5/PVE/API2/Cluster.pm
     cp -a "$BACKUP_DIR/Cluster-lib.pm" /usr/share/perl5/PVE/Cluster.pm
+    cp -a "$BACKUP_DIR/VZDump.pm" /usr/share/perl5/PVE/VZDump.pm
     for index in "${!TARGETS[@]}"; do
         if [[ -e "$BACKUP_DIR/addon-$index" ]]; then
             cp -a "$BACKUP_DIR/addon-$index" "${TARGETS[$index]}"
@@ -106,6 +109,7 @@ rollback() {
 trap rollback ERR
 install -d -m 0755 /usr/local/lib/betterdocker
 install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
+install -m 0755 "$PROJECT_DIR/scripts/storage.pl" "${TARGETS[20]}"
 install -m 0755 "$PROJECT_DIR/scripts/provision.py" "${TARGETS[0]}"
 install -m 0755 "$PROJECT_DIR/scripts/docker-install.sh" "${TARGETS[1]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/API2/BetterDocker.pm" "${TARGETS[2]}"

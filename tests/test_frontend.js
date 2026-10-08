@@ -13,8 +13,10 @@ const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => in
 const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; }, selectById(id) { return id; } } };
 const nodeMenuClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const nodeConfigClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
+const storageBrowserClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
+const storageImageClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const context = { window: null, console,
-    PVE: { node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {} } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
+    PVE: { storage: { Browser: storageBrowserClass, ImageView: storageImageClass }, node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {}, initComponent() { this.nativeInitialized = true; } } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { format_boolean: value => value ? 'Yes' : 'No', override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
@@ -877,12 +879,13 @@ lifecycleRows.listeners.itemdblclick(null, { get: () => 'Start at boot' });
 assert.equal(startupEditors[1].options.items[0].name, 'onboot');
 console.log('Native startup editor and Start at boot require Options privileges');
 
-for (const action of ['startall', 'stopall', 'migrateall', 'suspendall']) {
-    let rendered, loaded, removed;
+for (const action of ['startall', 'stopall', 'migrateall', 'suspendall', 'backup']) {
+    let rendered, loaded, removed, initialRemoved;
     const window = { action, nodename: 'pve', down() { return null; } };
     const selector = { columnsDeclaration: [{ dataIndex: 'type', renderer: value => 'native-' + value }],
         callParent() {}, on(event, callback) { rendered = callback; }, up() { return window; },
-        getStore() { return {}; }, mon(store, event, callback) { loaded = callback; } };
+        getStore() { return { getRange: () => [{ get: () => 'docker' }, { get: () => 'lxc' }],
+            remove(records) { initialRemoved = records; } }; }, mon(store, event, callback) { loaded = callback; } };
     definitions['PVE.betterdocker.VMSelectorIntegration'].initComponent.call(selector);
     rendered();
     const docker = { get() { return 'docker'; } }, lxc = { get() { return 'lxc'; } };
@@ -890,6 +893,8 @@ for (const action of ['startall', 'stopall', 'migrateall', 'suspendall']) {
     assert.equal(selector.columnsDeclaration[0].renderer('docker'), 'DCT');
     assert.equal(selector.columnsDeclaration[0].renderer('lxc'), 'native-lxc');
     assert.equal(removed?.length || 0, ['startall', 'stopall'].includes(action) ? 0 : 1);
+    assert.equal(initialRemoved?.length || 0, ['startall', 'stopall'].includes(action) ? 0 : 1,
+        'already loaded DCTs must be filtered before the next load');
 }
 console.log('Native bulk power selector includes DCT and excludes it from unsupported operations');
 
@@ -908,3 +913,23 @@ for (const name of ['ip6', 'tag', 'rate', 'firewall', 'gw']) assert(!networkFiel
 assert.equal(definitions['PVE.betterdocker.NetworkEdit'].showTaskViewer, true);
 assert.equal(networkEditor.items[0].onGetValues({ ipv4mode: 'dhcp', mtu: '' }).cidr, '');
 console.log('Network editor uses native load/digest/task handling and supported fields only');
+
+const contentParams = {};
+const nativeImage = { store: { getProxy: () => ({ setExtraParam: (key, value) => { contentParams[key] = value; } }) } };
+overrides.get(storageImageClass).initComponent.call(nativeImage);
+assert(nativeImage.nativeInitialized);
+assert.equal(contentParams.dct, 0);
+
+const storageMenu = { pveSelNode: { data: { type: 'storage' } }, items: [{ itemId: 'contentRootdir' }, { itemId: 'permissions' }] };
+overrides.get(context.PVE.panel.Config).initComponent.call(storageMenu);
+assert(storageMenu.nativeInitialized);
+assert.equal(storageMenu.items[1].title, 'Docker Volumes');
+assert.equal(storageMenu.items[1].xtype, 'pveBetterDockerStorageVolumes');
+assert.equal(storageMenu.items[1].itemId, 'contentDocker');
+const otherMenu = { pveSelNode: { data: { type: 'storage' } }, items: [{ itemId: 'contentIso' }] };
+overrides.get(context.PVE.panel.Config).initComponent.call(otherMenu);
+assert.equal(otherMenu.items.length, 1);
+const guestMenu = { pveSelNode: { data: { type: 'docker' } }, items: [{ itemId: 'contentRootdir' }] };
+overrides.get(context.PVE.panel.Config).initComponent.call(guestMenu);
+assert.equal(guestMenu.items.length, 1);
+console.log('Storage categories separate Docker disks and are inserted before native menu initialization');

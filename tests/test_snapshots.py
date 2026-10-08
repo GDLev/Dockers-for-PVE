@@ -117,7 +117,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_restore_stops_running_guest_and_never_creates_another_snapshot(self):
         records = [{'id': 'one', 'state': 'running'}]
-        with patch.object(worker, 'locked'), patch.object(worker, 'detail'), patch.object(worker, 'container_records', return_value=records), patch.object(worker, 'snapshot_capture') as capture, patch.object(worker, 'snapshot_apply') as apply, patch.object(worker, 'run') as run:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(worker, 'ROOT', Path(temporary)), patch.object(worker, 'locked'), patch.object(worker, 'detail'), patch.object(worker, 'container_records', return_value=records), patch.object(worker, 'snapshot_capture') as capture, patch.object(worker, 'snapshot_apply') as apply, patch.object(worker, 'run') as run:
             worker.project_snapshot(ID, 'pve', 'restore', 'before')
             capture.assert_not_called()
             self.assertEqual(apply.call_count, 2)

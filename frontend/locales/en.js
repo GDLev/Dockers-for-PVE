@@ -4,6 +4,10 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Docker Volumes": "Docker Volumes",
+            "In use": "In use",
+            "Unused": "Unused",
+            "Retained": "Retained",
             "Start at boot": "Start at boot",
             "Start/Shutdown order": "Start/Shutdown order",
 

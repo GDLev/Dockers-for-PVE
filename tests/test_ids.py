@@ -56,3 +56,12 @@ eval { check_vmid_unused(101); };
 die 'missing readable collision error' unless $@ =~ /DCT 101 already exists/;
 '''
             subprocess.run(['perl', '-e', code], check=True)
+
+    def test_backup_patch_is_reversible_and_rejects_unknown_upstream(self):
+        source = 'sub get_included_guests {\n    my ($job) = @_;\n    return {};\n}\n'
+        patched = patcher.transform(source, 'vzdump')
+        self.assertIn("check_native_guest_ids('backup', $job->{vmid})", patched)
+        self.assertEqual(patcher.transform(patched, 'vzdump'), patched)
+        self.assertEqual(patcher.transform(patched, 'vzdump', remove=True), source)
+        with self.assertRaisesRegex(RuntimeError, 'Unsupported VZDump'):
+            patcher.transform('sub get_included_guests { return {}; }', 'vzdump')

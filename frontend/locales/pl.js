@@ -5,6 +5,10 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "Docker Volumes": "Wolumeny Docker",
+            "In use": "W użyciu",
+            "Unused": "Nieużywany",
+            "Retained": "Zachowany",
             "Start at boot": "Uruchom przy starcie",
             "Start/Shutdown order": "Kolejność uruchamiania/zamykania",
 

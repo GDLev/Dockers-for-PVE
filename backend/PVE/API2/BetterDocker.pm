@@ -10,6 +10,8 @@ use PVE::Tools;
 use PVE::Cluster;
 use PVE::AccessControl;
 use PVE::GuestHelpers;
+use PVE::API2::Storage::Content;
+use PVE::Storage;
 use PVE::JSONSchema;
 use POSIX qw(LONG_MAX);
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
@@ -124,6 +126,176 @@ sub capabilities {
         rollback => ($granted->('VM.Snapshot') || $granted->('VM.Snapshot.Rollback')) ? 1 : 0,
         power => $granted->('VM.PowerMgmt'),
         permissions => ($root_user || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['Permissions.Modify'], 1))) ? 1 : 0 };
+}
+
+
+sub storage_guest_owner {
+    my ($vmid) = @_;
+    return undef unless defined($vmid) && $vmid =~ /\A([1-9][0-9]{2,8})\z/;
+    $vmid = $1;
+    my $path = "/etc/pve/betterdocker/ids/$vmid.json";
+    return undef unless -f $path;
+    open(my $fh, '<', $path) or die "Cannot read DCT disk owner: $!\n";
+    local $/;
+    my $owner = decode_json(<$fh>);
+    die "Invalid DCT disk owner\n" unless $owner->{id} =~ /\A[0-9a-f]{32}\z/;
+    $owner->{vmid} = int($vmid);
+    return $owner;
+}
+
+sub check_storage_delete {
+    my ($cfg, $volid) = @_;
+    my ($type, undef, $vmid) = PVE::Storage::parse_volname($cfg, $volid);
+    return unless $type eq 'images' || $type eq 'rootdir';
+    if (storage_guest_owner($vmid)) {
+        die "Cannot remove a DCT disk from storage. Manage disks from the DCT; retained disks require explicit cleanup after DCT removal.\n";
+    }
+}
+
+sub hook_storage_content {
+    my $index = PVE::API2::Storage::Content->map_method_by_name('index');
+    my $native_index = $index->{code};
+    $index->{parameters}->{properties}->{dct} = {
+        type => 'boolean', optional => 1,
+        description => 'Filter Docker volumes (1) or exclude them (0). Omit for the complete native list.',
+    };
+    for my $key (qw(dct_name dct_status)) {
+        $index->{returns}->{items}->{properties}->{$key} = {type => 'string', optional => 1};
+    }
+    $index->{code} = sub {
+        my ($param) = @_;
+        my $filter = $param->{dct};
+        my $native_param = {%$param};
+        delete $native_param->{dct};
+        # Directory raw disks and LVM-thin disks can be reported under different content types.
+        delete $native_param->{content} if $filter;
+        my $items = $native_index->($native_param);
+        return $items unless defined($filter);
+        if ($filter) {
+            my $cfg = PVE::Storage::config();
+            my $extra = PVE::Storage::vdisk_list($cfg, $param->{storage}, $param->{vmid});
+            my %seen = map { $_->{volid} => 1 } @$items;
+            my $rpc = PVE::RPCEnvironment::get();
+            for my $disk (@{$extra->{$param->{storage}} // []}) {
+                next if $seen{$disk->{volid}} || !storage_guest_owner($disk->{vmid});
+                eval { PVE::Storage::check_volume_access($rpc, $rpc->get_user(), $cfg, undef, $disk->{volid}); };
+                next if $@;
+                $disk->{content} = 'images';
+                $disk->{vmid} = int($disk->{vmid});
+                $disk->{size} = int($disk->{size});
+                push @$items, $disk;
+            }
+        }
+        my @result;
+        my %guests = map { $_->{vmid} => $_ } grep { $_->{vmid} } @{summaries()};
+        my %disk_states;
+        for my $item (@$items) {
+            my $disk = ($item->{content} // '') =~ /\A(images|rootdir)\z/;
+            my $owner = $disk ? storage_guest_owner($item->{vmid}) : undef;
+            next if $filter ? !$owner : $owner;
+            if ($owner) {
+                my $guest = $guests{$item->{vmid}};
+                my $rpc = PVE::RPCEnvironment::get();
+                my $user = $rpc->get_user();
+                my $audit = $user eq 'root@pam' || $rpc->check($user, '/vms/' . $item->{vmid}, ['VM.Audit'], 1) ||
+                    $rpc->check($user, '/nodes/' . $owner->{node}, ['Sys.Console'], 1);
+                $item->{dct_name} = $audit ? ($guest ? $guest->{name} : $owner->{name} // '') : '';
+                $item->{dct_status} = 'retained';
+                if ($guest && $guest->{node} eq $param->{node}) {
+                    my $id = $owner->{id};
+                    if (!exists($disk_states{$id})) {
+                        my $path = "/var/lib/betterdocker/projects/$id/storage.json";
+                        my $state = {};
+                        if (-f $path) {
+                            open(my $fh, '<', $path) or die "Cannot read DCT disk state: $!\n";
+                            local $/;
+                            $state = decode_json(<$fh>);
+                        }
+                        $disk_states{$id} = $state;
+                    }
+                    $item->{dct_status} = ($disk_states{$id}->{volid} // '') eq $item->{volid} ? 'in-use' : 'unused';
+                }
+            }
+            $item->{vmid} = int($item->{vmid}) if defined($item->{vmid});
+            $item->{size} = int($item->{size}) if defined($item->{size});
+            $item->{used} = int($item->{used}) if defined($item->{used});
+            push @result, $item;
+        }
+        return \@result;
+    };
+    my $delete = PVE::API2::Storage::Content->map_method_by_name('delete');
+    my $native_delete = $delete->{code};
+    $delete->{code} = sub {
+        my ($param) = @_;
+        my $volid = $param->{volume};
+        $volid = $param->{storage} . ':' . $volid if $volid !~ /:/ && $param->{storage};
+        check_storage_delete(PVE::Storage::config(), $volid);
+        # Recheck inside the native worker immediately before freeing, closing the fork race.
+        my $native_free = \&PVE::Storage::vdisk_free;
+        no warnings 'redefine';
+        local *PVE::Storage::vdisk_free = sub {
+            check_storage_delete($_[0], $_[1]);
+            return $native_free->(@_);
+        };
+        return $native_delete->($param);
+    };
+}
+
+hook_storage_content();
+
+sub check_native_guest_ids {
+    my ($operation, @values) = @_;
+    for my $value (@values) {
+        next unless defined($value);
+        for my $vmid (split(/[\s,;]+/, $value)) {
+            if (storage_guest_owner($vmid)) {
+                die "DCT $vmid does not support native $operation. No changes were made.\n";
+            }
+        }
+    }
+}
+
+my %native_operation_guards;
+sub guard_native_method {
+    my ($class, $name, $operation, $ids) = @_;
+    return if $native_operation_guards{"$class:$name"};
+    my $method = $class->map_method_by_name($name)
+        or die "Unsupported PVE method $class/$name\n";
+    my $native = $method->{code};
+    $method->{code} = sub {
+        check_native_guest_ids($operation, $ids->($_[0]));
+        return $native->(@_);
+    };
+    $native_operation_guards{"$class:$name"} = 1;
+}
+
+sub hook_native_node_operations {
+    for my $class (qw(PVE::API2::LXC PVE::API2::Qemu)) {
+        guard_native_method($class, 'create_vm', 'VM/CT creation or restore', sub { $_[0]->{vmid} });
+        guard_native_method($class, 'clone_vm', 'cloning', sub { $_[0]->{vmid}, $_[0]->{newid} });
+        guard_native_method($class, 'template', 'templates', sub { $_[0]->{vmid} });
+        for my $name (qw(migrate_vm remote_migrate_vm)) {
+            guard_native_method($class, $name, 'migration', sub { $_[0]->{vmid} });
+        }
+    }
+}
+
+sub hook_native_cluster_operations {
+    for my $name (qw(create_job update_job)) {
+        guard_native_method('PVE::API2::Backup', $name, 'backup jobs', sub { $_[0]->{vmid} });
+    }
+    for my $name (qw(create update)) {
+        guard_native_method('PVE::API2::ReplicationConfig', $name, 'replication', sub {
+            return $1 if ($_[0]->{id} // '') =~ /\A([1-9][0-9]{2,8})-[0-9]+\z/;
+            return ();
+        });
+    }
+    for my $name (qw(create update migrate relocate)) {
+        guard_native_method('PVE::API2::HA::Resources', $name, 'HA', sub {
+            return $1 if ($_[0]->{sid} // '') =~ /\A(?:(?:vm|ct):)?([1-9][0-9]{2,8})\z/;
+            return ();
+        });
+    }
 }
 
 sub register_docker_method {
@@ -686,14 +858,17 @@ register_docker_method({
     name => 'storage_limit', path => '{id}/storage-limit', method => 'PUT', protected => 1, proxyto => 'node',
     description => 'Create or enlarge the bounded project data disk; services must be stopped.',
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
-        size_mib => { type => 'integer', minimum => 256, maximum => 1048576 } } },
+        size_mib => { type => 'integer', minimum => 256, maximum => 1048576 },
+        storage => { type => 'string', format => 'pve-storage-id', optional => 1 } } },
     returns => { type => 'string' },
     code => sub {
         my ($p) = @_;
         check_digest($p);
         my $rpc = PVE::RPCEnvironment::get();
+        my $storage = $p->{storage} // decode_json(output(['storage-config', $p->{id}, $p->{node}]))->{storage};
+        $rpc->check($rpc->get_user(), '/storage/' . $storage, ['Datastore.AllocateSpace']) if $storage;
         return $rpc->fork_worker('betterdockersettings', task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
-            PVE::Tools::run_command([$helper, 'storage-limit', $p->{id}, $p->{node}, $p->{size_mib}, $p->{digest} // '']);
+            PVE::Tools::run_command([$helper, 'storage-limit', $p->{id}, $p->{node}, $p->{size_mib}, $p->{digest} // '', $p->{storage} // '']);
         });
     },
 });

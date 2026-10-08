@@ -30,6 +30,28 @@ sub check { $main::grants{$_[2] . ':' . $_[3]->[0]} // 0 }
             (base / 'PVE/AccessControl.pm').write_text('package PVE::AccessControl; 1;')
             (base / 'PVE/Cluster.pm').write_text('package PVE::Cluster; sub check_vmid_unused { 1 } sub cfs_lock_file { $_[2]->(); } 1;')
             (base / 'PVE/Tools.pm').write_text('package PVE::Tools; sub run_command { my ($cmd, %opts) = @_; $opts{outfunc}->($ARGV[0]); } sub assert_if_modified { die "detected modified configuration" if defined($_[0]) && $_[0] ne $_[1]; } 1;')
+            (base / 'PVE/API2/Storage').mkdir(parents=True)
+            (base / 'PVE/API2/Storage/Content.pm').write_text('''
+package PVE::API2::Storage::Content;
+our $last;
+our $index = { parameters => { properties => {} }, returns => { items => { properties => {} } },
+ code => sub { $last = $_[0]; return [] if $_[0]->{storage} eq 'dir'; return [
+ {vmid=>103,volid=>'local-lvm:vm-103-disk-0',content=>'rootdir'},
+ {vmid=>105,volid=>'local-lvm:vm-105-disk-0',content=>'images'},
+ {vmid=>105,volid=>'local:backup/example',content=>'backup'} ]; } };
+our $delete = { code => sub { PVE::Storage::vdisk_free({}, $_[0]->{volume}); return 'native-delete'; } };
+sub map_method_by_name { $_[1] eq 'index' ? $index : $delete }
+1;
+''')
+            (base / 'PVE/Storage.pm').write_text('''
+package PVE::Storage;
+sub config { {} }
+sub vdisk_list { return {$_[1] => ($_[1] eq 'dir' ? [{vmid=>105, volid=>'dir:105/vm-105-disk-0.raw', size=>1024, format=>'raw'}] : [])}; }
+sub check_volume_access { 1 }
+sub parse_volname { return ('backup', '', 105) if $_[1] =~ /backup/; return ('images', '', $_[1] =~ /vm-105/ ? 105 : 103); }
+sub vdisk_free { $main::freed = $_[1]; }
+1;
+''')
             # Avoid relying on a locally installed Perl JSON distribution.
             (base / 'JSON.pm').write_text('''
 package JSON;
@@ -181,6 +203,93 @@ for my $name ('update', 'settings', 'reset_settings', 'storage_limit', 'revert_s
  eval { $route->{code}->({ id => 'a' x 32, node => 'pve', digest => '0' x 64 }); };
  die "missing API preflight: $name" unless $@ =~ /detected modified configuration/;
 }
+
+
+# Native storage content remains complete unless the new filter is explicitly requested.
+$PVE::RPCEnvironment::user = 'root@pam';
+*PVE::API2::BetterDocker::storage_guest_owner = sub {
+    return $_[0] == 105 ? {id => 'b' x 32, vmid => 105, node => 'pve', name => 'archived'} : undef;
+};
+my $content = $PVE::API2::Storage::Content::index;
+my $all = $content->{code}->({node=>'pve',storage=>'local-lvm'});
+die 'native full list changed' unless @$all == 3;
+my $docker = $content->{code}->({node=>'pve',storage=>'local-lvm',content=>'rootdir',dct=>1});
+die 'Docker disk classification missing' unless @$docker == 1 && $docker->[0]->{vmid} == 105;
+die 'retained owner missing' unless $docker->[0]->{dct_name} eq 'archived' && $docker->[0]->{dct_status} eq 'retained';
+die 'raw Docker disk hidden by content type' if defined($PVE::API2::Storage::Content::last->{content});
+my $dir = $content->{code}->({node=>'pve',storage=>'dir',dct=>1});
+die 'rootdir-only directory disk missing' unless @$dir == 1 && $dir->[0]->{volid} eq 'dir:105/vm-105-disk-0.raw';
+{
+ local %main::grants;
+ $PVE::RPCEnvironment::user = 'storage-audit@pve';
+ my $restricted = $content->{code}->({node=>'pve',storage=>'local-lvm',dct=>1});
+ die 'storage-only viewer reads private guest name' unless $restricted->[0]->{dct_name} eq '';
+}
+$PVE::RPCEnvironment::user = 'root@pam';
+my $native = $content->{code}->({node=>'pve',storage=>'local-lvm',content=>'rootdir',dct=>0});
+die 'LXC or backups changed' unless @$native == 2;
+eval { $PVE::API2::Storage::Content::delete->{code}->({volume=>'local-lvm:vm-105-disk-0'}); };
+die 'DCT disk deletion accepted' unless $@ =~ /Cannot remove a DCT disk/;
+die 'blocked disk was freed' if $main::freed;
+$PVE::API2::Storage::Content::delete->{code}->({volume=>'local-lvm:vm-103-disk-0'});
+die 'native deletion behavior changed' unless $main::freed eq 'local-lvm:vm-103-disk-0';
+{
+ my $calls = 0;
+ local *PVE::API2::BetterDocker::storage_guest_owner = sub { return ++$calls == 1 ? undef : {id=>'b' x 32}; };
+ eval { $PVE::API2::Storage::Content::delete->{code}->({volume=>'local-lvm:vm-105-disk-0'}); };
+ die 'worker did not recheck DCT ownership' unless $@ =~ /Cannot remove a DCT disk/;
+ die 'race freed DCT disk' unless $main::freed eq 'local-lvm:vm-103-disk-0';
+}
+
+# Unsupported native operations must reject DCT before entering a native handler,
+# including mixed backup lists, clone targets and retained guest IDs.
+my %native_methods;
+for my $class (qw(PVE::API2::LXC PVE::API2::Qemu PVE::API2::Backup PVE::API2::ReplicationConfig PVE::API2::HA::Resources)) {
+    no strict 'refs';
+    *{"${class}::map_method_by_name"} = sub {
+        my ($class, $name) = @_;
+        return $native_methods{"$class:$name"} //= {code => sub {
+            $main::native_calls++;
+            die 'native permission denied' if $_[0]->{denied};
+            return $_[0];
+        }};
+    };
+}
+PVE::API2::BetterDocker::hook_native_node_operations();
+PVE::API2::BetterDocker::hook_native_cluster_operations();
+my $original_wrapper = $native_methods{'PVE::API2::Backup:create_job'}->{code};
+PVE::API2::BetterDocker::hook_native_cluster_operations();
+die 'native method wrapped twice' unless $original_wrapper == $native_methods{'PVE::API2::Backup:create_job'}->{code};
+for my $case (
+    ['PVE::API2::Backup','create_job',{vmid=>'103,105'}],
+    ['PVE::API2::Backup','update_job',{vmid=>'105;103'}],
+    ['PVE::API2::ReplicationConfig','create',{id=>'105-0'}],
+    ['PVE::API2::ReplicationConfig','update',{id=>'105-12'}],
+    (map { ['PVE::API2::HA::Resources',$_,{sid=>'ct:105'}] } qw(create update migrate relocate)),
+    ['PVE::API2::HA::Resources','create',{sid=>'105'}],
+    ['PVE::API2::HA::Resources','create',{sid=>'vm:105'}],
+    (map { ['PVE::API2::LXC',$_,{vmid=>105}] } qw(create_vm clone_vm template migrate_vm remote_migrate_vm)),
+    (map { ['PVE::API2::Qemu',$_,{vmid=>105}] } qw(create_vm clone_vm template migrate_vm remote_migrate_vm)),
+    ['PVE::API2::LXC','clone_vm',{vmid=>103,newid=>105}],
+    ['PVE::API2::Qemu','clone_vm',{vmid=>103,newid=>105}],
+) {
+    my ($class,$name,$param) = @$case;
+    my $before = $main::native_calls // 0;
+    eval { $native_methods{"$class:$name"}->{code}->($param); };
+    die "native DCT route accepted: $class/$name" unless $@ =~ /DCT 105 does not support native/;
+    die 'native mutation invoked for DCT' if ($main::native_calls // 0) != $before;
+}
+for my $list ('105', '103 105', '103,105', '103;105') {
+    eval { PVE::API2::BetterDocker::check_native_guest_ids('backup',$list); };
+    die 'DCT CLI backup list accepted' unless $@ =~ /does not support native backup/;
+}
+for my $param ({vmid=>'103'}, {all=>1}, {pool=>'native'}, {exclude=>'105'}) {
+    my $result = $native_methods{'PVE::API2::Backup:create_job'}->{code}->($param);
+    die 'native non-DCT parameter changed' unless $result == $param;
+}
+eval { $native_methods{'PVE::API2::Backup:create_job'}->{code}->({vmid=>'103',denied=>1}); };
+die 'native permission check bypassed' unless $@ =~ /native permission denied/;
+
 
 
 ''' , '101', 'a' * 32], check=True)

@@ -9,12 +9,14 @@ from pathlib import Path
 NODE_BLOCK = '''# BEGIN BETTERDOCKER
 use PVE::API2::BetterDocker;
 __PACKAGE__->register_method({ subclass => 'PVE::API2::BetterDocker', path => 'docker' });
+PVE::API2::BetterDocker::hook_native_node_operations();
 # lifecycle integration 1
 # END BETTERDOCKER
 '''
 CLUSTER_BLOCK = '''# BEGIN BETTERDOCKER
 use PVE::API2::BetterDocker;
 PVE::API2::BetterDocker::hook_resources();
+PVE::API2::BetterDocker::hook_native_cluster_operations();
 # END BETTERDOCKER
 '''
 VMID_BLOCK = '''# BEGIN BETTERDOCKER
@@ -24,14 +26,19 @@ VMID_BLOCK = '''# BEGIN BETTERDOCKER
     }
 # END BETTERDOCKER
 '''
+VZDUMP_BLOCK = '''# BEGIN BETTERDOCKER
+    require PVE::API2::BetterDocker;
+    PVE::API2::BetterDocker::check_native_guest_ids('backup', $job->{vmid});
+# END BETTERDOCKER
+'''
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.31" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.38" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker-locales/en.js?v=19.31"></script>
-<script src="/pve2/js/betterdocker-locales/pl.js?v=19.31"></script>
-<script src="/pve2/js/betterdocker.js?v=19.31"></script>
+<script src="/pve2/js/betterdocker-locales/en.js?v=19.38"></script>
+<script src="/pve2/js/betterdocker-locales/pl.js?v=19.38"></script>
+<script src="/pve2/js/betterdocker.js?v=19.38"></script>
 <!-- END BETTERDOCKER -->'''
 
 
@@ -43,14 +50,20 @@ NODE_LIFECYCLE = [
 
 
 def transform(text, kind, remove=False):
-    block = NODE_BLOCK if kind == 'node' else CLUSTER_BLOCK if kind == 'cluster' else VMID_BLOCK if kind == 'vmid' else UI_BLOCK
+    block = {'node': NODE_BLOCK, 'cluster': CLUSTER_BLOCK, 'vmid': VMID_BLOCK,
+             'vzdump': VZDUMP_BLOCK, 'ui': UI_BLOCK}[kind]
     if not remove and block in text and (kind != 'node' or all(addition in text for _, addition in NODE_LIFECYCLE)):
         return text
-    pattern = (r'# BEGIN BETTERDOCKER\n.*?# END BETTERDOCKER\n' if kind in ('node', 'cluster', 'vmid')
+    pattern = (r'# BEGIN BETTERDOCKER\n.*?# END BETTERDOCKER\n' if kind != 'ui'
                else r'<!-- BEGIN BETTERDOCKER -->\n.*?<!-- END BETTERDOCKER -->\n?')
     text = re.sub(pattern, '', text, flags=re.S)
     if remove:
         return text
+    if kind == 'vzdump':
+        anchor = re.search(r'sub get_included_guests \{\s*my \(\$job\) = @_;\n', text)
+        if not anchor:
+            raise RuntimeError('Unsupported VZDump library; refusing backup patch')
+        return text[:anchor.end()] + block + text[anchor.end():]
     if kind == 'vmid':
         anchor = re.search(r'sub check_vmid_unused \{\s*my \(\$vmid, \$noerr\) = @_;\n', text)
         if not anchor:
@@ -101,8 +114,9 @@ def main():
     files = [(root / 'usr/share/perl5/PVE/API2/Nodes.pm', 'node'),
              (root / 'usr/share/pve-manager/index.html.tpl', 'ui'),
              (root / 'usr/share/perl5/PVE/API2/Cluster.pm', 'cluster'),
-             (root / 'usr/share/perl5/PVE/Cluster.pm', 'vmid')]
-    # Preflight both targets before the first mutation.
+             (root / 'usr/share/perl5/PVE/Cluster.pm', 'vmid'),
+             (root / 'usr/share/perl5/PVE/VZDump.pm', 'vzdump')]
+    # Preflight all targets before the first mutation.
     changes = [(path, transform(path.read_text(), kind, args.action == 'remove')) for path, kind in files]
     if args.action == 'status':
         if any(path.read_text() != text for path, text in changes):
