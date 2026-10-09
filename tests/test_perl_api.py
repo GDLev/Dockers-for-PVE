@@ -348,3 +348,12 @@ die 'native permission check bypassed' unless $@ =~ /native permission denied/;
 
 
 ''' , '101', 'a' * 32], check=True)
+
+    def test_network_checkbox_serializes_as_number(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        start = source.index('my %values = map {', source.index("name => 'set_network'"))
+        end = source.index('my ($fh, $path)', start)
+        fragment = source[start:end]
+        code = "use JSON::PP; for my $input ('0', '', '1', 0, 1) { my $param = {firewall=>$input}; " + fragment + " print encode_json(\\%values), qq(\\n); }"
+        result = subprocess.run(['perl', '-e', code], check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.splitlines(), ['{"firewall":0}', '{"firewall":0}', '{"firewall":1}', '{"firewall":0}', '{"firewall":1}'])

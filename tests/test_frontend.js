@@ -398,13 +398,16 @@ assert.equal(consoleRequest, pendingRequest);
 taskTick();
 assert(consoleRequest.url.includes('/tasks/UPID%3Apending/status'));
 let taskErrorMask;
+const taskAlerts = [];
+context.Ext.Msg.alert = (...args) => taskAlerts.push(args);
 context.Proxmox.Utils.setErrorMask = (_target, message) => { taskErrorMask = message; };
 consoleRequest.failure({ htmlStatus: 'Connection failed' });
-assert.equal(taskErrorMask, 'Connection failed');
+assert.equal(taskErrorMask, undefined, 'task polling must not mask the guest view');
+assert.equal(taskAlerts.length, 0, 'a transient missed poll must not open a modal');
 assert.equal(configPanel.pendingTask, 'UPID:pending', 'a connection error does not mean the task has finished');
 taskTick();
 consoleRequest.success({ result: { data: { status: 'stopped', exitstatus: 'OK' } } });
-assert.equal(taskErrorMask, false);
+assert.equal(taskErrorMask, undefined, 'task polling must not clear unrelated masks');
 assert.equal(configPanel.pendingTask, null);
 // Completion of the interrupted Shutdown must not unlock the newer Stop task.
 configPanel.tbar.find(button => button.itemId === 'startButton').handler();
@@ -415,6 +418,25 @@ configPanel.pendingTask = 'UPID:new-stop';
 oldTaskPoll.success({ result: { data: { status: 'stopped', exitstatus: 'Shutdown interrupted by Stop.' } } });
 assert.equal(configPanel.pendingTask, 'UPID:new-stop');
 configPanel.pendingTask = null;
+// Quiet tasks report errors/warnings once; an existing task dialog owns its feedback.
+for (const [status, visible, expectedTitle] of [['OK', false, null], ['WARNINGS: 1', false, 'Warning'], ['failed', false, 'Error'], ['failed', true, null]]) {
+    configPanel.tbar.find(button => button.itemId === 'startButton').handler();
+    const response = { result: { data: 'UPID:pve:123:456:789:test:100:root@pam:' }, dockerTaskVisible: visible };
+    consoleRequest.success(response);
+    const before = taskAlerts.length;
+    taskTick();
+    const completion = consoleRequest;
+    completion.success({ result: { data: { status: 'stopped', exitstatus: status } } });
+    completion.success({ result: { data: { status: 'stopped', exitstatus: status } } });
+    if (expectedTitle === 'Error') {
+        assert(consoleRequest.url.endsWith('/log'));
+        consoleRequest.success({ result: { data: [{ t: 'BetterDocker: meaningful failure' }] } });
+        assert.equal(taskAlerts.at(-1)[1], 'meaningful failure');
+    }
+    assert.equal(taskAlerts.length, before + (expectedTitle ? 1 : 0));
+    if (expectedTitle) assert.equal(taskAlerts.at(-1)[0], expectedTitle);
+    assert.equal(configPanel.pendingTask, null);
+}
 console.log('Task completion refresh and conflicting operation exclusion passed');
 
 assert.equal(configPanel.items.find(card => card.itemId === 'tasks').xtype, 'proxmoxNodeTasks');
@@ -839,6 +861,12 @@ for (const [group, key] of [['resources', 'Memory'], ['dns', 'DNS servers'], ['o
     loadDigest('2'.repeat(64));
     editor.submit.call(editor);
     assert.equal(digestRequests.at(-1).params.digest, editorDigest, group + ' must not use refreshed version');
+    if (key !== 'Project data disk') {
+        const before = capturedEditors.length;
+        digestRequests.at(-1).success({ result: { data: 'UPID:pve:1:2:3:settings:100:root@pam:' } });
+        assert.equal(capturedEditors.length, before, 'ordinary save must not open a task viewer');
+        digestPanel.pendingTask = null;
+    }
 }
 // Polling must not replace an unchanged row between the two mouse clicks.
 const previousEditorFactory = context.Ext.create, previousDigestDown = digestPanel.down;
@@ -965,7 +993,7 @@ assert.equal(mtuCleared, '');
 const networkFields = [...networkEditor.items[0].column1, ...networkEditor.items[0].column2, ...networkEditor.items[0].advancedColumn1];
 for (const name of ['bridge', 'hwaddr', 'cidr', 'mtu']) assert(networkFields.some(field => field.name === name));
 for (const name of ['ip6', 'tag', 'rate', 'gw']) assert(!networkFields.some(field => field.name === name));
-assert.equal(definitions['PVE.betterdocker.NetworkEdit'].showTaskViewer, true);
+assert.equal(definitions['PVE.betterdocker.NetworkEdit'].showTaskViewer, false);
 assert.equal(networkEditor.items[0].onGetValues({ ipv4mode: 'dhcp', mtu: '' }).cidr, '');
 console.log('Network editor uses native load/digest/task handling and supported fields only');
 
@@ -1002,3 +1030,12 @@ guestActionWindow = undefined;
 guestActionRequest.success({ result: { data: { status: 'running', capabilities: { configure: 1 } } } });
 assert.equal(guestActionWindow, undefined, 'a running guest cannot open stopped migration');
 console.log('Context guest actions load current capabilities, state and configuration digest');
+
+for (const clone of [false, true]) {
+    const restoreEditor = { callParent, projectId: clone ? 'a'.repeat(32) : undefined, nodename: 'pve', vmid: 100 };
+    definitions['PVE.betterdocker.StateRestore'].initComponent.call(restoreEditor);
+    assert.equal(restoreEditor.showTaskViewer, !clone, 'restore shows logs; clone closes quietly like LXC');
+    assert.equal(typeof restoreEditor.apiCallDone, clone ? 'function' : 'undefined');
+}
+assert.equal(definitions['PVE.betterdocker.Migrate'].showTaskViewer, true);
+console.log('Native clone, restore and migration feedback policies passed');

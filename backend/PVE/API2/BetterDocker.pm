@@ -871,6 +871,7 @@ register_docker_method({
         my ($param) = @_;
         check_digest($param);
         my %values = map { exists($param->{$_}) ? ($_ => $param->{$_}) : () } qw(bridge ipv4mode cidr hwaddr mtu firewall);
+        $values{firewall} = $values{firewall} ? 1 : 0 if exists($values{firewall});
         my ($fh, $path) = tempfile('betterdocker-network-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh encode_json(\%values); close $fh;

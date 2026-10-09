@@ -52,23 +52,44 @@
         creating: 'Deploying', error: 'Deployment failed', 'network-error': 'Network error', unknown: 'Unknown' })[value] || value);
     const trackTask = (response, target) => {
         const upid = response.result.data;
-        if (!target || !target.on || !upid) { return; }
-        target.pendingTask = upid;
-        const node = target.pveSelNode && target.pveSelNode.data.node;
+        if (!upid) { return; }
+        target = target || { on: () => {} };
+        const node = upid.split(':')[1] && upid.split(':').length > 2 ? upid.split(':')[1] : target.pveSelNode?.data.node;
         if (!node) { return; }
+        target.pendingTask = upid;
+        let polling = false, finished = false;
         const poll = () => {
-            if (target.destroyed) { clearInterval(timer); return; }
+            if (target.destroyed || finished) { clearInterval(timer); return; }
+            if (polling) { return; }
+            polling = true;
             request({ url: '/nodes/' + encodeURIComponent(node) + '/tasks/' + encodeURIComponent(upid) + '/status',
-                method: 'GET', failure: result => {
-                    if (!target.destroyed) { Proxmox.Utils.setErrorMask(target, result.htmlStatus); }
+                method: 'GET', failure: () => {
+                    // A missed poll is not a failed task. The normal guest refresh
+                    // reports connectivity; retry without an extra modal or mask.
+                    polling = false;
                 }, success: result => {
-                    if (target.destroyed) { return; }
-                    Proxmox.Utils.setErrorMask(target, false);
+                    polling = false;
+                    if (target.destroyed || finished) { return; }
                     if (result.result.data.status === 'stopped') {
-                        clearInterval(timer); const currentTask = target.pendingTask === upid;
+                        finished = true;
+                        clearInterval(timer);
+                        const currentTask = target.pendingTask === upid;
                         if (currentTask) { target.pendingTask = null; }
                         if (target.reloadDocker) { target.reloadDocker(); }
-                        if (currentTask && result.result.data.exitstatus !== 'OK') { task(response); }
+                        const status = result.result.data.exitstatus;
+                        if (currentTask && status !== 'OK' && !response.dockerTaskVisible) {
+                            if (/^WARNINGS: \d+$/.test(status)) {
+                                Ext.Msg.alert(translate('Warning'), Ext.htmlEncode(status));
+                            } else {
+                                const showError = message => { if (!target.destroyed) { Ext.Msg.alert(translate('Error'), Ext.htmlEncode(message)); } };
+                                request({ url: '/nodes/' + encodeURIComponent(node) + '/tasks/' + encodeURIComponent(upid) + '/log',
+                                    method: 'GET', params: { start: 0, limit: 1000 },
+                                    success: log => {
+                                        const reason = log.result.data.find(row => row.t?.startsWith('BetterDocker: '));
+                                        showError(reason ? reason.t.slice('BetterDocker: '.length) : status);
+                                    }, failure: () => showError(status) });
+                            }
+                        }
                     }
                 } });
         };
@@ -83,7 +104,10 @@
     const request = options => Proxmox.Utils.API2Request(Object.assign({
         failure: response => Ext.Msg.alert(translate('Error'), response.htmlStatus),
     }, options));
-    const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
+    const task = response => {
+        response.dockerTaskVisible = true;
+        return Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
+    };
     const dockerTaskLabels = { create: 'Deploy', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
         restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Remove', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Take Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Remove Snapshot', restore: 'Restore', clone: 'Clone', template: 'Convert to template', migrate: 'Migrate' };
     const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
@@ -97,7 +121,7 @@
 
     Ext.define('PVE.betterdocker.Migrate', {
         extend: 'Proxmox.window.Edit', width: 600, isCreate: true, autoLoad: false,
-        method: 'POST', show_task_view: true, onlineHelp: 'chapter_pvecm',
+        method: 'POST', showTaskViewer: true, onlineHelp: 'chapter_pvecm',
         initComponent: function () {
             const me = this;
             me.title = translate('Migrate') + ': DCT ' + me.vmid;
@@ -119,10 +143,12 @@
 
     Ext.define('PVE.betterdocker.StateRestore', {
         extend: 'Proxmox.window.Edit', alias: 'widget.pveBetterDockerStateRestore',
-        width: 600, isCreate: true, autoLoad: false, show_task_view: true,
+        width: 600, isCreate: true, autoLoad: false,
         onlineHelp: 'chapter_vzdump', method: 'POST',
         initComponent: function () {
             const me = this, clone = Boolean(me.projectId);
+            me.showTaskViewer = !clone;
+            if (clone) { me.apiCallDone = (success, response) => { if (success) { trackTask(response, me.ownerPanel); } }; }
             me.title = translate(clone ? 'Clone' : 'Restore') + ': DCT';
             me.url = '/api2/extjs/nodes/' + encodeURIComponent(me.nodename) + '/docker' +
                 (clone ? '/' + me.projectId + '/clone' : '');
@@ -390,7 +416,7 @@
     });
 
     Ext.define('PVE.betterdocker.NetworkEdit', {
-        extend: 'Proxmox.window.Edit', subject: translate('Network Device'), width: 600, showTaskViewer: true,
+        extend: 'Proxmox.window.Edit', subject: translate('Network Device'), width: 600, showTaskViewer: false,
         initComponent: function () {
             const me = this;
             me.items = [{ xtype: 'inputpanel',
@@ -1004,6 +1030,7 @@
                 if (!snapname || snapname === 'current') { return; }
                 request({ url: view.apiUrl + '/snapshot', method: 'POST', params: { action, snapname }, waitMsgTarget: view,
                     callback: () => me.reload(), success: response => {
+                        response.dockerTaskVisible = true;
                         trackTask(response, view.ownerPanel);
                         Ext.create('Proxmox.window.TaskProgress', { upid: response.result.data, autoShow: true });
                     } });
@@ -1325,7 +1352,7 @@
                         }
                         request({ url: url + '/settings', method: 'PUT', waitMsgTarget: win,
                             params: { service: active.name, settings: JSON.stringify(settings), digest },
-                            success: response => { trackTask(response, me); task(response); win.close(); } });
+                            success: response => { trackTask(response, me); win.close(); } });
                     },
                 });
                 win.show();
@@ -1361,7 +1388,7 @@
                     if (!row || !active || !grid.hasPendingChanges(row.get('key')) || !rowEditable(row.get('key')) || locked()) { return; }
                     request({ url: url + '/pending', method: 'PUT', waitMsgTarget: grid,
                         params: { service: active.name, revert: settingKeys[row.get('key')].join(','), digest: current.digest },
-                        success: response => { trackTask(response, me); task(response); } });
+                        success: response => { trackTask(response, me); } });
                 } });
             const card = (title, id, icon, items, tbar, extra) => Object.assign({ xtype: 'panel', title: translate(title), itemId: id,
                 iconCls: 'fa fa-' + icon, layout: 'anchor', scrollable: true, bodyPadding: 0,
@@ -1395,7 +1422,7 @@
                         if (locked() || current?.template) { return; }
                         Ext.Msg.confirm(translate('Confirm'), translate('Convert to template') + ' DCT ' + info.vmid + '?', answer => {
                             if (answer === 'yes') { request({ url: url + '/template', method: 'POST', params: { digest: current?.digest },
-                                success: response => { trackTask(response, me); task(response); } }); }
+                                success: response => { trackTask(response, me); } }); }
                         });
                     } },
                     { text: translate('Manage HA'), bdScope: 'ha', iconCls: 'fa fa-heartbeat', hidden: PVE.Utils.isStandaloneNode(), bdWrite: true,
@@ -1445,7 +1472,7 @@
                     } }, revertButton('resourceGrid'), { text: translate('Restore Compose'), itemId: 'restoreCompose', bdWrite: true, handler: () => {
                         const active = service(); if (!active || !active.overridden) { return; }
                         request({ url: url + '/reset-settings', method: 'POST', params: { service: active.name, digest: current.digest },
-                            success: response => { trackTask(response, me); task(response); } });
+                            success: response => { trackTask(response, me); } });
                     } }, '->', selector()], { layout: 'fit' }),
                 card('Network', 'network', 'exchange', [Object.assign(grid('networkGrid', [
                     { text: translate('Name'), dataIndex: 'name', width: 80, flex: 0 }, { text: translate('Bridge'), dataIndex: 'bridge' },
@@ -1533,7 +1560,7 @@
                 if (state.template || state.status !== 'stopped') { return; }
                 Ext.Msg.confirm(translate('Confirm'), Ext.htmlEncode(translate('Convert to template') + ' DCT ' + info.vmid + '?'), answer => {
                     if (answer === 'yes') { request({ url: url + '/template', method: 'POST', params: { digest: state.digest },
-                        success: result => task(result) }); }
+                        success: result => { trackTask(result); } }); }
                 });
                 return;
             }
