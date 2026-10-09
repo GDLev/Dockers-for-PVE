@@ -19,7 +19,7 @@ class LifecycleTests(unittest.TestCase):
     def test_startup_validation_digest_and_configuration_permissions(self):
         original = worker.detail(ID, 'pve')['digest']
         worker.project_config(ID, 'pve', {'onboot': 1, 'startup': '3,up=2,down=5'}, original)
-        self.assertEqual(worker.lifecycle_config(ID, 'pve'), {'onboot': 1, 'startup': 'order=3,up=2,down=5'})
+        self.assertEqual(worker.lifecycle_config(ID, 'pve'), {'onboot': 1, 'startup': 'order=3,up=2,down=5', 'hookscript': ''})
         current = worker.detail(ID, 'pve')['digest']
         self.assertNotEqual(current, original)
         for changes in ({'onboot': 2}, {'startup': 'order=-1'}, {'startup': 'up=1;id'}, {'hookscript':'host.sh'}):

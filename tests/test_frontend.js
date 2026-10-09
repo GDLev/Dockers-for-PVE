@@ -10,13 +10,14 @@ function callParent() {
 const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => info,
     getTypeOrder: type => ({ lxc: 0, qemu: 1, node: 2, storage: 4 })[type] ?? 9,
     nodeSortFn: (a, b) => a.data.vmid - b.data.vmid } };
+const viewSelectorClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const workspaceClass = { prototype: { initComponent() { this.initialized = true; }, setContent(comp) { this.content = comp; }, selectById(id) { return id; } } };
 const nodeMenuClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const nodeConfigClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const storageBrowserClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const storageImageClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const context = { window: null, console,
-    PVE: { storage: { Browser: storageBrowserClass, ImageView: storageImageClass }, node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {}, initComponent() { this.nativeInitialized = true; } } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
+    PVE: { form: { ViewSelector: viewSelectorClass }, storage: { Browser: storageBrowserClass, ImageView: storageImageClass }, node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {}, initComponent() { this.nativeInitialized = true; } } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { format_ha: value => value.managed ? value.state || 'none' : 'none', isStandaloneNode: () => false, get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { format_boolean: value => value ? 'Yes' : 'No', override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
@@ -423,6 +424,24 @@ assert.equal(definitions['PVE.betterdocker.DeploymentEdit'].extend, 'Proxmox.win
 assert.equal(definitions['PVE.betterdocker.CodeArea'].extend, 'Ext.form.field.TextArea');
 assert(fs.readFileSync('frontend/betterdocker.css', 'utf8').includes('background-color: currentColor'));
 console.log('Native task filtering, single Help, native editor and theme-aware icons passed');
+
+// Native view filters must retain DCTs without broadening other resource types.
+for (const id of ['pool', 'tags', 'server']) {
+    for (const property of ['filterfn', 'getFilterFn']) {
+        const nativeFilter = record => ['lxc', 'qemu', 'pool'].includes(record.data.type);
+        const selector = { getViewFilter() {
+            return { id, [property]: property === 'filterfn' ? nativeFilter : () => nativeFilter };
+        } };
+        overrides.get(viewSelectorClass).initComponent.call(selector);
+        assert(selector.nativeInitialized);
+        const view = selector.getViewFilter();
+        const filter = property === 'filterfn' ? view.filterfn : view.getFilterFn();
+        for (const type of ['lxc', 'qemu', 'pool']) { assert(filter({ data: { type } })); }
+        assert.equal(filter({ data: { type: 'docker' } }), id !== 'server');
+        assert.equal(filter({ data: { type: 'storage' } }), false);
+    }
+}
+console.log('Pool and Tag View filters include DCTs and preserve native filtering');
 
 // Native Tag View refresh must resolve all tagged clones to the original record.
 const sourceRecord = { data: { id: 'docker/' + 'a'.repeat(32), tags: 'prod;ui-smoke' } };

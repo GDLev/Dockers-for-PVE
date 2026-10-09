@@ -74,6 +74,13 @@ def release_id(identifier):
 def run(args, **kwargs):
     kwargs.setdefault('timeout', 60)
     kwargs.setdefault('env', {'PATH': os.environ.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin'), 'HOME': '/root'})
+    if args and args[0] == 'docker' and not trusted_management():
+        client = ROOT.parent / 'delegated-client'
+        client.mkdir(parents=True, exist_ok=True, mode=0o700)
+        kwargs['env'] = dict(kwargs['env'], DOCKER_CONFIG=str(client))
+    for key in ('BETTERDOCKER_TASK_USER', 'BETTERDOCKER_TRUSTED', 'BETTERDOCKER_REQUIRE_SAFE', 'BETTERDOCKER_CONFIG_KEYS', 'BETTERDOCKER_TASK_SYS_MODIFY'):
+        if key in os.environ:
+            kwargs['env'][key] = os.environ[key]
     kwargs.setdefault('check', True)
     return subprocess.run(args, text=True, **kwargs)
 
@@ -263,11 +270,187 @@ def compose_base(directory, identifier, filename='compose.runtime.json'):
     return command
 
 
+def trusted_management():
+    # Only the authenticated API wrapper supplies this flag. Internal node helpers
+    # have no RPC caller and remain trusted for boot and HA recovery.
+    return os.environ.get('BETTERDOCKER_TRUSTED', '1') == '1'
+
+
+def safe_bind(source, identifier):
+    base = (ROOT / project_id(identifier)).resolve()
+    path = Path(source)
+    if not path.is_absolute() or '..' in path.parts or not path.resolve().is_relative_to(base):
+        raise ValueError('Delegated access requires project-owned bind mounts')
+    relative = path.resolve().relative_to(base)
+    # Deployment files contain credentials and must never be writable by a workload.
+    if not relative.parts or relative.parts[0] in {
+        'request.json', 'compose.source.yaml', 'compose.runtime.json', '.env',
+        'settings.json', 'pending.json', 'storage.json', 'ha.json', 'snapshots',
+        'export-transaction.json', 'notes.txt', 'allocated-volume.json', 'storage.ext4',
+        'snapshot-restored.json', 'snapshot-tree.json', 'snapshot-transaction.json',
+        'storage-transaction.json', 'network-transaction.json', 'network-resume.json',
+        'network-reconcile.json', 'dhcp-address.json', 'dhclient.conf', 'dhclient.leases',
+        'metrics.json', 'disk-usage.json', 'rootfs-quota.json', 'replication.json',
+    } or relative.parts[0].startswith('.'):
+        raise ValueError('Delegated access cannot mount project control files')
+
+
+def validate_delegated_source(source):
+    # Check file-loading directives before Compose can read anything as host root.
+    import yaml
+    try:
+        value = yaml.safe_load(source)
+    except (yaml.YAMLError, RecursionError):
+        raise ValueError('Invalid Compose configuration') from None
+    if not isinstance(value, dict) or set(value) - {'name', 'version', 'services', 'volumes', 'networks'} - {k for k in value if isinstance(k, str) and k.startswith('x-')}:
+        raise ValueError('Delegated Compose cannot include external files, secrets or configs')
+    services = value.get('services')
+    if not isinstance(services, dict) or not services:
+        raise ValueError('Compose must define services')
+    for service in services.values():
+        if not isinstance(service, dict):
+            raise ValueError('Invalid Compose service')
+        for key in ('extends', 'build', 'label_file', 'secrets', 'configs', 'credential_spec', 'develop', 'provider', 'use_api_socket'):
+            if key in service:
+                raise ValueError('Delegated Compose does not support ' + key)
+        files = service.get('env_file', [])
+        files = [files] if isinstance(files, str) else files
+        if not isinstance(files, list) or any(item != '.env' for item in files):
+            raise ValueError('Delegated Compose can only read the imported .env file')
+    return value
+
+
+def validate_delegated_config(config, identifier):
+    allowed = set('image command entrypoint environment env_file ports expose volumes networks labels restart '
+                  'depends_on healthcheck user working_dir hostname domainname stop_signal stop_grace_period '
+                  'init tty stdin_open read_only tmpfs cap_drop cpus cpu_shares cpu_period cpu_quota '
+                  'mem_limit mem_reservation memswap_limit mem_swappiness pids_limit ulimits dns dns_search '
+                  'dns_opt shm_size deploy logging pull_policy platform attach container_name name '
+                  'blkio_config oom_score_adj oom_kill_disable storage_opt'.split())
+    if not isinstance(config, dict) or set(config) - {'name', 'version', 'services', 'volumes', 'networks'}:
+        raise ValueError('Delegated configuration contains unsupported resources')
+    for service in config.get('services', {}).values():
+        if not isinstance(service, dict) or set(service) - allowed:
+            raise ValueError('Delegated configuration contains unsafe or unsupported service options')
+        if service.get('container_name') and not service['container_name'].startswith('bd-' + identifier + '-'):
+            raise ValueError('Delegated container names must belong to the project')
+        for mount in service.get('volumes', []):
+            if not isinstance(mount, dict) or mount.get('type') not in ('bind', 'volume', 'tmpfs'):
+                raise ValueError('Delegated configuration contains an unsupported mount')
+            if mount['type'] == 'bind':
+                safe_bind(mount.get('source', ''), identifier)
+                if mount.get('bind', {}).get('propagation') not in (None, 'rprivate', 'private'):
+                    raise ValueError('Delegated bind propagation is not allowed')
+            if mount['type'] == 'volume' and mount.get('volume', {}).get('subpath'):
+                raise ValueError('Delegated volume subpaths are not supported')
+        files = service.get('env_file') or []
+        for item in files:
+            path = item.get('path', '') if isinstance(item, dict) else item
+            if path not in ('.env', str(ROOT / identifier / '.env')):
+                raise ValueError('Delegated configuration references an external environment file')
+        deploy = service.get('deploy') or {}
+        if set(deploy) - {'replicas', 'restart_policy', 'resources', 'mode'} or deploy.get('mode', 'replicated') != 'replicated':
+            raise ValueError('Delegated deploy settings are unsupported')
+        resources = deploy.get('resources') or {}
+        if any(set(v) - {'cpus', 'memory', 'pids'} for v in resources.values()):
+            raise ValueError('Delegated device reservations are not allowed')
+        logging = service.get('logging') or {}
+        if logging.get('driver', 'json-file') not in ('json-file', 'local') or set(logging.get('options') or {}) - {'max-size', 'max-file', 'compress', 'labels', 'env'}:
+            raise ValueError('Delegated logging must use a local bounded driver')
+    for kind in ('volumes', 'networks'):
+        for key, value in config.get(kind, {}).items():
+            value = value or {}
+            allowed_driver = 'local' if kind == 'volumes' else 'bridge'
+            if value.get('external') or value.get('driver', allowed_driver) != allowed_driver or value.get('driver_opts'):
+                raise ValueError('Delegated resources must be local and project-owned')
+            ipam = value.get('ipam') or {}
+            if kind == 'networks' and (ipam.get('driver', 'default') != 'default' or ipam.get('options')):
+                raise ValueError('Delegated networks must use default IPAM without custom options')
+            if not value.get('name', 'bd-' + identifier + '_' + key).startswith('bd-' + identifier + '_'):
+                raise ValueError('Delegated resources cannot use custom shared names')
+
+
+def validate_delegated_containers(containers, identifier):
+    for container in containers:
+        host = container.get('HostConfig') or {}
+        for key in ('Privileged', 'CapAdd', 'Devices', 'DeviceRequests', 'DeviceCgroupRules',
+                    'VolumesFrom', 'SecurityOpt', 'CgroupParent', 'Cgroup', 'Sysctls', 'ExtraHosts'):
+            if host.get(key):
+                raise ValueError('This deployment requires node administrator access: ' + key)
+        for key in ('PidMode', 'IpcMode', 'UTSMode', 'UsernsMode', 'CgroupnsMode'):
+            if host.get(key) not in (None, '', 'private'):
+                raise ValueError('This deployment shares host or container namespaces')
+        if host.get('Runtime', 'runc') not in ('', 'runc'):
+            raise ValueError('Custom runtimes require administrator access')
+        network = host.get('NetworkMode', '')
+        if network not in ('none', '') and not network.startswith('bd-' + identifier + '_'):
+            raise ValueError('This deployment uses a shared network')
+        if host.get('LogConfig', {}).get('Type', 'json-file') not in ('', 'json-file', 'local'):
+            raise ValueError('This deployment uses external logging')
+        for bind in host.get('Binds') or []:
+            if any(option in bind.split(':')[-1].split(',') for option in ('shared', 'rshared', 'slave', 'rslave')):
+                raise ValueError('Shared bind propagation requires administrator access')
+            source = bind.split(':', 1)[0]
+            if source.startswith('/'):
+                safe_bind(source, identifier)
+            elif not source.startswith('bd-' + identifier + '_'):
+                raise ValueError('This deployment uses an external volume')
+        for mount in host.get('Mounts') or []:
+            if mount.get('Type') == 'bind':
+                safe_bind(mount.get('Source', ''), identifier)
+                if (mount.get('BindOptions') or {}).get('Propagation') not in (None, '', 'private', 'rprivate'):
+                    raise ValueError('Shared bind propagation requires administrator access')
+            elif mount.get('Type') == 'volume':
+                options = mount.get('VolumeOptions') or {}
+                if options.get('DriverConfig') or options.get('Subpath'):
+                    raise ValueError('Custom volume options require administrator access')
+                if mount.get('Source') and not mount['Source'].startswith('bd-' + identifier + '_'):
+                    raise ValueError('This deployment uses an external volume')
+            elif mount.get('Type') != 'tmpfs':
+                raise ValueError('Unsupported deployment mount')
+        for mount in container.get('Mounts', []):
+            if mount.get('Type') == 'bind':
+                safe_bind(mount['Source'], identifier)
+            elif mount.get('Type') not in ('volume', 'tmpfs'):
+                raise ValueError('Unsupported deployment mount')
+
+
+def validate_delegated_networks(networks):
+    for network in networks:
+        ipam = network.get('IPAM') or {}
+        if network.get('Driver') != 'bridge' or network.get('Options') or ipam.get('Driver', 'default') != 'default' or ipam.get('Options'):
+            raise ValueError('Custom saved networks require administrator access')
+
+
+def delegated_access(identifier, node):
+    detail(identifier, node)
+    directory = ROOT / project_id(identifier)
+    validate_delegated_config(json.loads((directory / 'compose.runtime.json').read_text()), identifier)
+    records = container_records(identifier)
+    if records:
+        containers = json.loads(capture(['docker', 'inspect', *[c['id'] for c in records]]))
+        validate_delegated_containers(containers, identifier)
+        for container in containers:
+            for mount in container.get('Mounts', []):
+                if mount.get('Type') == 'volume':
+                    volume = json.loads(capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
+                    if volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                        raise ValueError('This deployment uses an external volume')
+            for network in container.get('NetworkSettings', {}).get('Networks', {}):
+                value = json.loads(capture(['docker', 'network', 'inspect', network]))[0]
+                validate_delegated_networks([value])
+                if value.get('Driver') != 'bridge' or (value.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                    raise ValueError('This deployment uses an external network')
+    return {'safe': True}
+
+
 def prepare(data, identifier, directory, project_directory=None):
     project_directory = project_directory or directory
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
     source = data['compose'] if data['mode'] == 'compose' else image_compose(data)
+    if not trusted_management():
+        validate_delegated_source(source)
     (directory / 'compose.source.yaml').write_text(source)
     (directory / '.env').write_text(data.get('environment', ''))
     for name in ('compose.source.yaml', '.env'):
@@ -283,6 +466,8 @@ def prepare(data, identifier, directory, project_directory=None):
         location = ' (' + ', '.join(locations) + ')' if locations else ''
         raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
     config = bind_ports(config, data['address'], identifier)
+    if not trusted_management():
+        validate_delegated_config(config, identifier)
     apply_settings(config, load_settings(project_directory))
     apply_storage(config, identifier)
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
@@ -1272,6 +1457,8 @@ def console_target(identifier, node, container, shell):
         raise ValueError('Invalid console target')
     if not any(item['id'] == container and item['state'] == 'running' for item in container_records(identifier)):
         raise ValueError('Choose a running container belonging to this project')
+    if not trusted_management():
+        delegated_access(identifier, node)
     return ['docker', 'exec', '-it', container, shell]
 
 
@@ -1308,6 +1495,14 @@ def check_address(address, bridge, identifier=None, owned_interface=None, probe=
 
 
 def network_preflight(data):
+    if not trusted_management():
+        actor = os.environ.get('BETTERDOCKER_TASK_USER')
+        if not actor:
+            raise ValueError('Missing authenticated deployment owner')
+        program = ("use PVE::RPCEnvironment; use PVE::GuestHelpers; "
+                   "my $r=PVE::RPCEnvironment->init('cli'); $r->init_request(); $r->set_user($ARGV[0]); "
+                   "PVE::GuestHelpers::check_vnet_access($r,$ARGV[0],$ARGV[1],undef,undef);")
+        capture(['perl', '-e', program, actor, data['bridge']])
     bridge_addresses(data['bridge'])
     if data.get('ipv4mode', 'static') == 'static':
         check_address(data['address'], data['bridge'], probe=True)
@@ -1715,9 +1910,13 @@ def current_node():
     return os.uname().nodename.split('.')[0]
 
 
-def create(data, node, identifier=None):
+def create(data, node, identifier=None, hookscript=None, start=True):
     if node != current_node():
         raise ValueError('The request was sent to the wrong node')
+    if hookscript:
+        if os.environ.get('BETTERDOCKER_TASK_USER', 'root@pam') != 'root@pam':
+            raise ValueError('Changing the hookscript is only allowed for root@pam')
+        pve_hook(hookscript)
     identifier = project_id(identifier) if identifier else uuid.uuid4().hex
     with locked():
         if (METADATA / (identifier + ".json")).exists() or (ROOT / identifier).exists():
@@ -1743,12 +1942,20 @@ def create(data, node, identifier=None):
                 'ipv4mode': data.get('ipv4mode', 'static'), 'cidr': data.get('cidr', ''),
                 'interface': 'bd' + identifier[:12], 'mtu': data.get('mtu', 0),
                 'hwaddr': data.get('hwaddr') or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2))}
+        if hookscript:
+            info['hookscript'] = hookscript
         write_json(METADATA / (identifier + '.json'), info)
         try:
             ensure_address(info)
             rebind_runtime(directory, info['address'])
             write_json(METADATA / (identifier + '.json'), info)
-            run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
+            if start:
+                guest_hook(info, 'pre-start')
+                expect_guest_hook(info, 'post-start')
+                run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
+                guest_hook(info, 'post-start')
+            else:
+                run(compose_base(directory, identifier) + ['up', '--no-start'], timeout=1800)
             refresh(node)
         except Exception:
             info['status'] = 'error'
@@ -1800,7 +2007,7 @@ def detail(identifier, node):
         raise ValueError('Project belongs to another node')
     directory = ROOT / identifier
     deployment = json.loads((directory / 'request.json').read_text())
-    return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup', 'template') if info.get(key)}))
+    return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup', 'template', 'hookscript') if info.get(key)}))
 
 
 def parse_startup(value):
@@ -1827,7 +2034,7 @@ def access_state(identifier, node):
 
 def lifecycle_config(identifier, node):
     info = detail(identifier, node)
-    return {'onboot': int(bool(info.get('onboot'))), 'startup': info.get('startup', '')}
+    return {'onboot': int(bool(info.get('onboot'))), 'startup': info.get('startup', ''), 'hookscript': info.get('hookscript', '')}
 
 
 def restore_restart_policy(identifier, service=None):
@@ -1921,7 +2128,7 @@ def lifecycle_stop(identifier, node, timeout=180, force=1):
 
 
 def project_config(identifier, node, changes, digest=None):
-    if not isinstance(changes, dict) or set(changes) - {'description', 'tags', 'protection', 'onboot', 'startup'}:
+    if not isinstance(changes, dict) or set(changes) - {'description', 'tags', 'protection', 'onboot', 'startup', 'hookscript'}:
         raise ValueError('Invalid project configuration')
     if 'description' in changes and (not isinstance(changes['description'], str) or len(changes['description']) > 8192):
         raise ValueError('Notes cannot exceed 8192 characters')
@@ -1932,6 +2139,13 @@ def project_config(identifier, node, changes, digest=None):
         if len(entries) > 32 or any(not re.fullmatch(r'[a-z0-9_][a-z0-9_.+-]{0,63}', tag) for tag in entries):
             raise ValueError('Invalid tags')
         changes = dict(changes, tags=';'.join(entries))
+    if 'hookscript' in changes:
+        if os.environ.get('BETTERDOCKER_TASK_USER', 'root@pam') != 'root@pam':
+            raise ValueError('Changing the hookscript is only allowed for root@pam')
+        if not isinstance(changes['hookscript'], str):
+            raise ValueError('Invalid hookscript')
+        if changes['hookscript']:
+            pve_hook(changes['hookscript'])
     if 'onboot' in changes:
         if changes['onboot'] not in (0, 1):
             raise ValueError('Start at boot must be 0 or 1')
@@ -1963,6 +2177,8 @@ def project_config(identifier, node, changes, digest=None):
                     if os.path.exists(temporary):
                         os.unlink(temporary)
             info.update({key: value for key, value in changes.items() if key != 'description'})
+            if 'hookscript' in changes:
+                hook_journal(identifier).unlink(missing_ok=True)
             if set(changes) - {'description'}:
                 write_json(METADATA / (identifier + '.json'), info)
         except Exception:
@@ -2104,6 +2320,83 @@ def graceful_shutdown(identifier, timeout=60, service=None):
     return [item['id'] for item in records]
 
 
+def pve_hook(script, vmid=None, phase=None):
+    if not isinstance(script, str) or not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]*:snippets/[^\s:]+', script):
+        raise ValueError('Hookscript must be a snippet volume ID')
+    payload = {'action': 'run' if phase else 'check', 'hookscript': script}
+    if phase:
+        payload.update(vmid=vmid, phase=phase)
+    try:
+        result = run(['perl', str(Path(__file__).with_name('hooks.pl'))], input=json.dumps(payload),
+                     capture_output=True, timeout=1800)
+    except subprocess.CalledProcessError as error:
+        raise ValueError('Hookscript: ' + (error.stderr or error.stdout or 'execution failed').strip()) from error
+    if phase:
+        lines = result.stdout.splitlines()
+        if len(lines) > 1:
+            print('\n'.join(lines[:-1]))
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end='')
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def hook_journal(identifier):
+    return ROOT.parent / 'hooks' / (project_id(identifier) + '.json')
+
+
+def sync_guest_runtime_state(info):
+    states = [item['state'] for item in container_records(info['id'])]
+    info['status'] = 'running' if states and len(states) >= info.get('expected', 1) and all(state == 'running' for state in states) else (
+        'partial' if 'running' in states else 'stopped')
+    write_json(METADATA / (info['id'] + '.json'), {key: value for key, value in info.items() if key not in ('deployment', 'digest')})
+
+
+def guest_hook(info, phase):
+    script = info.get('hookscript')
+    if not script:
+        return
+    path = hook_journal(info['id'])
+    # A killed hook may already have changed external state. Do not run it twice.
+    if path.exists() and json.loads(path.read_text()).get('executing'):
+        raise ValueError('A hook was interrupted. Inspect Task History, then set or remove the hookscript to acknowledge it.')
+    write_json(path, {'phase': phase, 'executing': True})
+    try:
+        pve_hook(script, info['vmid'], phase)
+    except Exception as error:
+        path.unlink(missing_ok=True)
+        if phase == 'pre-start':
+            try:
+                sync_guest_runtime_state(info)
+            except Exception as state_error:
+                print(f'WARNING: could not update guest status: {state_error}', file=sys.stderr)
+            raise
+        print(f'WARNING: {phase} hook failed: {error}', file=sys.stderr)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def recover_guest_hook(info):
+    if not info.get('hookscript'):
+        return
+    path = hook_journal(info['id'])
+    if not path.exists():
+        return
+    state = json.loads(path.read_text())
+    if state.get('executing'):
+        sync_guest_runtime_state(info)
+        raise ValueError('A hook was interrupted. Inspect Task History, then set or remove the hookscript to acknowledge it.')
+    running = any(item['state'] in ('running', 'restarting', 'paused') for item in container_records(info['id']))
+    phase = state['phase']
+    if (phase == 'post-start' and running) or (phase == 'post-stop' and not running):
+        guest_hook(info, phase)
+    path.unlink(missing_ok=True)
+
+
+def expect_guest_hook(info, phase):
+    if info.get('hookscript'):
+        write_json(hook_journal(info['id']), {'phase': phase, 'executing': False})
+
+
 def action(identifier, node, operation, timeout=60):
     with locked():
         recover_network_transaction(identifier, node)
@@ -2120,12 +2413,15 @@ def action(identifier, node, operation, timeout=60):
             if info.get('replication'):
                 raise ValueError('Remove replication jobs and their state disk before deleting the DCT')
             check_protection(info)
-        if operation == 'delete' and any(item['state'] in ('running', 'restarting', 'paused')
-                                          for item in container_records(identifier)):
+        records = [] if operation == 'stop' and not info.get('hookscript') else container_records(identifier)
+        was_running = any(item['state'] in ('running', 'restarting', 'paused') for item in records)
+        if operation == 'delete' and was_running:
             raise ValueError('DCT is running. Stop it before removal.')
-        if operation == 'reboot' and not any(item['state'] in ('running', 'restarting', 'paused')
-                                            for item in container_records(identifier)):
+        if operation == 'reboot' and not was_running:
             raise ValueError('DCT is not running')
+        recover_guest_hook(info)
+        if operation == 'start' and records and len(records) == info.get('expected') and all(item['state'] == 'running' for item in records):
+            return
         if operation in ('start', 'restart', 'reboot'):
             prepare_network_start(info)
             info.pop('deployment', None)
@@ -2134,27 +2430,34 @@ def action(identifier, node, operation, timeout=60):
             clear_network_resume(identifier)
             info['status'] = 'creating'
             write_json(METADATA / (identifier + '.json'), info)
-        if operation == 'start':
-            apply_pending_settings(identifier, node)
-        if operation in ('shutdown', 'reboot'):
-            ids = graceful_shutdown(identifier, timeout)
-            if operation == 'reboot' and ids:
-                apply_pending_settings(identifier, node)
-                ids = [c['id'] for c in container_records(identifier)]
-                run(['docker', 'start', *ids], timeout=1800)
-        elif operation == 'force-stop':
-            ids = [item['id'] for item in container_records(identifier)
-                   if item['state'] in ('running', 'restarting', 'paused')]
-            if ids:
+        stopping = operation in ('stop', 'shutdown', 'force-stop', 'restart', 'reboot')
+        starting = operation in ('start', 'restart', 'reboot')
+        if stopping and was_running:
+            guest_hook(info, 'pre-stop')
+            expect_guest_hook(info, 'post-stop')
+            if operation in ('shutdown', 'reboot'):
+                graceful_shutdown(identifier, timeout)
+            elif operation == 'force-stop':
+                ids = [item['id'] for item in records if item['state'] in ('running', 'restarting', 'paused')]
                 run(['docker', 'kill', *ids], capture_output=True, timeout=30)
-        elif operation != 'start' or not restored_start(identifier):
-            containers = container_records(identifier) if operation == 'start' else []
-            # Live resource updates change the Compose hash, not container identity.
-            # Start existing instances without asking Compose to reconcile that hash.
-            if containers and len(containers) == info.get('expected'):
-                run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
             else:
-                run(compose_base(directory, identifier) + commands[operation], timeout=1800)
+                run(compose_base(directory, identifier) + ['stop'], timeout=1800)
+            guest_hook(info, 'post-stop')
+        if starting:
+            apply_pending_settings(identifier, node)
+            guest_hook(info, 'pre-start')
+            expect_guest_hook(info, 'post-start')
+            if not restored_start(identifier):
+                containers = container_records(identifier)
+                if containers and (operation in ('restart', 'reboot') or len(containers) == info.get('expected')):
+                    run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
+                else:
+                    run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
+            guest_hook(info, 'post-start')
+        elif operation == 'stop' and not was_running:
+            run(compose_base(directory, identifier) + ['stop'], timeout=1800)
+        elif operation == 'delete':
+            run(compose_base(directory, identifier) + ['down'], timeout=1800)
         if operation in ('start', 'restart', 'reboot'):
             restore_restart_policy(identifier)
         if operation == 'delete':
@@ -2170,6 +2473,7 @@ def action(identifier, node, operation, timeout=60):
                 if owner['id'] != identifier:
                     raise ValueError('DCT guest ID ownership changed')
                 write_json(reservation, dict(owner, name=info['name']))
+            hook_journal(identifier).unlink(missing_ok=True)
             (METADATA / (identifier + '.json')).unlink()
             release_id(identifier)
             print(f'Project removed. Volumes and bind-mount data are retained at {directory}.')
@@ -2335,6 +2639,8 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
         write_json(path, state)
         os.chmod(path, 0o600)
         try:
+            if os.environ.get('BETTERDOCKER_REQUIRE_SAFE') == '1' and (ROOT / identifier / 'compose.runtime.json').exists():
+                delegated_access(identifier, current_node())
             yield handle
         except Exception:
             state.update(active=False, failed=True, message='Operation failed. Open Task History.')
@@ -2938,6 +3244,14 @@ def snapshot_apply(identifier, node, name, check_only=False):
     snapshot_mounts(identifier, existing, allow_missing=True)
     saved = json.loads((folder / 'containers.json').read_text())
     configs = folder / 'configuration'
+    if not trusted_management():
+        validate_delegated_config(json.loads((configs / 'compose.runtime.json').read_text()), identifier)
+        validate_delegated_containers(saved, identifier)
+        for mount in manifest['mounts']:
+            if mount['type'] == 'bind':
+                safe_bind(mount['source'], identifier)
+        if (folder / 'networks.json').exists():
+            validate_delegated_networks(json.loads((folder / 'networks.json').read_text()))
     before_storage = storage_config(identifier)
     native = manifest.get('native_storage')
     saved_storage = json.loads((configs / 'storage.json').read_text()) if (configs / 'storage.json').exists() else {}
@@ -3161,7 +3475,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['network', 'network-config', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['network', 'network-config', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -3176,7 +3490,8 @@ def main():
         data = validate(json.loads(Path(values[0]).read_text()))
         if args.operation == 'create':
             with operation(values[2], 'create'):
-                create(data, values[1], values[2])
+                create(data, values[1], values[2], values[3] if len(values) > 3 else None,
+                       start=len(values) < 5 or values[4] != '0')
     elif args.operation == 'network-config':
         print(json.dumps(network_config(*values)))
     elif args.operation == 'network':
@@ -3201,6 +3516,8 @@ def main():
     elif args.operation == 'settings':
         with operation(values[0], 'settings'):
             service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()), values[4] if len(values) > 4 else None)
+    elif args.operation == 'delegated-check':
+        print(json.dumps(delegated_access(*values)))
     elif args.operation in ('console-check', 'console'):
         command = console_target(*values)
         if args.operation == 'console':

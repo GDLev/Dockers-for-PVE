@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use JSON qw(decode_json encode_json);
 use PVE::Storage;
+use PVE::RPCEnvironment;
 use PVE::Storage::LVMPlugin;
 use PVE::Cluster;
 use PVE::INotify;
@@ -57,6 +58,13 @@ if ($volid) {
 } else {
     $sid = $p->{storage};
     PVE::JSONSchema::parse_storage_id($sid);
+}
+if (($ENV{BETTERDOCKER_TRUSTED} // '1') ne '1' && $action =~ /\A(?:allocate|resize)\z/) {
+    my $actor = $ENV{BETTERDOCKER_TASK_USER} // die "Missing authenticated storage owner\n";
+    my $rpc = PVE::RPCEnvironment->init('cli');
+    $rpc->init_request();
+    $rpc->set_user($actor);
+    $rpc->check($actor, "/storage/$sid", ['Datastore.AllocateSpace']);
 }
 $scfg = PVE::Storage::storage_config($cfg, $sid);
 die "Only local directory, LVM-thin and ZFS rootdir storage is supported\n"

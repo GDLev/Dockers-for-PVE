@@ -25,6 +25,7 @@ sub get_user { $user }
 sub check { $main::grants{$_[2] . ':' . $_[3]->[0]} // 0 }
 1;
 ''')
+            (base / 'PVE/Exception.pm').write_text("package PVE::Exception; use Exporter 'import'; our @EXPORT_OK = qw(raise_perm_exc); sub raise_perm_exc { die 'Permission denied' } 1;")
             (base / 'PVE/GuestHelpers.pm').write_text('package PVE::GuestHelpers; sub assert_tag_permissions { 1 } 1;')
             (base / 'PVE/JSONSchema.pm').write_text('package PVE::JSONSchema; 1;')
             (base / 'PVE/AccessControl.pm').write_text('package PVE::AccessControl; 1;')
@@ -83,6 +84,7 @@ die 'deployment missing' unless $create->{parameters}->{properties}->{deployment
 for my $route (@main::registered) {
     die 'missing runtime permission wrapper' unless $route->{permissions}->{user} eq 'all';
     die 'unprotected' unless $route->{protected} || $route->{name} eq 'vncwebsocket';
+    die 'console incorrectly proxied between nodes' if $route->{name} =~ /^(termproxy|vncwebsocket)$/ && $route->{proxyto};
 }
 package PVE::API2::Cluster;
 our $info = { code => sub { [] }, returns => { items => { properties => { type => { enum => ['lxc', 'qemu'] } } } } };
@@ -183,6 +185,20 @@ die 'native snapshot grant rejected' unless $snapshot->{code}->(\%param) eq 'all
 $main::grants{'/vms/101:VM.Config.CPU'} = 1;
 my $caps = PVE::API2::BetterDocker::capabilities('a' x 32, 'pve');
 die 'CPU configuration missing' unless $caps->{cpu} && $caps->{settings};
+# Guest-scoped console and state operations must not require node console access.
+*PVE::API2::BetterDocker::output = sub { return '{"safe":true}' if $_[0]->[0] eq 'delegated-check'; return '{"services":[],"containers":[]}'; };
+$main::grants{'/vms/101:VM.Console'} = 1;
+$main::grants{'/vms/101:VM.Clone'} = 1;
+$main::grants{'/vms/101:VM.Migrate'} = 1;
+$main::grants{'/vms/101:VM.Config.Disk'} = 1;
+my $guest = PVE::API2::BetterDocker::capabilities('a' x 32, 'pve');
+die 'guest delegation rejected' unless $guest->{console} && $guest->{clone} && $guest->{migrate} && $guest->{disk};
+die 'guest delegation grants host trust' if $guest->{trusted} || $guest->{configure};
+*PVE::API2::BetterDocker::output = sub { '{"safe":false}' };
+$guest = PVE::API2::BetterDocker::capabilities('a' x 32, 'pve');
+die 'unsafe deployment delegated' if $guest->{console} || $guest->{clone} || $guest->{migrate} || $guest->{disk};
+delete @main::grants{map { '/vms/101:' . $_ } qw(VM.Console VM.Clone VM.Migrate VM.Config.Disk)};
+
 die 'CPU grant implies host or memory' if $caps->{configure} || $caps->{console} || $caps->{memory} || $caps->{network} || $caps->{options};
 PVE::API2::BetterDocker::register_docker_method({ name => 'settings', code => sub {
  die 'wrong worker field grant' unless $ENV{BETTERDOCKER_CONFIG_KEYS} eq 'cpus,cpuunits'; return 'allowed';
@@ -200,6 +216,9 @@ die 'delegate reads deployment' if exists($delegated->{deployment});
 die 'delegate lacks edit digest' unless $delegated->{digest} eq 'fingerprint';
 $param{action} = 'delete';
 $main::grants{'/nodes/pve:Sys.Console'} = 1;
+my $host_only = PVE::API2::BetterDocker::capabilities('a' x 32, 'pve');
+die 'node console grants guest configuration' if $host_only->{configure} || $host_only->{console} || $host_only->{remove};
+$main::grants{'/vms/101:' . $_} = 1 for qw(VM.Allocate VM.Config.Memory VM.Config.Network VM.Config.Options VM.Config.Disk);
 die 'host administrator rejected' unless $power->{code}->(\%param) eq 'allowed';
 for my $name ('update', 'settings', 'reset_settings', 'storage_limit', 'revert_settings') {
  my ($route) = grep { $_->{name} eq $name } @main::registered;

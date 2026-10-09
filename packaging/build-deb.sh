@@ -15,7 +15,7 @@ Package: proxmox-betterdockers
 Version: 0.19.0
 Architecture: all
 Maintainer: BetterDockers contributors
-Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, e2fsprogs, util-linux, coreutils, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2
+Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, e2fsprogs, util-linux, coreutils, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2
 Description: Native Proxmox VE interface for host Docker Compose projects
 CONTROL
 cat > "$BUILD_DIR/DEBIAN/triggers" <<'TRIGGERS'

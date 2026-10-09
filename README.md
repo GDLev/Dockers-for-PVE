@@ -41,7 +41,7 @@ These paths are on the Proxmox node after installation.
 
 | Path | Contents |
 | --- | --- |
-| `/usr/local/lib/betterdocker/` | Deployment, networking and integration scripts. |
+| `/usr/local/lib/betterdocker/` | Deployment, networking and integration scripts, including the native hook adapter. |
 | `/usr/share/perl5/PVE/API2/BetterDocker.pm` | Extension API. |
 | `/usr/share/perl5/PVE/BetterDocker/`, `/usr/share/perl5/PVE/VZDump/Docker.pm`, `/usr/share/perl5/PVE/HA/Resources/Docker.pm` | PVE backup, replication and HA providers. |
 | `/usr/share/pve-manager/js/betterdocker.js` | Web interface. |
@@ -69,6 +69,7 @@ The installer also updates `/usr/share/pve-manager/index.html.tpl`, `/usr/share/
 | `/var/lib/betterdocker/projects/<id>/pending.json` | Service settings waiting for Start or Reboot. |
 | `/var/lib/betterdocker/projects/<id>/ha.json` | Local HA enrollment marker. Docker restart policies stay disabled while enrolled. |
 | `/var/lib/betterdocker/ha-recoveries/<id>.json` | Interrupted HA recovery ownership journal. |
+| `/var/lib/betterdocker/hooks/<id>.json` | Guest hook execution journal used for interrupted lifecycle operations. |
 | `/var/lib/betterdocker/projects/<id>/replication.json` | Owned replication state disk and successful target checkpoints. |
 | `/var/lib/betterdocker/betterdocker-recovery-<id>.json` | Temporary ZFS recovery clone ownership. Retained if cleanup is interrupted. |
 | `/var/lib/betterdocker/projects/<id>/storage.json` | Managed PVE data disk ID and mount mapping. Older installations may still use `storage.ext4`. |
@@ -79,9 +80,9 @@ Without a managed data disk, application data stays in the bind-mount directorie
 
 ## Limitations
 
-- **Permissions:** CPU, memory, DNS and options can be delegated with `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network` and `VM.Config.Options` on `/vms/<vmid>`. Viewing a DCT requires `VM.Audit`; power operations use `VM.PowerMgmt`.
-- **Host access:** DCTs use Docker and the host kernel. Compose, images, disks, deployment removal, logs and consoles require root or node `Sys.Console`. Per-DCT configuration permissions do not grant those operations.
-- **PVE features:** native resource pools, guest hook scripts and per-DCT firewall are unavailable.
+- **Delegation:** guest permissions are supported, with the additional restrictions below. Privileged deployments and host resources remain administrator-only. Docker still runs as root on the node; API checks do not replace runtime isolation.
+- **Resource pools:** DCTs use native PVE pools and inherit their guest permissions. Choose a pool when creating, cloning or restoring a DCT; use the pool's Members screen to add, move or remove existing guests. Migration keeps membership. Clones and restored guests join only the pool selected for the new guest.
+- **Hook scripts:** root can select an executable script from snippet storage in Options. Scripts receive the numeric guest ID and `pre-start`, `post-start`, `pre-stop` or `post-stop`, as in LXC. A failed `pre-start` blocks startup; other failures produce task warnings. The snippet must exist on the destination before migration or restore. Hooks cover PVE-controlled guest operations, including boot and HA. Docker-internal restarts and individual service actions do not invoke guest hooks. If a hook is killed, inspect Task History and set or remove the hookscript to acknowledge it before retrying; its external side effects cannot be undone automatically.
 - **Backup and restore:** native vzdump, backup jobs and PBS support DCTs, including Backup All. Restore creates a stopped DCT with a new guest ID and endpoint. Backups include deployment files, settings, images, writable layers and owned application data. External mounts, shared volumes, non-local volume drivers, custom Docker IPAM and fixed internal Docker addresses are unsupported. All service instances must exist before backup or cloning. Snapshots stay on the node and are not backups.
 - **Clones and migration:** full clones have independent IDs, addresses and data. Templates must be stopped and support full clones only. Migration requires a stopped DCT, a static IPv4 endpoint and no snapshot history. Install the extension on both nodes. A replicated DCT needs a successful complete checkpoint on its destination; replication jobs reverse direction after the move.
 - **Replication:** native PVE jobs and ZFS transport copy an additional disk containing deployment files, images, writable layers and owned data. Setup requires a managed ZFS data disk. Capturing state briefly pauses services and needs extra space. Snapshot history is not included. Remove HA management, replication jobs and their state disk before deleting a DCT.
@@ -99,3 +100,28 @@ Without a managed data disk, application data stays in the bind-mount directorie
 Bug reports and pull requests are welcome. You can also support development on Ko-fi.
 
 [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/gdlev)
+
+## Permissions
+
+Grant guest privileges on `/vms/<vmid>` or through a native resource pool. Creation needs `VM.Allocate` on the chosen ID, `/vms` or the selected `/pool/<poolid>`. Changing membership uses native pool permissions. Only `root@pam` can set or remove a hookscript.
+
+| Operation | Privileges |
+| --- | --- |
+| View status and settings | `VM.Audit` |
+| Read logs or open a shell | `VM.Console` |
+| Start, stop or restart | `VM.PowerMgmt` |
+| Edit CPU, memory, DNS or options | Corresponding `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network` or `VM.Config.Options` |
+| Edit the complete deployment | All five: `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network`, `VM.Config.Disk`, `VM.Config.Options` |
+| Create or resize a data disk | `VM.Config.Disk` and storage `Datastore.AllocateSpace` |
+| Create or delete snapshots | `VM.Snapshot` |
+| Roll back a snapshot | `VM.Snapshot.Rollback` |
+| Clone | Source `VM.Clone`, destination `VM.Allocate`, applicable storage permissions |
+| Backup and restore | Native backup/storage permissions; restore also needs destination `VM.Allocate` |
+| Migrate | `VM.Migrate` and applicable storage permissions |
+| Convert to template or remove | `VM.Allocate` |
+
+Selecting a bridge requires native `SDN.Use` access to that bridge. Restricted API tokens use the intersection of user and token permissions. Interactive consoles require a user session.
+
+Delegated Compose supports project-owned bind mounts, local volumes and bridge networks. Host namespaces, privileged mode, added capabilities, devices, Docker sockets, external resources and custom drivers require administrator access. Only the imported `.env` may be referenced as an environment file. Delegated pulls do not use the administrator's Docker credentials. Existing deployments with unsafe settings stay administrator-only for deployment, console and state-management operations.
+
+Deployment editors can read imported environment variables and source files. Console users can see application secrets through logs or a shell. Backup access includes the secrets stored in that backup. Audit-only responses do not include deployment source or environment variables.

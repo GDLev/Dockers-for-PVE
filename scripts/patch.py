@@ -16,6 +16,7 @@ PVE::API2::BetterDocker::hook_native_node_operations();
 CLUSTER_BLOCK = '''# BEGIN BETTERDOCKER
 use PVE::API2::BetterDocker;
 PVE::API2::BetterDocker::hook_resources();
+PVE::API2::BetterDocker::hook_pools();
 PVE::API2::BetterDocker::hook_native_cluster_operations();
 # END BETTERDOCKER
 '''
@@ -42,13 +43,13 @@ VZDUMP_PBS = """# BEGIN BETTERDOCKER
 # END BETTERDOCKER
 """
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.46" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.52" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker-locales/en.js?v=19.46"></script>
-<script src="/pve2/js/betterdocker-locales/pl.js?v=19.46"></script>
-<script src="/pve2/js/betterdocker.js?v=19.46"></script>
+<script src="/pve2/js/betterdocker-locales/en.js?v=19.52"></script>
+<script src="/pve2/js/betterdocker-locales/pl.js?v=19.52"></script>
+<script src="/pve2/js/betterdocker.js?v=19.52"></script>
 <!-- END BETTERDOCKER -->'''
 
 
@@ -107,6 +108,16 @@ def manager_transform(text, remove=False):
     if text.count(anchor) != 3:
         raise RuntimeError('Unsupported native HA editor; refusing patch')
     text = text.replace(anchor, anchor + " /* BEGIN BETTERDOCKER */ && res[1] !== 'docker' /* END BETTERDOCKER */")
+    for anchor in ("(data.type === 'lxc' || data.type === 'qemu') && data.pool !== me.pool;",
+                   "rec.data.type === 'openvz'\n                )"):
+        if text.count(anchor) != 1:
+            raise RuntimeError('Unsupported native pool member controls; refusing patch')
+        addition = " /* BEGIN BETTERDOCKER */ || data.type === 'docker' /* END BETTERDOCKER */" if anchor.startswith('(') else " /* BEGIN BETTERDOCKER */ || rec.data.type === 'docker' /* END BETTERDOCKER */"
+        if anchor.startswith('('):
+            replacement = anchor.replace("'qemu')", "'qemu'" + addition + ")")
+        else:
+            replacement = anchor.replace("'openvz'", "'openvz'" + addition)
+        text = text.replace(anchor, replacement, 1)
     start = text.index("Ext.define('PVE.ha.VMResourceInputPanel'")
     end = text.index("Ext.define('PVE.ha.VMResourceEdit'", start)
     panel = text[start:end]

@@ -272,6 +272,7 @@ def migrate(identifier, node, target, storage, digest=None):
         with worker.locked():
             info = worker.detail(identifier, node)
             worker.assert_configuration_digest(identifier, node, digest)
+            worker.recover_guest_hook(info)
             worker.require_stopped(worker.container_records(identifier))
             if info.get('replication') and target not in info['replication'].get('targets', {}):
                 raise ValueError('Replicated DCT migration requires a successful replica on the destination')

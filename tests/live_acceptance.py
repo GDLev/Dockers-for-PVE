@@ -20,8 +20,8 @@ import provision as worker
 import transfer
 
 
-def api(method, path, **values):
-    command = ['pvesh', method, path, '--output-format', 'json']
+def api(method, route, **values):
+    command = ['pvesh', method, route, '--output-format', 'json']
     for key, value in values.items():
         command += ['--' + key, json.dumps(value) if isinstance(value, (dict, list)) else str(value)]
     result = subprocess.run(command, capture_output=True, text=True)

@@ -171,6 +171,7 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
         worker.recover_network_transaction(identifier, node)
         worker.recover_storage_transaction(identifier)
         worker.recover_snapshot_transaction(identifier)
+        worker.recover_guest_hook(info)
         if folder.exists() or folder.resolve().is_relative_to((worker.ROOT / identifier).resolve()):
             raise ValueError('Export directory must be new and separate from the DCT')
         folder.mkdir(parents=True, mode=0o700)
@@ -393,11 +394,18 @@ def adapted_state(folder, identifier, address):
     return manifest, runtime, volumes, networks, source
 
 
-def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False):
+def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False, trusted_hook=False):
     folder = Path(folder)
     manifest = check_state(folder)
     check_portable_networks(read(folder / 'configuration' / 'compose.runtime.json'))
     worker.project_id(identifier)
+    if not worker.trusted_management():
+        worker.validate_delegated_config(read(folder / 'configuration' / 'compose.runtime.json'), manifest['id'])
+        worker.validate_delegated_containers(read(folder / 'containers.json'), manifest['id'])
+        worker.validate_delegated_networks(read(folder / 'networks.json'))
+        for mount in manifest['mounts']:
+            if mount['type'] == 'bind':
+                worker.safe_bind(mount['source'], manifest['id'])
     if node != worker.current_node():
         raise ValueError('Restore was sent to the wrong node')
     with operation(identifier, 'restore', lock_fd), worker.locked():
@@ -422,7 +430,11 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
         request = worker.validate(request)
         worker.network_preflight(request)
         saved_info = read(folder / 'configuration' / 'metadata.json')
-        info = {key: saved_info[key] for key in ('tags', 'notes', 'onboot', 'startup') if key in saved_info}
+        info = {key: saved_info[key] for key in ('tags', 'notes', 'onboot', 'startup', 'hookscript') if key in saved_info}
+        if info.get('hookscript'):
+            if not trusted_hook and os.environ.get('BETTERDOCKER_TASK_USER', 'root@pam') != 'root@pam':
+                raise ValueError('Restoring a hookscript is only allowed for root@pam')
+            worker.pve_hook(info['hookscript'])
         info.update(id=identifier, vmid=vmid, node=node, name=request['name'], bridge=request['bridge'],
                     address=request['address'], cidr=request['cidr'], ipv4mode=request['ipv4mode'], mtu=request['mtu'],
                     hwaddr=request['hwaddr'] or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2)),
@@ -608,7 +620,7 @@ def clone(identifier, node, destination, options):
     with tempfile.TemporaryDirectory(prefix='betterdocker-clone-') as temporary:
         folder = Path(temporary) / 'state'
         capture_state(identifier, node, folder, digest=options.get('digest'))
-        return restore_state(folder, destination, node, options.get('deployment', {}), options.get('storage', ''))
+        return restore_state(folder, destination, node, options.get('deployment', {}), options.get('storage', ''), trusted_hook=True)
 
 
 def make_template(identifier, node, digest=None):

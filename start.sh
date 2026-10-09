@@ -61,11 +61,12 @@ esac
 if [[ "$ACTION" == install ]]; then
     echo 'Updating the package index and installing BetterDocker dependencies.'
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs
 else
     for command in python3 curl arping dhclient; do
         command -v "$command" >/dev/null || { echo "Missing $command; run start.sh install." >&2; exit 1; }
     done
+    python3 -c 'import yaml' >/dev/null 2>&1 || { echo 'Missing python3-yaml; run start.sh install.' >&2; exit 1; }
 fi
 python3 "$PROJECT_DIR/scripts/patch.py" check
 BACKUP_DIR="/var/backups/betterdocker/$(date +%Y%m%d-%H%M%S)-$$"
@@ -111,6 +112,7 @@ TARGETS=(
     /usr/share/perl5/PVE/BetterDocker/Replication.pm
     /usr/local/lib/betterdocker/ha.py
     /usr/share/perl5/PVE/HA/Resources/Docker.pm
+    /usr/local/lib/betterdocker/hooks.pl
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -150,6 +152,7 @@ trap rollback ERR
 install -d -m 0755 /usr/local/lib/betterdocker
 install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
 install -d -m 0755 /usr/share/perl5/PVE/BetterDocker /usr/share/perl5/PVE/VZDump
+install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
 install -m 0755 "$PROJECT_DIR/scripts/ha.py" "${TARGETS[28]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/HA/Resources/Docker.pm" "${TARGETS[29]}"
 install -m 0755 "$PROJECT_DIR/scripts/replica.py" "${TARGETS[26]}"
