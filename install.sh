@@ -16,7 +16,9 @@ main() {
     done
     local version
     version=$(pveversion)
-    [[ "$version" =~ pve-manager/(8|9)\. ]] || { echo "Unsupported version: $version" >&2; return 1; }
+    [[ "$version" =~ pve-manager/9\.(1|2)\. ]] || {
+        echo "Unsupported version: $version. Supported PVE releases: 9.1 and 9.2." >&2; return 1;
+    }
 
     project_dir=$(mktemp -d /tmp/betterdocker-install.XXXXXXXX)
     # Expand the path now: the local variable is gone when the EXIT trap runs.

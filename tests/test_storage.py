@@ -11,6 +11,36 @@ ID = 'a' * 32
 
 
 class StorageTests(TestCase):
+    def test_refresh_skips_migrated_ownership_without_hiding_other_write_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'projects'
+            metadata = Path(tmp) / 'metadata'
+            metadata.mkdir()
+            (root / ID).mkdir(parents=True)
+            (root / ID / 'metrics.json').write_text('{}')
+            info = {'id': ID, 'node': 'pve', 'status': 'stopped', 'expected': 1}
+            (metadata / (ID + '.json')).write_text(json.dumps(info))
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'METADATA', metadata), \
+                    patch.object(worker, 'summaries', return_value=[dict(info)]), \
+                    patch.object(worker, 'capture', return_value=''), \
+                    patch.object(worker, 'sync_dhcp'), patch.object(worker, 'recover_network_transaction'), \
+                    patch.object(worker, 'write_json', side_effect=ValueError('DCT ownership moved to another node')):
+                worker.refresh('pve')
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'METADATA', metadata), \
+                    patch.object(worker, 'summaries', return_value=[dict(info)]), \
+                    patch.object(worker, 'capture', return_value=''), \
+                    patch.object(worker, 'sync_dhcp'), patch.object(worker, 'recover_network_transaction'), \
+                    patch.object(worker, 'write_json', side_effect=ValueError('Unrelated failure')):
+                with self.assertRaisesRegex(ValueError, 'Unrelated failure'):
+                    worker.refresh('pve')
+
+    def test_stopped_snapshot_flushes_dirty_filesystem_buffers(self):
+        with patch.object(worker, 'container_records', return_value=[{'id': '1' * 64, 'state': 'exited'}]), \
+                patch.object(worker.os, 'sync') as sync, patch.object(worker, 'run') as run:
+            with worker.snapshot_quiesce(ID):
+                sync.assert_called_once_with()
+            run.assert_not_called()
+
     def test_pve_progress_output_does_not_corrupt_json_protocol(self):
         result = subprocess.CompletedProcess([], 0, stdout='Logical volume created\n{"volid":"local-lvm:vm-105-disk-0"}\n')
         with patch.object(worker, 'run', return_value=result):

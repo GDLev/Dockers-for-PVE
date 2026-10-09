@@ -144,7 +144,7 @@ class WorkerTests(unittest.TestCase):
             modified = patcher.transform(source, kind)
             self.assertEqual(patcher.transform(modified, kind), modified)
             restored = patcher.transform(modified, kind, remove=True)
-            self.assertEqual(restored.split(), source.split())
+            self.assertEqual(restored, source)
 
     def test_unsupported_package_refused(self):
         for kind in ['node', 'ui', 'cluster', 'vmid']:

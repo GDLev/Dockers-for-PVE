@@ -39,6 +39,13 @@ class GuestIDTests(unittest.TestCase):
             with self.subTest(vmid=vmid), self.assertRaisesRegex(ValueError, 'DCT ID'):
                 worker.validate(dict(BASE, vmid=vmid))
 
+    def test_ha_environment_patch_is_repeatable_and_reversible(self):
+        source = "package PVE::HA::Env::PVE2;\nPVE::HA::Resources->init();\n\n1;\n"
+        patched = patcher.transform(source, 'ha-env')
+        self.assertEqual(patcher.transform(patched, 'ha-env'), patched)
+        self.assertEqual(patcher.transform(patched, 'ha-env', remove=True), source)
+        self.assertEqual(patcher.transform(source, 'ha-env', remove=True), source)
+
     def test_native_guest_check_patch_is_compatible_with_upstream(self):
         source = 'sub check_vmid_unused {\n    my ($vmid, $noerr) = @_;\n    return 1;\n}\n'
         patched = patcher.transform(source, 'vmid')
@@ -58,9 +65,15 @@ die 'missing readable collision error' unless $@ =~ /DCT 101 already exists/;
             subprocess.run(['perl', '-e', code], check=True)
 
     def test_backup_patch_is_reversible_and_rejects_unknown_upstream(self):
-        source = 'sub get_included_guests {\n    my ($job) = @_;\n    return {};\n}\n'
+        source = ("my @pve_vzdump_classes = qw(PVE::VZDump::QemuServer PVE::VZDump::LXC);\n"
+                  "sub exec_backup {\n    my $vmlist = PVE::Cluster::get_vmlist();\n}\n"
+                  "sub get_included_guests {\n    my ($job) = @_;\n    my $vmlist = PVE::Cluster::get_vmlist();\n}\n"
+                  "sub group {\n            if (1) {\n            } else {\n"
+                  "                die \"pbs backup not implemented for plugin type 'x'\";\n            }\n}\n")
         patched = patcher.transform(source, 'vzdump')
-        self.assertIn("check_native_guest_ids('backup', $job->{vmid})", patched)
+        self.assertIn("push @pve_vzdump_classes, 'PVE::VZDump::Docker'", patched)
+        self.assertEqual(patched.count('Backup::inventory($vmlist)'), 2)
+        self.assertIn('host/dct-$vmid', patched)
         self.assertEqual(patcher.transform(patched, 'vzdump'), patched)
         self.assertEqual(patcher.transform(patched, 'vzdump', remove=True), source)
         with self.assertRaisesRegex(RuntimeError, 'Unsupported VZDump'):

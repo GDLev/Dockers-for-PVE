@@ -10,7 +10,9 @@ done
 exec 9>/run/lock/betterdocker-install.lock
 flock -n 9 || { echo 'Another BetterDocker installer is running.' >&2; exit 1; }
 VERSION=$(pveversion)
-[[ "$VERSION" =~ pve-manager/(8|9)\. ]] || { echo "Unsupported version: $VERSION" >&2; exit 1; }
+[[ "$ACTION" == uninstall || "$VERSION" =~ pve-manager/9\.(1|2)\. ]] || {
+    echo "Unsupported version: $VERSION. Supported PVE releases: 9.1 and 9.2." >&2; exit 1;
+}
 case "$ACTION" in
     check)
         command -v python3 >/dev/null || { echo 'Python 3 is missing. Run installation first.' >&2; exit 1; }
@@ -19,6 +21,24 @@ case "$ACTION" in
         exit 0 ;;
     uninstall)
         command -v python3 >/dev/null || { echo 'Python 3 is required for uninstall.' >&2; exit 1; }
+        # The native parser skips unknown resource types when the provider is
+        # not loaded. Check the on-disk sections before removing that provider.
+        perl -e '
+            my $path = "/etc/pve/ha/resources.cfg";
+            if (-f $path) {
+                open(my $fh, "<", $path) or die "$path: $!\n";
+                local $/; my $config = <$fh>;
+                die qq(Remove DCT HA resources before uninstalling BetterDocker.\n)
+                    if $config =~ /^docker:[ \t]*[1-9][0-9]*[ \t]*$/m;
+            }
+        '
+        perl -MPVE::ReplicationConfig -e '
+            my $config = PVE::ReplicationConfig->new();
+            for my $job (values %{$config->{ids}}) {
+                die "Remove DCT replication jobs before uninstalling BetterDocker.\n"
+                    if -f "/etc/pve/betterdocker/ids/$job->{guest}.json";
+            }
+        '
         systemctl disable --now betterdocker-integration.timer 2>/dev/null || true
         if [[ -f /etc/systemd/system/betterdocker-lifecycle.service ]]; then
             systemctl disable --now betterdocker-lifecycle.service
@@ -28,10 +48,11 @@ case "$ACTION" in
         fi
         python3 "$PROJECT_DIR/scripts/patch.py" remove
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
-        systemctl restart pvedaemon pveproxy
+        systemctl restart pvedaemon pveproxy pvescheduler pve-ha-crm pve-ha-lrm
         rm -f /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
             /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg \
-            /usr/share/pve-manager/js/betterdocker-locales/en.js /usr/share/pve-manager/js/betterdocker-locales/pl.js
+            /usr/share/pve-manager/js/betterdocker-locales/en.js /usr/share/pve-manager/js/betterdocker-locales/pl.js \
+            /usr/share/perl5/PVE/BetterDocker/Backup.pm /usr/share/perl5/PVE/BetterDocker/Replication.pm /usr/share/perl5/PVE/VZDump/Docker.pm /usr/share/perl5/PVE/HA/Resources/Docker.pm
         echo 'UI integration removed. Docker projects, volumes and network/lease maintenance are retained.'
         exit 0 ;;
     install|repair) ;;
@@ -54,6 +75,11 @@ cp -a /usr/share/pve-manager/index.html.tpl "$BACKUP_DIR/index.html.tpl"
 cp -a /usr/share/perl5/PVE/API2/Cluster.pm "$BACKUP_DIR/Cluster.pm"
 cp -a /usr/share/perl5/PVE/Cluster.pm "$BACKUP_DIR/Cluster-lib.pm"
 cp -a /usr/share/perl5/PVE/VZDump.pm "$BACKUP_DIR/VZDump.pm"
+cp -a /usr/share/perl5/PVE/HA/Env/PVE2.pm "$BACKUP_DIR/HA-Env.pm"
+cp -a /usr/share/perl5/PVE/API2/HA/Resources.pm "$BACKUP_DIR/HA-API.pm"
+cp -a /usr/share/perl5/PVE/Replication.pm "$BACKUP_DIR/Replication.pm"
+cp -a /usr/share/perl5/PVE/API2/Replication.pm "$BACKUP_DIR/Replication-API.pm"
+cp -a /usr/share/pve-manager/js/pvemanagerlib.js "$BACKUP_DIR/pvemanagerlib.js"
 TARGETS=(
     /usr/local/lib/betterdocker/provision.py
     /usr/local/lib/betterdocker/docker-install.sh
@@ -76,6 +102,15 @@ TARGETS=(
     /etc/apparmor.d/local/betterdocker-dhclient
     /etc/apparmor.d/local/usr.sbin.dhclient
     /usr/local/lib/betterdocker/storage.pl
+    /usr/local/lib/betterdocker/guest_state.py
+    /usr/local/lib/betterdocker/backup.pl
+    /usr/share/perl5/PVE/BetterDocker/Backup.pm
+    /usr/share/perl5/PVE/VZDump/Docker.pm
+    /usr/local/lib/betterdocker/transfer.py
+    /usr/local/lib/betterdocker/replica.py
+    /usr/share/perl5/PVE/BetterDocker/Replication.pm
+    /usr/local/lib/betterdocker/ha.py
+    /usr/share/perl5/PVE/HA/Resources/Docker.pm
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -89,6 +124,11 @@ rollback() {
     cp -a "$BACKUP_DIR/Cluster.pm" /usr/share/perl5/PVE/API2/Cluster.pm
     cp -a "$BACKUP_DIR/Cluster-lib.pm" /usr/share/perl5/PVE/Cluster.pm
     cp -a "$BACKUP_DIR/VZDump.pm" /usr/share/perl5/PVE/VZDump.pm
+    cp -a "$BACKUP_DIR/HA-Env.pm" /usr/share/perl5/PVE/HA/Env/PVE2.pm
+    cp -a "$BACKUP_DIR/HA-API.pm" /usr/share/perl5/PVE/API2/HA/Resources.pm
+    cp -a "$BACKUP_DIR/Replication.pm" /usr/share/perl5/PVE/Replication.pm
+    cp -a "$BACKUP_DIR/Replication-API.pm" /usr/share/perl5/PVE/API2/Replication.pm
+    cp -a "$BACKUP_DIR/pvemanagerlib.js" /usr/share/pve-manager/js/pvemanagerlib.js
     for index in "${!TARGETS[@]}"; do
         if [[ -e "$BACKUP_DIR/addon-$index" ]]; then
             cp -a "$BACKUP_DIR/addon-$index" "${TARGETS[$index]}"
@@ -104,11 +144,21 @@ rollback() {
         apparmor_parser -r /etc/apparmor.d/usr.sbin.dhclient || true
     fi
     systemctl daemon-reload || true
-    systemctl restart pvedaemon pveproxy || true
+    systemctl restart pvedaemon pveproxy pvescheduler pve-ha-crm pve-ha-lrm || true
 }
 trap rollback ERR
 install -d -m 0755 /usr/local/lib/betterdocker
 install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
+install -d -m 0755 /usr/share/perl5/PVE/BetterDocker /usr/share/perl5/PVE/VZDump
+install -m 0755 "$PROJECT_DIR/scripts/ha.py" "${TARGETS[28]}"
+install -m 0644 "$PROJECT_DIR/backend/PVE/HA/Resources/Docker.pm" "${TARGETS[29]}"
+install -m 0755 "$PROJECT_DIR/scripts/replica.py" "${TARGETS[26]}"
+install -m 0644 "$PROJECT_DIR/backend/PVE/BetterDocker/Replication.pm" "${TARGETS[27]}"
+install -m 0755 "$PROJECT_DIR/scripts/transfer.py" "${TARGETS[25]}"
+install -m 0755 "$PROJECT_DIR/scripts/guest_state.py" "${TARGETS[21]}"
+install -m 0755 "$PROJECT_DIR/scripts/backup.pl" "${TARGETS[22]}"
+install -m 0644 "$PROJECT_DIR/backend/PVE/BetterDocker/Backup.pm" "${TARGETS[23]}"
+install -m 0644 "$PROJECT_DIR/backend/PVE/VZDump/Docker.pm" "${TARGETS[24]}"
 install -m 0755 "$PROJECT_DIR/scripts/storage.pl" "${TARGETS[20]}"
 install -m 0755 "$PROJECT_DIR/scripts/provision.py" "${TARGETS[0]}"
 install -m 0755 "$PROJECT_DIR/scripts/docker-install.sh" "${TARGETS[1]}"
@@ -145,7 +195,7 @@ systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
-systemctl restart pvedaemon pveproxy
+systemctl restart pvedaemon pveproxy pvescheduler pve-ha-crm pve-ha-lrm
 systemctl is-active --quiet pvedaemon pveproxy
 NODE=$(hostname -s)
 pvesh usage "/nodes/$NODE/docker" --verbose >/dev/null

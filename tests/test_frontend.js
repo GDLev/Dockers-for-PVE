@@ -17,7 +17,7 @@ const storageBrowserClass = { prototype: { initComponent() { this.nativeInitiali
 const storageImageClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const context = { window: null, console,
     PVE: { storage: { Browser: storageBrowserClass, ImageView: storageImageClass }, node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {}, initComponent() { this.nativeInitialized = true; } } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
-        Utils: { get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
+        Utils: { format_ha: value => value.managed ? value.state || 'none' : 'none', isStandaloneNode: () => false, get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { format_boolean: value => value ? 'Yes' : 'No', override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
         override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
@@ -71,8 +71,11 @@ const configPanel = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), node
     callParent, on() {}, down() { return null; } };
 definitions['PVE.betterdocker.Config'].initComponent.call(configPanel);
 assert.equal(definitions['PVE.betterdocker.Config'].extend, 'PVE.panel.Config');
+assert.deepEqual(Array.from(configPanel.tbar.filter(item => item && item.text), item => item.text), ['Start', 'Shutdown', 'Migrate', 'Console', 'More']);
+assert(!configPanel.tbar.find(item => item.text === 'More').menu.some(item => item.text === 'Migrate'));
 assert.deepEqual(Array.from(configPanel.items, card => card.title),
-    ['Summary', 'Console', 'Services', 'Resources', 'Network', 'DNS', 'Options', 'Task History', 'Snapshots', 'Deployment', 'Logs', 'Permissions']);
+    ['Summary', 'Console', 'Services', 'Resources', 'Network', 'DNS', 'Options', 'Task History', 'Snapshots', 'Backup', 'Replication', 'Deployment', 'Logs', 'Permissions']);
+assert.equal(configPanel.items.find(card => card.title === 'Backup').xtype, 'pveBackupView');
 assert(configPanel.items.every(card => card.itemId && card.iconCls));
 assert(configPanel.items.find(card => card.title === 'Resources').tbar.some(button => button.text === 'Edit'));
 assert.equal(configPanel.items.find(card => card.title === 'Console').xtype, 'pveBetterDockerConsole');
@@ -157,7 +160,7 @@ assert.equal(dockerConfig.activateCard.call(activation, 'resources'), 'activated
 console.log('Native Help fallback and layout recovery regression passed');
 
 const summaryEvents = {}, chartCalls = [], chartConfigs = [];
-const nativeStore = { startUpdate() { chartCalls.push('start'); }, stopUpdate() { chartCalls.push('stop'); }, destroy() {} };
+const nativeStore = { startUpdate() { chartCalls.push('start'); }, stopUpdate() { chartCalls.push('stop'); }, destroy() { chartCalls.push('destroy'); } };
 context.Ext.create = (name, config) => { if (name === 'Proxmox.data.RRDStore') { chartConfigs.push(config); } return nativeStore; };
 context.Ext.state = { Manager: { get: () => ({}), getProvider: () => ({}) } };
 const summaryView = { apiUrl: '/nodes/pve/docker/' + 'a'.repeat(32), projectName: 'app',
@@ -190,6 +193,11 @@ definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, sum
 assert.equal(summaryFields['#memoryValue'].usage, 0.25);
 assert.equal(summaryFields['#cpuValue'].usage, 0.25);
 assert(summaryFields.title.includes('Uptime: 60'));
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, { ...summaryData, ha: { managed: 1, state: 'started' } });
+assert.equal(summaryFields['#haValue'].text, 'started');
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, { ...summaryData, ha_recovery: { source: 'other' }, metrics: {} });
+assert.equal(summaryFields['#cpuValue'].text, '');
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, summaryData);
 // Only Summary exists initially: inactive native navigation cards are created lazily.
 const panelEvents = {};
 const lazyPanel = { pveSelNode: configPanel.pveSelNode, callParent,
@@ -232,6 +240,7 @@ const menuWorkspace = { selectById: id => navigation.push(id), query: () => [
 const commandMenu = { pveSelNode: clickedRecord, workspace: menuWorkspace, callParent };
 definitions['PVE.betterdocker.CmdMenu'].initComponent.call(commandMenu);
 assert(commandMenu.items.find(item => item.text === 'Start').disabled);
+assert.deepEqual(Array.from(commandMenu.items.filter(item => item.text).slice(0, 8), item => item.text), ['Start', 'Shutdown', 'Stop', 'Reboot', 'Clone', 'Migrate', 'Convert to template', 'Console']);
 commandMenu.items.find(item => item.text === 'Reboot').handler();
 assert.equal(consoleRequest.url, '/nodes/pve-other/docker/' + 'c'.repeat(32) + '/action');
 const beforeRestart = createdWindows.length;
@@ -489,6 +498,9 @@ console.log('Native snapshot submission, immutable names and view-only access pa
 
 const locales = context.PVE.betterdockerLocales;
 assert.deepEqual(Object.keys(locales.en.messages).sort(), Object.keys(locales.pl.messages).sort());
+for (const key of Object.keys(locales.en.messages)) {
+    assert(fs.readFileSync('frontend/betterdocker.js', 'utf8').includes(key), `Unused translation: ${key}`);
+}
 context.gettext = value => ({ Summary: 'Podsumowanie', Deployment: 'Native deployment' })[value] || value;
 const nativeTranslationWizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(nativeTranslationWizard);
@@ -617,6 +629,9 @@ summaryEvents.activate();
 assert.equal(chartCalls.at(-1), 'start');
 summaryEvents.hide();
 assert.equal(chartCalls.at(-1), 'stop');
+summaryEvents.destroy();
+assert.equal(chartCalls.at(-1), 'stop');
+assert(!chartCalls.includes('destroy'), 'destroying an active native RRD store breaks its in-flight callbacks');
 
 // A slow or disconnected backend must not accumulate polling requests.
 const statusEvents = {}, statusRequests = [];
@@ -933,3 +948,17 @@ const guestMenu = { pveSelNode: { data: { type: 'docker' } }, items: [{ itemId: 
 overrides.get(context.PVE.panel.Config).initComponent.call(guestMenu);
 assert.equal(guestMenu.items.length, 1);
 console.log('Storage categories separate Docker disks and are inserted before native menu initialization');
+
+let guestActionRequest, guestActionWindow;
+context.Proxmox.Utils.API2Request = options => { guestActionRequest = options; };
+context.Ext.create = (name, options) => { guestActionWindow = { name, options }; return {}; };
+commandMenu.items.find(item => item.itemId === 'migrate').handler();
+assert(guestActionRequest.url.endsWith('/management'), 'context action must load capabilities and digest');
+guestActionRequest.success({ result: { data: { status: 'stopped', name: 'other', digest: 'current-version', capabilities: { configure: 1 } } } });
+assert.equal(guestActionWindow.name, 'PVE.betterdocker.Migrate');
+assert.equal(guestActionWindow.options.projectId, 'c'.repeat(32));
+assert.equal(guestActionWindow.options.digest, 'current-version');
+guestActionWindow = undefined;
+guestActionRequest.success({ result: { data: { status: 'running', capabilities: { configure: 1 } } } });
+assert.equal(guestActionWindow, undefined, 'a running guest cannot open stopped migration');
+console.log('Context guest actions load current capabilities, state and configuration digest');

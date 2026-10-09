@@ -15,7 +15,7 @@ Package: proxmox-betterdockers
 Version: 0.19.0
 Architecture: all
 Maintainer: BetterDockers contributors
-Depends: pve-manager (>= 8), pve-manager (<< 10), python3, e2fsprogs, util-linux, coreutils, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2
+Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, e2fsprogs, util-linux, coreutils, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2
 Description: Native Proxmox VE interface for host Docker Compose projects
 CONTROL
 cat > "$BUILD_DIR/DEBIAN/triggers" <<'TRIGGERS'
@@ -23,6 +23,11 @@ interest-noawait /usr/share/pve-manager
 interest-noawait /usr/share/perl5/PVE/API2/Nodes.pm
 interest-noawait /usr/share/perl5/PVE/API2/Cluster.pm
 interest-noawait /usr/share/perl5/PVE/Cluster.pm
+interest-noawait /usr/share/perl5/PVE/VZDump.pm
+interest-noawait /usr/share/perl5/PVE/Replication.pm
+interest-noawait /usr/share/perl5/PVE/API2/Replication.pm
+interest-noawait /usr/share/perl5/PVE/HA/Env/PVE2.pm
+interest-noawait /usr/share/perl5/PVE/API2/HA/Resources.pm
 TRIGGERS
 cat > "$BUILD_DIR/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh

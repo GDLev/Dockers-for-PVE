@@ -242,6 +242,8 @@ sub hook_storage_content {
 }
 
 hook_storage_content();
+require PVE::BetterDocker::Backup;
+PVE::BetterDocker::Backup::hook_storage();
 
 sub check_native_guest_ids {
     my ($operation, @values) = @_;
@@ -281,21 +283,43 @@ sub hook_native_node_operations {
 }
 
 sub hook_native_cluster_operations {
-    for my $name (qw(create_job update_job)) {
-        guard_native_method('PVE::API2::Backup', $name, 'backup jobs', sub { $_[0]->{vmid} });
+    for my $name (qw(create update migrate relocate delete)) {
+        my $method = PVE::API2::HA::Resources->map_method_by_name($name)
+            or die "Unsupported HA API method $name\n";
+        next if $native_operation_guards{"HA:$name"}++;
+        my $native = $method->{code};
+        $method->{code} = sub {
+            my ($param) = @_;
+            check_native_guest_ids('HA', $1) if ($param->{sid} // '') =~ /\A(?:vm|ct):([1-9][0-9]{2,8})\z/;
+            my ($sid, $type, $vmid) = PVE::HA::Config::parse_sid($param->{sid});
+            return $native->(@_) unless $type eq 'docker';
+            # Keep enrollment and native registration in one per-guest transaction.
+            # Otherwise a failed concurrent create can release another request's HA marker.
+            my $result = PVE::Tools::lock_file("/run/lock/betterdocker-ha-$vmid.lock", 10, sub {
+                my $info = PVE::HA::Resources::Docker->config($vmid);
+                if ($name eq 'create') {
+                    my $config = PVE::HA::Config::read_resources_config();
+                    return $native->($param) if $config->{ids}->{$sid};
+                    PVE::HA::Resources::Docker::helper($info, 'enroll', $info->{id}, $info->{node});
+                }
+                my $result = eval { $native->($param); };
+                if (my $error = $@) {
+                    eval { PVE::HA::Resources::Docker::helper($info, 'release', $info->{id}, $info->{node}); } if $name eq 'create';
+                    die $error;
+                }
+                PVE::HA::Resources::Docker::helper($info, 'release', $info->{id}, $info->{node}) if $name eq 'delete';
+                return $result;
+            });
+            die $@ if $@;
+            return $result;
+        };
     }
-    for my $name (qw(create update)) {
-        guard_native_method('PVE::API2::ReplicationConfig', $name, 'replication', sub {
-            return $1 if ($_[0]->{id} // '') =~ /\A([1-9][0-9]{2,8})-[0-9]+\z/;
-            return ();
-        });
-    }
-    for my $name (qw(create update migrate relocate)) {
-        guard_native_method('PVE::API2::HA::Resources', $name, 'HA', sub {
-            return $1 if ($_[0]->{sid} // '') =~ /\A(?:(?:vm|ct):)?([1-9][0-9]{2,8})\z/;
-            return ();
-        });
-    }
+}
+
+sub ha_managed {
+    my ($identifier, $node) = @_;
+    my $vmid = task_id($identifier, $node);
+    return PVE::HA::Config::get_service_status("docker:$vmid")->{managed};
 }
 
 sub register_docker_method {
@@ -306,6 +330,10 @@ sub register_docker_method {
     $method->{code} = sub {
         my ($param) = @_;
         my $caps = capabilities($param->{id}, $param->{node});
+        if ($param->{id} && $param->{node} && $name =~ /^(?:update|template|destroy|service_action|settings|reset_settings|snapshot)$/ &&
+            ($name ne 'snapshot' || ($param->{action} // '') eq 'restore') && ha_managed($param->{id}, $param->{node})) {
+            die "Remove the DCT from HA before changing its deployment, services or persistent state\n";
+        }
         my $scope = $name eq 'list' && $param->{diagnostics} ? 'configure' :
                     $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config)$/ ? 'audit' :
                     ($name eq 'settings' || $name eq 'revert_settings') ? 'settings' :
@@ -339,6 +367,8 @@ sub append_lifecycle_list {
     for my $item (@{summaries()}) {
         next if $item->{node} ne $node || !$item->{vmid};
         next if defined($filter) && !$wanted{$item->{vmid}};
+        next if $item->{template} || $item->{migration};
+        next if PVE::HA::Config::get_service_status("docker:$item->{vmid}")->{managed};
         next if $autostart && !$item->{onboot};
         my $startup = $item->{startup} ? PVE::JSONSchema::pve_parse_startup_order($item->{startup}) : {};
         die "Invalid DCT startup configuration\n" unless $startup;
@@ -420,10 +450,10 @@ sub hook_resources {
                 id => "docker/$item->{id}", vmid => $item->{vmid}, type => 'docker', name => $item->{name},
                 text => $item->{vmid} ? "$item->{vmid} ($item->{name})" : $item->{name},
                 node => $item->{node}, status => $status, uptime => ($status eq 'running' || $status eq 'partial') ? ($item->{metrics}->{uptime} // 0) : 0,
-                tags => $item->{tags} // '', protection => $item->{protection} // 0,
+                tags => $item->{tags} // '', protection => $item->{protection} // 0, template => $item->{template} ? 1 : 0,
                 cpu => $item->{metrics}->{cpu} // 0, maxcpu => $item->{metrics}->{cpus} // 0,
                 mem => $item->{metrics}->{mem} // 0, maxmem => $item->{metrics}->{maxmem} // 0,
-                hastate => 'unmanaged',
+                hastate => PVE::HA::Config::get_service_status("docker:$item->{vmid}")->{state} // 'unmanaged',
             };
         }
         return $resources;
@@ -446,10 +476,15 @@ register_docker_method({
     permissions => $root,
     parameters => { additionalProperties => 0, properties => {
         node => $node, deployment => { type => 'string', maxLength => 262144 },
+        archive => { type => 'string', format => 'pve-volume-id', optional => 1 },
+        newid => { type => 'integer', minimum => 100, optional => 1 },
+        storage => { type => 'string', format => 'pve-storage-id', optional => 1 },
     } },
     returns => { type => 'string' },
     code => sub {
         my ($param) = @_;
+        return restore_backup($param) if $param->{archive};
+        die "newid and storage are restore options\n" if defined($param->{newid}) || defined($param->{storage});
         my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh $param->{deployment}; close $fh;
@@ -469,6 +504,125 @@ register_docker_method({
         }); };
         if (my $err = $@) { unlink $path; output(['release-id', $identifier]); die $err; }
         return $upid;
+    },
+});
+
+# Docker archives must never be restored by the native VM/CT restore handlers.
+sub restore_backup {
+        my ($param) = @_;
+        my $rpc = PVE::RPCEnvironment::get();
+        my $user = $rpc->get_user();
+        my $cfg = PVE::Storage::config();
+        PVE::Storage::check_volume_access($rpc, $user, $cfg, undef, $param->{archive});
+        $rpc->check($user, defined($param->{newid}) ? '/vms/' . $param->{newid} : '/vms', ['VM.Allocate']);
+        $rpc->check($user, '/storage/' . $param->{storage}, ['Datastore.AllocateSpace']) if $param->{storage};
+        my $deployment = decode_json($param->{deployment});
+        die "Deployment overrides must be an object\n" unless ref($deployment) eq 'HASH';
+        my ($fh, $path) = tempfile('betterdocker-restore-XXXXXX', DIR => '/run', UNLINK => 0);
+        chmod 0600, $path;
+        print $fh encode_json({ deployment => $deployment, storage => $param->{storage} // '' }); close $fh;
+        my $identifier = output(['new-id']); chomp $identifier;
+        $identifier = worker_id($identifier);
+        my $vmid = eval { reserve_guest_id($identifier, $param->{node}, $param->{newid}); };
+        if (my $error = $@) { unlink $path; die $error; }
+        my $upid = eval { $rpc->fork_worker('betterdockerrestore', $vmid, $user, sub {
+            eval { PVE::Tools::run_command(['/usr/local/lib/betterdocker/backup.pl', 'restore',
+                $param->{archive}, $identifier, $param->{node}, $path]); };
+            my $error = $@;
+            unlink $path;
+            output(['release-id', $identifier]) if $error;
+            die $error if $error;
+        }); };
+        if (my $error = $@) { unlink $path; output(['release-id', $identifier]); die $error; }
+        return $upid;
+}
+
+register_docker_method({
+    name => 'clone', path => '{id}/clone', method => 'POST', protected => 1, proxyto => 'node',
+    description => 'Create an independent full clone, initially stopped.', permissions => $root,
+    parameters => { additionalProperties => 0, properties => {
+        node => $node, id => $id, digest => $digest,
+        newid => { type => 'integer', minimum => 100, optional => 1 },
+        deployment => { type => 'string', maxLength => 262144 },
+        storage => { type => 'string', format => 'pve-storage-id', optional => 1 },
+    } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        check_digest($param);
+        my $rpc = PVE::RPCEnvironment::get();
+        my $user = $rpc->get_user();
+        $rpc->check($user, '/vms/' . task_id($param->{id}, $param->{node}), ['VM.Clone']);
+        $rpc->check($user, defined($param->{newid}) ? '/vms/' . $param->{newid} : '/vms', ['VM.Allocate']);
+        $rpc->check($user, '/storage/' . $param->{storage}, ['Datastore.AllocateSpace']) if $param->{storage};
+        my $deployment = decode_json($param->{deployment});
+        die "Clone deployment overrides must be an object\n" unless ref($deployment) eq 'HASH';
+        my ($fh, $path) = tempfile('betterdocker-clone-XXXXXX', DIR => '/run', UNLINK => 0);
+        chmod 0600, $path;
+        print $fh encode_json({ deployment => $deployment, storage => $param->{storage} // '', digest => $param->{digest} }); close $fh;
+        my $identifier = output(['new-id']); chomp $identifier;
+        $identifier = worker_id($identifier);
+        my $vmid = eval { reserve_guest_id($identifier, $param->{node}, $param->{newid}); };
+        if (my $error = $@) { unlink $path; die $error; }
+        my $upid = eval { $rpc->fork_worker('betterdockerclone', $vmid, $user, sub {
+            eval { PVE::Tools::run_command(['/usr/local/lib/betterdocker/guest_state.py', 'clone',
+                $param->{id}, $param->{node}, $identifier, $path]); };
+            my $error = $@;
+            unlink $path;
+            output(['release-id', $identifier]) if $error;
+            die $error if $error;
+        }); };
+        if (my $error = $@) { unlink $path; output(['release-id', $identifier]); die $error; }
+        return $upid;
+    },
+});
+
+register_docker_method({
+    name => 'migrate', path => '{id}/migrate', method => 'POST', protected => 1, proxyto => 'node',
+    description => 'Move a stopped DCT to another cluster node with an exclusive ownership handoff.', permissions => $root,
+    parameters => { additionalProperties => 0, properties => {
+        node => $node, id => $id, digest => $digest, target => $node,
+        storage => { type => 'string', format => 'pve-storage-id', optional => 1 },
+    } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        check_digest($param);
+        my $rpc = PVE::RPCEnvironment::get();
+        my $user = $rpc->get_user();
+        $rpc->check($user, '/vms/' . task_id($param->{id}, $param->{node}), ['VM.Migrate']);
+        $rpc->check($user, '/nodes/' . $param->{target}, ['Sys.Console']);
+        $rpc->check($user, '/storage/' . $param->{storage}, ['Datastore.AllocateSpace']) if $param->{storage};
+        die "Choose another cluster node\n" if $param->{node} eq $param->{target};
+        PVE::Cluster::check_cfs_quorum();
+        PVE::Cluster::remote_node_ip($param->{target});
+        if (ha_managed($param->{id}, $param->{node}) && $rpc->{type} ne 'ha') {
+            die "HA relocation preserves storage; omit the storage override\n" if $param->{storage};
+            my $vmid = task_id($param->{id}, $param->{node});
+            return $rpc->fork_worker('hamigrate', $vmid, $user, sub {
+                PVE::Tools::run_command(['ha-manager', 'crm-command', 'relocate', "docker:$vmid", $param->{target}]);
+            });
+        }
+        return $rpc->fork_worker('betterdockermigrate', task_id($param->{id}, $param->{node}), $user, sub {
+            PVE::Tools::run_command(['/usr/local/lib/betterdocker/transfer.py', 'migrate',
+                $param->{id}, $param->{node}, $param->{target}, $param->{storage} // '', $param->{digest} // '']);
+        });
+    },
+});
+
+register_docker_method({
+    name => 'template', path => '{id}/template', method => 'POST', protected => 1, proxyto => 'node',
+    description => 'Convert a stopped DCT to a non-bootable full-clone template.', permissions => $root,
+    parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        check_digest($param);
+        my $rpc = PVE::RPCEnvironment::get();
+        $rpc->check($rpc->get_user(), '/vms/' . task_id($param->{id}, $param->{node}), ['VM.Allocate']);
+        return $rpc->fork_worker('betterdockertemplate', task_id($param->{id}, $param->{node}), $rpc->get_user(), sub {
+            PVE::Tools::run_command(['/usr/local/lib/betterdocker/guest_state.py', 'template', $param->{id}, $param->{node}, $param->{digest} // '']);
+        });
     },
 });
 
@@ -559,9 +713,25 @@ register_docker_method({
         my $action = $1;
         die "can't remove DCT - protection mode enabled\n" if $action eq 'delete' && decode_json(output(['detail', $param->{id}, $param->{node}]))->{protection};
         die "Overrule is only available for Stop\n" if $param->{'overrule-shutdown'} && $action ne 'force-stop';
+        if (ha_managed($param->{id}, $param->{node}) && $rpcenv->{type} ne 'ha') {
+            die "Remove the DCT from HA before deleting it\n" if $action eq 'delete';
+            die "Overrule is not applicable to HA resources\n" if $param->{'overrule-shutdown'};
+            if ($action =~ /^(?:start|stop|shutdown|force-stop)$/) {
+                my $vmid = task_id($param->{id}, $param->{node});
+                my $command = $action eq 'start' ? ['ha-manager', 'set', "docker:$vmid", '--state', 'started'] :
+                    ['ha-manager', 'crm-command', 'stop', "docker:$vmid", $action eq 'force-stop' ? 0 : $param->{timeout} // 60];
+                return $rpcenv->fork_worker($action eq 'start' ? 'hastart' : 'hastop', $vmid, $rpcenv->get_user(),
+                    sub { PVE::Tools::run_command($command); });
+            }
+        }
+        my $ha_agent = ($rpcenv->{type} // '') eq 'ha';
         (my $task_action = $action) =~ s/-//g;
         return $rpcenv->fork_worker('betterdocker' . $task_action, task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
-            PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $action, $param->{timeout} // 60, $param->{'overrule-shutdown'} ? 1 : 0]);
+            if ($ha_agent) {
+                PVE::Tools::run_command(['/usr/local/lib/betterdocker/ha.py', 'power', $param->{id}, $param->{node}, $action, $param->{timeout} // 60]);
+            } else {
+                PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $action, $param->{timeout} // 60, $param->{'overrule-shutdown'} ? 1 : 0]);
+            }
         });
     },
 });
@@ -599,6 +769,7 @@ register_docker_method({
     returns => { type => 'object' },
     code => sub { my ($param) = @_; my $info = decode_json(output(['management', $param->{id}, $param->{node}]));
         $info->{capabilities} = capabilities($param->{id}, $param->{node});
+        $info->{ha} = PVE::HA::Config::get_service_status("docker:" . task_id($param->{id}, $param->{node}));
         my $op = $info->{operation} // {};
         my $owner = $op->{user} // '';
         my $actor = $ENV{BETTERDOCKER_TASK_USER};

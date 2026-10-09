@@ -5,6 +5,7 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            'Replication': 'Replikacja',
             "Docker Volumes": "Wolumeny Docker",
             "In use": "W użyciu",
             "Unused": "Nieużywany",
@@ -20,8 +21,10 @@
             "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded.": "Wymaga overlay2 na XFS z project quotas. Nie obejmuje wolumenów ani bind mountów.",
             "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node.": "Zatrzymaj usługi przed utworzeniem lub powiększeniem dysku. Oryginalne dane są zachowywane. Błąd montowania może uniemożliwić uruchomienie Dockera na węźle.",
             "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped.": "Pełne kopie konfiguracji, systemów plików kontenerów i własnych danych. Usługi są zamrażane na czas kopiowania. Bez RAM, logów oraz zewnętrznych lub współdzielonych zapisywalnych montowań. Po przywróceniu DCT pozostaje zatrzymany.",
-            "Persistent data and deployment files are retained. Native VM/CT backup, HA and migration are unavailable.": "Dane trwałe i pliki wdrożenia są zachowywane. Natywne kopie zapasowe VM/CT, HA i migracja nie są dostępne.",
+            "Persistent data and deployment files are retained.": "Dane trwałe i pliki wdrożenia są zachowywane.",
             "Remove Snapshot": "Usuń migawkę",
+            "HA State": "Stan HA",
+            "Manage HA": "Zarządzaj HA",
             "Snapshots": "Migawki",
             "Take Snapshot": "Utwórz migawkę",
             "Rollback": "Przywróć",
@@ -108,8 +111,6 @@
             "Uptime": "Czas działania",
             "Container": "Kontener",
             "Choose a running container.": "Wybierz działający kontener.",
-            "Remove Docker project": "Usuń projekt Docker",
-            "Remove this project? Volumes and bind-mount data are retained.": "Usunąć projekt? Wolumeny i dane bind mounts zostaną zachowane.",
             "Deployment action (legacy)": "Operacja wdrożenia (starsza wersja)",
             "CPU usage": "Użycie CPU",
             "Memory usage": "Użycie pamięci",

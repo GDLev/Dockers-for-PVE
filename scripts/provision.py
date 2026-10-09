@@ -82,9 +82,17 @@ def capture(args):
     return run(args, capture_output=True).stdout
 
 
-def write_json(path, value):
+def write_json(path, value, allow_migration_change=False):
     if path.parent == METADATA and isinstance(value, dict):
         value = {key: item for key, item in value.items() if key != 'digest'}
+    if path.parent == METADATA and METADATA == Path('/etc/pve/betterdocker') and isinstance(value, dict) and value.get('id') and value.get('vmid'):
+        owner = reserved_ids().get(int(value['vmid']))
+        if owner and owner.get('node') != value.get('node'):
+            raise ValueError('DCT ownership moved to another node')
+        if path.exists() and not allow_migration_change:
+            existing = json.loads(path.read_text())
+            if existing.get('migration'):
+                value = dict(value, migration=existing['migration'])
     # A refresh that started before migration must not overwrite the assigned ID.
     if path.parent == METADATA and isinstance(value, dict) and value.get('id') and not value.get('vmid'):
         vmid = next((number for number, entry in reserved_ids().items() if entry['id'] == value['id']), None)
@@ -243,9 +251,16 @@ def bind_ports(config, address, identifier):
 
 
 def compose_base(directory, identifier, filename='compose.runtime.json'):
-    return ['docker', 'compose', '--project-name', 'bd-' + identifier,
-            '--project-directory', str(directory), '--env-file', str(directory / '.env'),
-            '-f', str(directory / filename)]
+    command = ['docker', 'compose', '--project-name', 'bd-' + identifier,
+               '--project-directory', str(directory), '--env-file', str(directory / '.env'),
+               '-f', str(directory / filename)]
+    if (directory / 'ha.json').exists():
+        runtime = json.loads((directory / 'compose.runtime.json').read_text())
+        override = directory / '.ha-compose.json'
+        write_json(override, {'services': {name: {'restart': 'no'} for name in runtime['services']}})
+        os.chmod(override, 0o600)
+        command.extend(['-f', str(override)])
+    return command
 
 
 def prepare(data, identifier, directory, project_directory=None):
@@ -560,6 +575,8 @@ def storage_config(identifier):
 
 def pve_storage(identifier, action, **values):
     payload = dict(values, id=project_id(identifier), action=action)
+    if METADATA != Path('/etc/pve/betterdocker'):
+        payload['metadata'] = str(METADATA)
     try:
         result = run(['perl', str(Path(__file__).with_name('storage.pl'))], input=json.dumps(payload),
                      capture_output=True, timeout=1800)
@@ -698,6 +715,8 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
                     if mount.get('read_only') or mount.get('type') == 'tmpfs':
                         continue
                     kind, source = mount.get('type'), mount.get('source', '')
+                    if kind == 'volume' and not source:
+                        raise ValueError('Use named volumes before moving application data to a managed disk')
                     if kind == 'bind':
                         path = Path(source)
                         if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()) or path.resolve() == folder.resolve() or path.exists() and not path.is_dir():
@@ -1034,6 +1053,9 @@ def revert_settings(identifier, node, service, keys, digest=None):
 
 
 def management(identifier, node, shared_stats=None):
+    public = json.loads((METADATA / (project_id(identifier) + '.json')).read_text())
+    if public.get('ha_recovery') and public['node'] == node:
+        return dict(public, status='stopped', containers=[], services=[], stats=[], metrics={}, storage={}, operation=operation_state(identifier))
     info = detail(identifier, node)
     directory = ROOT / identifier
     config = json.loads((directory / 'compose.runtime.json').read_text())
@@ -1756,6 +1778,10 @@ def configuration_digest(directory, deployment, protection=False, tags='', lifec
 
 
 def assert_configuration_digest(identifier, node, expected):
+    path = METADATA / (project_id(identifier) + '.json')
+    info = json.loads(path.read_text()) if path.exists() else {}
+    if info.get('migration'):
+        raise ValueError('DCT migration is in progress; recover it before changing configuration')
     journal = ROOT / identifier / 'snapshot-transaction.json'
     if journal.exists() and json.loads(journal.read_text()).get('action') == 'restore':
         raise ValueError('Retry the interrupted snapshot rollback before changing configuration')
@@ -1774,7 +1800,7 @@ def detail(identifier, node):
         raise ValueError('Project belongs to another node')
     directory = ROOT / identifier
     deployment = json.loads((directory / 'request.json').read_text())
-    return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup') if info.get(key)}))
+    return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup', 'template') if info.get(key)}))
 
 
 def parse_startup(value):
@@ -1805,6 +1831,8 @@ def lifecycle_config(identifier, node):
 
 
 def restore_restart_policy(identifier, service=None):
+    if (ROOT / identifier / 'ha.json').exists():
+        return
     marker = ROOT.parent / 'restart-paused' / (identifier + '.json')
     if not marker.exists():
         return
@@ -1854,6 +1882,8 @@ def daemon_resume(node):
         owned = {item['id'] for info in summaries() if info['node'] == node
                  for item in container_records(info['id'])}
         for row in state['containers']:
+            if (ROOT / row['project'] / 'ha.json').exists():
+                continue
             if row['id'] not in owned:
                 continue
             if row['state'] in ('running', 'restarting', 'paused'):
@@ -1916,6 +1946,8 @@ def project_config(identifier, node, changes, digest=None):
     with locked():
         info = detail(identifier, node)
         assert_configuration_digest(identifier, node, digest)
+        if info.get('template') and changes.get('onboot'):
+            raise ValueError('A DCT template cannot start at boot')
         authorize_config_keys(changes)
         info.pop('deployment', None)
         path = ROOT / identifier / 'notes.txt'
@@ -1975,11 +2007,30 @@ def check_protected_layout(info, before, after):
 
 
 def refresh(node):
+    def update_status(info):
+        try:
+            write_json(METADATA / (info['id'] + '.json'), info)
+        except ValueError as error:
+            # A migration may hand off ownership after this refresh collected its list.
+            # Its old node must stop publishing status, without failing other guests.
+            if str(error) != 'DCT ownership moved to another node':
+                raise
+    if any((ROOT.parent / 'transfers').glob('*/source.json')):
+        from transfer import recover_all
+        recover_all()
     # Rebinding may recreate containers, so refresh the state list afterwards.
-    projects = [info for info in summaries() if info['node'] == node]
+    projects = [info for info in summaries() if info['node'] == node and not info.get('ha_recovery')]
     for info in projects:
+        # Portable state transactions use the same per-project operation lock.
+        if (ROOT / info['id'] / 'export-transaction.json').exists() or (ROOT.parent / 'imports' / (info['id'] + '.json')).exists():
+            from guest_state import recover
+            recover(info['id'])
+        if not (METADATA / (info['id'] + '.json')).exists():
+            continue
         recover_network_transaction(info['id'], node)
         info.update(json.loads((METADATA / (info['id'] + '.json')).read_text()))
+        if info['node'] != node or info.get('ha_recovery'):
+            continue
         try:
             journal = ROOT / info['id'] / 'snapshot-transaction.json'
             if journal.exists() and json.loads(journal.read_text()).get('action') == 'create':
@@ -1988,8 +2039,10 @@ def refresh(node):
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             # One broken lease must not freeze status refresh for every guest on the node.
             info['status'] = 'network-error'
-            write_json(METADATA / (info['id'] + '.json'), info)
+            update_status(info)
             print(f"Network unavailable for DCT {info.get('vmid', info['id'])}: {error}", file=sys.stderr)
+    projects = [info for info in projects if info['node'] == node and not info.get('ha_recovery') and (METADATA / (info['id'] + '.json')).exists() and
+                not (ROOT.parent / 'imports' / (info['id'] + '.json')).exists()]
     entries = json.loads('[' + ','.join(capture(['docker', 'ps', '-a', '--filter', 'label=betterdocker.id',
                                               '--format', '{{json .}}']).splitlines()) + ']')
     for info in projects:
@@ -2003,7 +2056,7 @@ def refresh(node):
         if info['status'] == 'error' and status != 'running':
             continue
         info['status'] = status
-        write_json(METADATA / (info['id'] + '.json'), info)
+        update_status(info)
     due = [info for info in projects if not (ROOT / info['id'] / 'metrics.json').exists() or
            time.time() - (ROOT / info['id'] / 'metrics.json').stat().st_mtime >= 60]
     if due:
@@ -2012,6 +2065,8 @@ def refresh(node):
             shared_stats = [json.loads(line) for line in capture(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *active]).splitlines()] if active else []
             for info in due:
                 snapshot = management(info['id'], node, shared_stats=shared_stats)
+                if snapshot.get('ha_recovery'):
+                    continue
                 record_metrics(snapshot)
                 public = json.loads((METADATA / (info['id'] + '.json')).read_text())
                 public['metrics'] = {key: snapshot['metrics'][key] for key in ('cpu', 'cpus', 'mem', 'maxmem', 'uptime', 'time')}
@@ -2059,7 +2114,11 @@ def action(identifier, node, operation, timeout=60):
         commands = {'start': ['up', '-d'], 'stop': ['stop'], 'restart': ['restart'], 'delete': ['down']}
         if operation not in commands and operation not in ('shutdown', 'reboot', 'force-stop'):
             raise ValueError('Unsupported operation')
+        if info.get('template') and operation in ('start', 'restart', 'reboot'):
+            raise ValueError('A DCT template cannot be started; clone it first')
         if operation == 'delete':
+            if info.get('replication'):
+                raise ValueError('Remove replication jobs and their state disk before deleting the DCT')
             check_protection(info)
         if operation == 'delete' and any(item['state'] in ('running', 'restarting', 'paused')
                                           for item in container_records(identifier)):
@@ -2179,6 +2238,10 @@ def restore(node):
                 storage_mount(path.parent.name)
         for info in summaries():
             if info['node'] == node:
+                # A fenced node can boot with stale cluster metadata. The HA
+                # agent owns bringing its endpoint back, just as it owns Start.
+                if info.get('ha_recovery') or (info.get('id') and (ROOT / info['id'] / 'ha.json').exists()):
+                    continue
                 if info.get('id') and recover_network_transaction(info['id'], node):
                     info = json.loads((METADATA / (info['id'] + '.json')).read_text())
                 ensure_address(info, wait=False)
@@ -2213,12 +2276,28 @@ def operation_state(identifier):
 
 
 @contextlib.contextmanager
-def operation(identifier, name, overrule=False, service=None):
+def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
     project_id(identifier)
+    metadata = METADATA / (identifier + '.json')
+    info = json.loads(metadata.read_text()) if metadata.exists() else {}
+    if info.get('migration') and name not in ('migrate', 'migration-abort', 'migration-recovery'):
+        raise ValueError('DCT migration is in progress; recover it before another operation')
+    if info.get('template') and name in ('update', 'settings', 'network', 'snapshot-restore'):
+        raise ValueError('A DCT template is immutable; clone it before changing its deployment')
     folder = ROOT.parent / 'operations'
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (folder / (identifier + '.lock')).open('w') as handle:
         os.chmod(handle.name, 0o600)
+        if wait_timeout:
+            deadline = time.monotonic() + wait_timeout
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise ValueError('Timed out waiting for the DCT operation lock') from None
+                    time.sleep(0.2)
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -2256,7 +2335,7 @@ def operation(identifier, name, overrule=False, service=None):
         write_json(path, state)
         os.chmod(path, 0o600)
         try:
-            yield
+            yield handle
         except Exception:
             state.update(active=False, failed=True, message='Operation failed. Open Task History.')
             raise
@@ -2301,6 +2380,8 @@ def service_action(identifier, node, service, verb, timeout=60):
         config = json.loads((directory / 'compose.runtime.json').read_text())
         if service not in config['services'] or verb not in ('start', 'stop', 'restart', 'shutdown', 'reboot', 'force-stop'):
             raise ValueError('Invalid service operation')
+        if info.get('template') and verb in ('start', 'restart', 'reboot'):
+            raise ValueError('A DCT template cannot be started; clone it first')
         if verb in ('start', 'restart', 'reboot'):
             prepare_network_start(info)
         if verb == 'start':
@@ -2571,8 +2652,9 @@ def snapshot_quiesce(identifier):
             if row['state'] == 'running':
                 run(['docker', 'pause', row['id']], capture_output=True)
                 paused.append(row['id'])
-        if paused:
-            os.sync()
+        # Stopped containers can still have dirty filesystem buffers from shutdown.
+        # Flush them too before the storage backend captures its block-level snapshot.
+        os.sync()
         yield resume
     finally:
         resume()

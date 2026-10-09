@@ -18,7 +18,7 @@
                 ["Container disk limit", "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded."],
                 ["Project data disk", "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node."],
                 ["Snapshots", "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped."],
-                ["Remove", "Persistent data and deployment files are retained. Native VM/CT backup, HA and migration are unavailable."],
+                ["Remove", "Persistent data and deployment files are retained."],
             ].map(([label, text]) => '<p><strong>' + Ext.htmlEncode(translate(label)) + '</strong><br>' +
                 Ext.htmlEncode(translate(text)) + '</p>').join('') +
                 '<p><a href="https://github.com/GDLev/Proxmox-BetterDockers" target="_blank" rel="noopener">' + Ext.htmlEncode(translate('Documentation')) + '</a></p>',
@@ -85,7 +85,7 @@
     }, options));
     const task = response => Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
     const dockerTaskLabels = { create: 'Deploy', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
-        restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Remove', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Take Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Remove Snapshot' };
+        restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Remove', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Take Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Remove Snapshot', restore: 'Restore', clone: 'Clone', template: 'Convert to template', migrate: 'Migrate' };
     const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
     Object.entries(dockerTaskLabels).forEach(([action, label]) => {
         dockerTaskDescriptions['betterdocker' + action] = (type, id) =>
@@ -93,6 +93,74 @@
     });
     Proxmox.Utils.override_task_descriptions(dockerTaskDescriptions);
     // Use the installed toolkit's renderer, model and DiffStore, as the LXC grids do.
+    PVE.Utils.volume_is_dct_backup = data => /(?:^|:)backup\/(?:vzdump-docker-|host\/dct-[1-9][0-9]{2,8}\/)/.test(data?.volid || '');
+
+    Ext.define('PVE.betterdocker.Migrate', {
+        extend: 'Proxmox.window.Edit', width: 600, isCreate: true, autoLoad: false,
+        method: 'POST', show_task_view: true, onlineHelp: 'chapter_pvecm',
+        initComponent: function () {
+            const me = this;
+            me.title = translate('Migrate') + ': DCT ' + me.vmid;
+            me.url = '/api2/extjs/nodes/' + encodeURIComponent(me.nodename) + '/docker/' + me.projectId + '/migrate';
+            me.items = [{ xtype: 'inputpanel', items: [
+                { xtype: 'pveNodeSelector', name: 'target', fieldLabel: translate('Target node'), allowBlank: false,
+                    disallowedNodes: [me.nodename], onlineValidator: true },
+                { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Target Storage'), storageContent: 'rootdir',
+                    allowBlank: true, hidden: Boolean(me.haManaged), disabled: Boolean(me.haManaged), emptyText: translate('Same as source'), storageType: ['dir', 'lvmthin', 'zfspool'] },
+            ], onGetValues: values => {
+                if (me.haManaged || !values.storage) { delete values.storage; }
+                if (me.digest) { values.digest = me.digest; }
+                return values;
+            } }];
+            me.callParent();
+            me.down('[name=target]').on('change', (_, node) => me.down('[name=storage]').setNodename(node));
+        },
+    });
+
+    Ext.define('PVE.betterdocker.StateRestore', {
+        extend: 'Proxmox.window.Edit', alias: 'widget.pveBetterDockerStateRestore',
+        width: 600, isCreate: true, autoLoad: false, show_task_view: true,
+        onlineHelp: 'chapter_vzdump', method: 'POST',
+        initComponent: function () {
+            const me = this, clone = Boolean(me.projectId);
+            me.title = translate(clone ? 'Clone' : 'Restore') + ': DCT';
+            me.url = '/api2/extjs/nodes/' + encodeURIComponent(me.nodename) + '/docker' +
+                (clone ? '/' + me.projectId + '/clone' : '');
+            me.items = [{ xtype: 'inputpanel',
+                column1: [
+                    { xtype: 'pveGuestIDSelector', name: 'newid', fieldLabel: translate('DCT ID'), guestType: 'docker',
+                        loadNextFreeID: true, allowBlank: false },
+                    field('name', 'Name', me.guestname || '', { allowBlank: false, maxLength: 63 }),
+                    { xtype: 'pveStorageSelector', name: 'storage', nodename: me.nodename, fieldLabel: translate('Storage'),
+                        storageContent: 'rootdir', allowBlank: true, emptyText: translate('Default'),
+                        storageType: ['dir', 'lvmthin', 'zfspool'] },
+                ],
+                column2: [
+                    { xtype: 'PVE.form.BridgeSelector', name: 'bridge', nodename: me.nodename, bridgeType: 'bridge',
+                        fieldLabel: translate('Bridge'), value: 'vmbr0', allowBlank: false },
+                    { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 2,
+                        items: [
+                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'), checked: true },
+                            { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: translate('DHCP') },
+                        ], listeners: { change: group => {
+                            group.up('window').down('[name=cidr]').setDisabled(group.getValue().ipv4mode === 'dhcp');
+                        } } },
+                    field('cidr', 'IPv4/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false }),
+                ],
+                onGetValues: function (values) {
+                    const deployment = { name: values.name, bridge: values.bridge, ipv4mode: values.ipv4mode };
+                    if (values.ipv4mode !== 'dhcp') { deployment.cidr = values.cidr; }
+                    const result = { newid: values.newid, deployment: JSON.stringify(deployment) };
+                    if (values.storage) { result.storage = values.storage; }
+                    if (clone) { if (me.digest) { result.digest = me.digest; } }
+                    else { result.archive = me.archive; }
+                    return result;
+                },
+            }];
+            me.callParent();
+        },
+    });
+
     Ext.define('PVE.betterdocker.PendingProperties', {
         extend: 'Proxmox.grid.PendingObjectGrid', alias: 'widget.pveBetterDockerPendingProperties',
         hideHeaders: true, cwidth1: 200,
@@ -561,8 +629,9 @@
             me.on('afterrender', function () {
                 const win = me.up('window');
                 const power = win?.nodename && ['startall', 'stopall'].includes(win.action);
+                const backup = win?.isXType && win.isXType('pveDcBackupEdit');
                 const filterGuests = (store, records) => {
-                    if (!power) { store.remove(records.filter(record => record.get('type') === 'docker')); }
+                    if (!power && !backup) { store.remove(records.filter(record => record.get('type') === 'docker')); }
                 };
                 const store = me.getStore();
                 me.mon(store, 'load', filterGuests);
@@ -594,6 +663,14 @@
         updateSnapshot: function (data) {
             const me = this, metrics = data.metrics;
             const update = (id, text, usage) => me.down('#' + id).updateValue(text, usage);
+            if (me.down('#haValue')) { update('haValue', PVE.Utils.format_ha(data.ha || {})); }
+            if (data.ha_recovery) {
+                me.down('#statusPanel').setTitle(Ext.htmlEncode(data.name));
+                ['statusValue', 'nodeValue', 'serviceValue', 'cpuValue', 'memoryValue', 'swapValue', 'diskValue', 'ipValue'].forEach(id => update(id, '', 0));
+                update('statusValue', Ext.htmlEncode(statusText('stopped')));
+                update('nodeValue', Ext.htmlEncode(data.node));
+                return;
+            }
             me.down('#statusPanel').setTitle(Ext.htmlEncode(data.name) + ' (' + translate('Uptime') + ': ' +
                 Proxmox.Utils.format_duration_long(metrics.uptime) + ')');
             update('statusValue', Ext.htmlEncode(statusText(data.status)));
@@ -649,6 +726,7 @@
                             layout: { type: 'vbox', align: 'stretch' }, items: [
                                 { xtype: 'box', height: 20 },
                                 metric('statusValue', 'Status', 'fa fa-info fa-fw'),
+                                metric('haValue', 'HA State', 'fa fa-heartbeat fa-fw'),
                                 metric('nodeValue', 'Node', 'fa fa-building fa-fw'),
                                 metric('serviceValue', 'Services', 'fa fa-cubes fa-fw'),
                                 { xtype: 'box', height: 10 },
@@ -677,7 +755,8 @@
             me.on('deactivate', () => store.stopUpdate());
             me.on('show', () => store.startUpdate());
             me.on('hide', () => store.stopUpdate());
-            me.on('destroy', () => { store.stopUpdate(); store.destroy(); });
+            // Match native GuestSummary: in-flight RRD callbacks retain the store until completion.
+            me.on('destroy', () => store.stopUpdate());
             me.mon(Ext.state.Manager.getProvider(), 'statechange', (_, key) => {
                 if (key === 'summarycolumns') { Proxmox.Utils.updateColumns(me.down('#itemcontainer')); }
             });
@@ -977,6 +1056,8 @@
             const can = scope => current && current.capabilities ? Boolean(current.capabilities[scope] ?? current.capabilities.configure) : Proxmox.UserName === 'root@pam';
             const editable = () => can('configure');
             const rowEditable = (key, group) => {
+                if (current?.ha?.managed && !['Protection', 'Start at boot', 'Start/Shutdown order'].includes(key)) { return false; }
+                if (current?.template && !['Protection', 'Start at boot', 'Start/Shutdown order'].includes(key)) { return false; }
                 if (key === 'Settings source') { return false; }
                 if (key === 'Container disk limit') { return editable() && !current?.protection && Boolean(current?.storage?.rootfs?.supported); }
                 if (key === 'Project data disk') { return editable() && !current?.protection && !current?.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state)); }
@@ -987,7 +1068,7 @@
                 if (key) { return editable(); }
                 return group === 'resources' ? ['cpu', 'memory', 'options', 'configure'].some(can) : can(group === 'dns' ? 'network' : 'options');
             };
-            const locked = () => Boolean(me.pendingTask || current && current.operation && current.operation.active);
+            const locked = () => Boolean(me.pendingTask || current?.migration || current && current.operation && current.operation.active);
             const canOverrule = service => Boolean(current?.capabilities?.overrule_shutdown &&
                 (current.operation?.service || null) === (service || null));
             const set = (id, value) => { const item = me.down('#' + id); if (item) { item.setValue(value); } };
@@ -1003,15 +1084,16 @@
             const populate = () => {
                 if (!current) { return; }
                 const running = current.containers.some(item => ['running', 'restarting', 'paused'].includes(item.state));
-                [['startButton', current.status === 'running'], ['stopButton', !running], ['restartButton', !running], ['forceStopButton', !running]].forEach(([id, disabled]) => {
+                [['startButton', current.template || current.status === 'running'], ['stopButton', !running], ['restartButton', !running], ['forceStopButton', !running]].forEach(([id, disabled]) => {
                     const override = (id === 'forceStopButton' || id === 'stopButton') && canOverrule();
                     const button = me.down('#' + id); if (button) { button.setDisabled(disabled || locked() && !override || current.capabilities && !current.capabilities.power); }
                 });
                 const consoleButton = me.down('#consoleButton');
                 if (consoleButton) { consoleButton.setDisabled(!current.containers.some(item => item.state === 'running') || current.capabilities && !current.capabilities.console); }
-                me.query('[bdWrite=true]').forEach(button => button.setDisabled(locked() || !editable()));
+                me.query('[bdWrite=true]').forEach(button => button.setDisabled(locked() || !editable() ||
+                    current.template && !button.bdTemplateAllowed || button.bdNeedsStopped && running && !(button.itemId === 'migrateButton' && current.ha?.managed)));
                 const removeButton = me.down('#removeButton');
-                if (removeButton) { removeButton.setDisabled(Boolean(current.protection) || running || !['stopped', 'error', 'network-error'].includes(current.status) || locked() || !editable()); }
+                if (removeButton) { removeButton.setDisabled(Boolean(current.protection) || current.ha?.managed || running || !['stopped', 'error', 'network-error'].includes(current.status) || locked() || !editable()); }
                 const op = current.operation || {};
                 const operationLabel = me.down('#operationLabel');
                 if (operationLabel) { operationLabel.setText(op.active || me.pendingTask ? '<i class="fa fa-lock"></i> ' + Ext.htmlEncode(translate('Operation in progress')) : op.failed ? Ext.htmlEncode(translate(op.message)) : ''); }
@@ -1033,7 +1115,7 @@
                 const summary = me.down('#summary');
                 if (summary) { summary.updateSnapshot(current); }
                 const networkEdit = me.down('#networkEdit');
-                if (networkEdit) { networkEdit.setDisabled(!editable() || running || locked()); }
+                if (networkEdit) { networkEdit.setDisabled(!editable() || running || locked() || Boolean(current.template)); }
                 rows('networkGrid', [{ name: 'net0', bridge: current.bridge, hwaddr: current.hwaddr || '',
                     mtu: current.mtu || 'Same as bridge', address: current.address ? (current.ipv4mode === 'dhcp' ? current.address : current.cidr || current.address) : '',
                     mode: current.ipv4mode === 'dhcp' ? 'DHCP' : 'Static' }]);
@@ -1046,7 +1128,7 @@
                 const active = service();
                 if (active) {
                     const values = active.settings;
-                    const restore = me.down('#restoreCompose'); if (restore) { restore.setDisabled(!active.overridden || !editable() || locked()); }
+                    const restore = me.down('#restoreCompose'); if (restore) { restore.setDisabled(!active.overridden || !editable() || locked() || Boolean(current.template)); }
                     rows('resourceGrid', ['Memory', 'Swap', 'CPU limit', 'CPU units', 'PID limit', 'Container disk limit']
                         .map(key => pendingRow(key, values, active.pending)).concat([
                         { key: 'Project data disk', value: current.storage?.limit_mib ? (current.storage.volid ? current.storage.volid + ', ' : '') + current.storage.limit_mib + ' MiB' + (current.storage.mounted ? ' (' + Proxmox.Utils.format_size(current.storage.used) + ' / ' + Proxmox.Utils.format_size(current.storage.available) + ' ' + translate('Available') + ')' : ' — ' + translate('Unavailable')) : 'Unlimited' },
@@ -1105,7 +1187,7 @@
                         { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Storage'), nodename: info.node,
                             storageContent: 'rootdir', value: current.storage?.storage || undefined, allowBlank: Boolean(existing),
                             listeners: { afterrender: selector => {
-                                selector.getStore().addFilter(record => ['dir', 'lvmthin'].includes(record.get('type')) && !record.get('shared'));
+                                selector.getStore().addFilter(record => ['dir', 'lvmthin', 'zfspool'].includes(record.get('type')) && !record.get('shared'));
                             } } },
                         field('size_mib', 'Data disk (MiB)', existing || 1024,
                             { xtype: 'numberfield', minValue: existing || 256, maxValue: 1048576, allowDecimals: false, allowBlank: false }),
@@ -1236,11 +1318,28 @@
                 { xtype: 'splitbutton', text: translate('Shutdown'), itemId: 'stopButton', iconCls: 'fa fa-power-off', handler: () => act('shutdown'),
                     menu: [{ text: translate('Reboot'), itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('reboot') },
                         { text: translate('Stop'), itemId: 'forceStopButton', iconCls: 'fa fa-stop', handler: () => act('force-stop') }] },
+                { text: translate('Migrate'), itemId: 'migrateButton', hidden: PVE.Utils.isStandaloneNode(), bdWrite: true, bdTemplateAllowed: true, bdNeedsStopped: true, iconCls: 'fa fa-send-o', handler: () => {
+                        if (!locked()) { Ext.create('PVE.betterdocker.Migrate', { autoShow: true, nodename: info.node,
+                        projectId: identifier, vmid: info.vmid, haManaged: current?.ha?.managed, digest: current?.digest, listeners: { destroy: reload } }); }
+                } },
                 { xtype: 'splitbutton', text: translate('Console'), itemId: 'consoleButton', iconCls: 'fa fa-terminal', handler: () => me.selectById('console'),
                     menu: [{ text: translate('Open in separate window'), iconCls: 'fa fa-external-link', handler: () => openConsoleWindow(info) }] },
-                { text: translate('More'), menu: [{ text: translate('Edit deployment'), bdWrite: true, iconCls: 'fa fa-fw fa-pencil', handler: editDeployment },
-                    { text: translate('Refresh'), iconCls: 'fa fa-fw fa-refresh', handler: reload },
-                    { text: translate('Remove'), itemId: 'removeButton', disabled: true, bdWrite: true, iconCls: 'fa fa-trash',
+                { text: translate('More'), menu: [
+                    { text: translate('Clone'), bdWrite: true, bdTemplateAllowed: true, iconCls: 'fa fa-clone', handler: () => {
+                        if (!locked()) { Ext.create('PVE.betterdocker.StateRestore', { autoShow: true, nodename: info.node,
+                            projectId: identifier, guestname: info.name, digest: current?.digest, listeners: { destroy: reload } }); }
+                    } },
+                    { text: translate('Convert to template'), bdWrite: true, bdNeedsStopped: true, iconCls: 'fa fa-file-o', handler: () => {
+                        if (locked() || current?.template) { return; }
+                        Ext.Msg.confirm(translate('Confirm'), translate('Convert to template') + ' DCT ' + info.vmid + '?', answer => {
+                            if (answer === 'yes') { request({ url: url + '/template', method: 'POST', params: { digest: current?.digest },
+                                success: response => { trackTask(response, me); task(response); } }); }
+                        });
+                    } },
+                    { text: translate('Manage HA'), iconCls: 'fa fa-heartbeat', hidden: PVE.Utils.isStandaloneNode(), bdWrite: true,
+                        handler: () => { if (!locked()) { Ext.create('PVE.ha.VMResourceEdit', { vmid: info.vmid,
+                            guestType: 'docker', isCreate: !current?.ha?.managed, listeners: { destroy: reload } }).show(); } } },
+                    { text: translate('Remove'), itemId: 'removeButton', disabled: true, bdWrite: true, bdTemplateAllowed: true, iconCls: 'fa fa-trash',
                         handler: () => { if (!locked()) { removeProject(info, me); } } }] },
             ];
             me.items = [
@@ -1311,6 +1410,9 @@
             const history = me.items.splice(me.items.findIndex(item => item.itemId === 'tasks'), 1)[0];
             me.items.splice(7, 0, history);
             me.items.splice(8, 0, { xtype: 'pveBetterDockerSnapshots', title: translate('Snapshots'), itemId: 'snapshots', iconCls: 'fa fa-history', apiUrl: url, ownerPanel: me });
+            me.items.splice(9, 0, { xtype: 'pveBackupView', title: translate('Backup'), itemId: 'backup',
+                iconCls: 'fa fa-floppy-o', pveSelNode: me.pveSelNode });
+            me.items.splice(10, 0, { xtype: 'pveReplicaView', title: translate('Replication'), itemId: 'replication', iconCls: 'fa fa-retweet', pveSelNode: me.pveSelNode });
             me.items.push({ xtype: 'pveACLView', title: translate('Permissions'), itemId: 'permissions', iconCls: 'fa fa-unlock', path: '/vms/' + info.vmid });
             me.loadDockerTasks = () => { const tasks = me.down('#tasks'); if (tasks && tasks.store) { tasks.store.load(); } };
             ['resources', 'dns', 'options'].forEach(group => {
@@ -1326,8 +1428,8 @@
             const services = me.items.find(item => item.itemId === 'services');
             me.updateServiceActions = records => {
                 ['start', 'shutdown', 'reboot', 'force-stop'].forEach(verb => { const button = me.down('#service-' + verb);
-                    if (button) { button.setDisabled(!records.length || locked() && !(verb === 'force-stop' && canOverrule(records[0]?.get('service'))) || current && current.capabilities && !current.capabilities.power ||
-                        (records.length && (verb === 'start' ? records[0].get('state') === 'running' : !['running', 'restarting', 'paused'].includes(records[0].get('state'))))); } });
+                    if (button) { button.setDisabled(current?.ha?.managed || !records.length || locked() && !(verb === 'force-stop' && canOverrule(records[0]?.get('service'))) || current && current.capabilities && !current.capabilities.power ||
+                        (records.length && (verb === 'start' ? current?.template || records[0].get('state') === 'running' : !['running', 'restarting', 'paused'].includes(records[0].get('state'))))); } });
             };
             services.items[0].listeners = { selectionchange: (_, records) => me.updateServiceActions(records) };
             me.callParent();
@@ -1344,6 +1446,28 @@
         },
     });
 
+    const openGuestAction = (info, action) => {
+        const projectId = (info.realId || info.id).split('/')[1];
+        const url = '/nodes/' + encodeURIComponent(info.node) + '/docker/' + projectId;
+        request({ url: url + '/management', method: 'GET', success: response => {
+            const state = response.result.data;
+            if (!state.capabilities?.configure || state.operation?.active || state.migration) { return; }
+            if (action === 'template') {
+                if (state.template || state.status !== 'stopped') { return; }
+                Ext.Msg.confirm(translate('Confirm'), Ext.htmlEncode(translate('Convert to template') + ' DCT ' + info.vmid + '?'), answer => {
+                    if (answer === 'yes') { request({ url: url + '/template', method: 'POST', params: { digest: state.digest },
+                        success: result => task(result) }); }
+                });
+                return;
+            }
+            if (action === 'migrate' && state.status !== 'stopped' && !state.ha?.managed) { return; }
+            Ext.create(action === 'clone' ? 'PVE.betterdocker.StateRestore' : 'PVE.betterdocker.Migrate', {
+                autoShow: true, nodename: info.node, projectId, vmid: info.vmid,
+                guestname: state.name || info.name, digest: state.digest, haManaged: state.ha?.managed,
+            });
+        } });
+    };
+
     Ext.define('PVE.betterdocker.CmdMenu', {
         extend: 'Ext.menu.Menu', showSeparator: false,
         initComponent: function () {
@@ -1352,12 +1476,19 @@
             const caps = Ext.state.Manager.get('GuiCap');
             const allowed = Proxmox.UserName === 'root@pam' || Boolean(caps && caps.nodes && caps.nodes['Sys.Console']);
             const act = operation => dockerAction(info, operation, undefined, me.snapshotState);
-            me.title = 'DCT ' + info.name;
+            me.title = 'DCT ' + info.vmid;
             me.items = [
                 { text: translate('Start'), itemId: 'start', iconCls: 'fa fa-fw fa-play', disabled: !allowed || info.status === 'running', handler: () => act('start') },
                 { text: translate('Shutdown'), itemId: 'shutdown', iconCls: 'fa fa-fw fa-power-off', disabled: !allowed || !running, handler: () => act('shutdown') },
-                { text: translate('Reboot'), itemId: 'reboot', iconCls: 'fa fa-fw fa-refresh', disabled: !allowed || !running, handler: () => act('reboot') },
                 { text: translate('Stop'), itemId: 'force-stop', iconCls: 'fa fa-fw fa-stop', disabled: !allowed || !running, handler: () => act('force-stop') },
+                { text: translate('Reboot'), itemId: 'reboot', iconCls: 'fa fa-fw fa-refresh', disabled: !allowed || !running, handler: () => act('reboot') },
+                { xtype: 'menuseparator' },
+                { text: translate('Clone'), itemId: 'clone', iconCls: 'fa fa-fw fa-clone', disabled: true,
+                    handler: () => openGuestAction(info, 'clone') },
+                { text: translate('Migrate'), itemId: 'migrate', iconCls: 'fa fa-fw fa-send-o', disabled: true,
+                    hidden: PVE.Utils.isStandaloneNode(), handler: () => openGuestAction(info, 'migrate') },
+                { text: translate('Convert to template'), itemId: 'template', iconCls: 'fa fa-fw fa-file-o', disabled: true,
+                    handler: () => openGuestAction(info, 'template') },
                 { xtype: 'menuseparator' },
                 { text: translate('Console'), itemId: 'console', iconCls: 'fa fa-fw fa-terminal', disabled: !allowed || !running || !me.workspace,
                     handler: () => {
@@ -1382,14 +1513,17 @@
                     const state = response.result.data, rights = state.capabilities;
                     me.snapshotState = state;
                     const active = ['running', 'partial'].includes(state.status);
-                    const busy = Boolean(state.operation?.active);
+                    const busy = Boolean(state.operation?.active || state.migration);
                     ['start', 'shutdown', 'reboot', 'force-stop'].forEach(verb => {
                         const override = verb === 'force-stop' && rights.overrule_shutdown;
-                        me.down('#' + verb).setDisabled(!rights.power || busy && !override || (verb === 'start' ? state.status === 'running' : !active));
+                        me.down('#' + verb).setDisabled(!rights.power || busy && !override || (verb === 'start' ? state.template || state.status === 'running' : !active));
                     });
+                    me.down('#clone').setDisabled(!rights.configure || busy);
+                    me.down('#migrate').setDisabled(!rights.configure || busy || active && !state.ha?.managed);
+                    me.down('#template').setDisabled(!rights.configure || busy || active || Boolean(state.template) || state.ha?.managed);
                     me.down('#console').setDisabled(!rights.console || !active || !me.workspace);
-                    me.down('#deployment').setDisabled(!rights.configure || busy);
-                    me.down('#removeButton').setDisabled(!rights.configure || Boolean(state.protection) || busy || state.status !== 'stopped');
+                    me.down('#deployment').setDisabled(!rights.configure || busy || Boolean(state.template) || state.ha?.managed);
+                    me.down('#removeButton').setDisabled(!rights.configure || Boolean(state.protection) || state.ha?.managed || busy || state.status !== 'stopped');
                 } });
         },
     });

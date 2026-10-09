@@ -52,6 +52,9 @@ sub parse_volname { return ('backup', '', 105) if $_[1] =~ /backup/; return ('im
 sub vdisk_free { $main::freed = $_[1]; }
 1;
 ''')
+            # Storage/PBS contracts are exercised on PVE; this harness isolates route authorization.
+            (base / 'PVE/BetterDocker').mkdir()
+            (base / 'PVE/BetterDocker/Backup.pm').write_text('package PVE::BetterDocker::Backup; sub hook_storage { 1 } 1;')
             # Avoid relying on a locally installed Perl JSON distribution.
             (base / 'JSON.pm').write_text('''
 package JSON;
@@ -86,6 +89,8 @@ our $info = { code => sub { [] }, returns => { items => { properties => { type =
 sub map_method_by_name { $_[1] eq 'resources' ? $info : undef }
 package main;
 no warnings 'redefine';
+*PVE::API2::BetterDocker::ha_managed = sub { 0 };
+*PVE::HA::Config::get_service_status = sub { return { managed => 0 }; };
 *PVE::API2::BetterDocker::summaries = sub { [{ id => 'a' x 32, vmid => $ARGV[0], node => 'pve', name => 'web', status => 'running', address => '192.0.2.50' }] };
 PVE::API2::BetterDocker::hook_resources();
 my $result = $PVE::API2::Cluster::info->{code}->({});
@@ -256,17 +261,14 @@ for my $class (qw(PVE::API2::LXC PVE::API2::Qemu PVE::API2::Backup PVE::API2::Re
     };
 }
 PVE::API2::BetterDocker::hook_native_node_operations();
+{ no warnings 'redefine'; *PVE::HA::Config::parse_sid = sub { my $sid=$_[0]; $sid="ct:$sid" if $sid =~ /^\d+$/; my($type,$id)=split(':',$sid); return ($sid,$type,$id); }; }
 PVE::API2::BetterDocker::hook_native_cluster_operations();
-my $original_wrapper = $native_methods{'PVE::API2::Backup:create_job'}->{code};
+my $original_wrapper = PVE::API2::Backup->map_method_by_name('create_job')->{code};
+PVE::API2::Backup->map_method_by_name('update_job');
 PVE::API2::BetterDocker::hook_native_cluster_operations();
 die 'native method wrapped twice' unless $original_wrapper == $native_methods{'PVE::API2::Backup:create_job'}->{code};
 for my $case (
-    ['PVE::API2::Backup','create_job',{vmid=>'103,105'}],
-    ['PVE::API2::Backup','update_job',{vmid=>'105;103'}],
-    ['PVE::API2::ReplicationConfig','create',{id=>'105-0'}],
-    ['PVE::API2::ReplicationConfig','update',{id=>'105-12'}],
     (map { ['PVE::API2::HA::Resources',$_,{sid=>'ct:105'}] } qw(create update migrate relocate)),
-    ['PVE::API2::HA::Resources','create',{sid=>'105'}],
     ['PVE::API2::HA::Resources','create',{sid=>'vm:105'}],
     (map { ['PVE::API2::LXC',$_,{vmid=>105}] } qw(create_vm clone_vm template migrate_vm remote_migrate_vm)),
     (map { ['PVE::API2::Qemu',$_,{vmid=>105}] } qw(create_vm clone_vm template migrate_vm remote_migrate_vm)),
@@ -279,9 +281,42 @@ for my $case (
     die "native DCT route accepted: $class/$name" unless $@ =~ /DCT 105 does not support native/;
     die 'native mutation invoked for DCT' if ($main::native_calls // 0) != $before;
 }
+# Native HA registration and local policy changes share one per-guest lock.
+{
+ my ($locked, @actions, $existing);
+ local *PVE::Tools::lock_file = sub {
+  die 'unexpected HA lock' unless $_[0] eq '/run/lock/betterdocker-ha-105.lock';
+  local $main::ha_transaction = 1;
+  my $result=eval { $_[2]->(); };
+  return $result;
+ };
+ local *PVE::HA::Config::read_resources_config = sub { {ids => $existing ? {'docker:105'=>{}} : {}} };
+ local *PVE::HA::Resources::Docker::config = sub {
+  die 'HA config outside transaction' unless $main::ha_transaction;
+  return {id=>'a' x 32,node=>'pve1'};
+ };
+ local *PVE::HA::Resources::Docker::helper = sub {
+  die 'HA policy outside transaction' unless $main::ha_transaction;
+  push @actions, $_[1];
+ };
+ my $param={sid=>'docker:105'};
+ die 'native HA return changed' unless $native_methods{'PVE::API2::HA::Resources:create'}->{code}->($param)==$param;
+ die 'HA enrollment skipped' unless "@actions" eq 'enroll';
+ @actions=();
+ eval { $native_methods{'PVE::API2::HA::Resources:create'}->{code}->({sid=>'docker:105',denied=>1}); };
+ die 'native HA error swallowed' unless $@ =~ /native permission denied/;
+ die 'failed HA create retained policy override' unless "@actions" eq 'enroll release';
+ @actions=(); $existing=1;
+ $native_methods{'PVE::API2::HA::Resources:create'}->{code}->($param);
+ die 'existing HA guest reenrolled' if @actions;
+ $native_methods{'PVE::API2::HA::Resources:delete'}->{code}->($param);
+ die 'HA removal skipped release' unless "@actions" eq 'release';
+}
+
 for my $list ('105', '103 105', '103,105', '103;105') {
-    eval { PVE::API2::BetterDocker::check_native_guest_ids('backup',$list); };
-    die 'DCT CLI backup list accepted' unless $@ =~ /does not support native backup/;
+    my $param = {vmid=>$list};
+    die 'DCT scheduled backup parameters changed' unless
+        $native_methods{'PVE::API2::Backup:create_job'}->{code}->($param) == $param;
 }
 for my $param ({vmid=>'103'}, {all=>1}, {pool=>'native'}, {exclude=>'105'}) {
     my $result = $native_methods{'PVE::API2::Backup:create_job'}->{code}->($param);

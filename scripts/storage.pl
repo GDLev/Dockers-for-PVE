@@ -21,12 +21,22 @@ sub read_json {
     open(my $fh, '<', $path) or die "$path: $!\n";
     return decode_json(<$fh>);
 }
-my $exists = -f "/etc/pve/betterdocker/$id.json";
-my $info = read_json($exists ? "/etc/pve/betterdocker/$id.json" : "$base/storage.json");
+my $metadata = '/etc/pve/betterdocker';
+if (defined($p->{metadata})) {
+    die "Invalid transfer metadata\n" unless $p->{metadata} =~
+        m!\A(/var/lib/betterdocker/transfers/[0-9a-f]{32}/metadata)\z!;
+    $metadata = $1;
+    my @stat = lstat($metadata);
+    die "Unsafe transfer metadata\n" unless @stat && !-l $metadata && $stat[4] == 0 && ($stat[2] & 077) == 0;
+    my $owner = read_json("/etc/pve/betterdocker/ids/" . read_json("$metadata/$id.json")->{vmid} . '.json');
+    die "Transfer ownership changed\n" unless $owner->{id} eq $id;
+}
+my $exists = -f "$metadata/$id.json";
+my $info = read_json($exists ? "$metadata/$id.json" : "$base/storage.json");
 die "Deleted guest permits disk cleanup only\n" if !$exists && $p->{action} ne 'free';
 my $vmid = $info->{vmid};
 die "Wrong node\n" unless $info->{node} eq PVE::INotify::nodename();
-my $reservation = read_json("/etc/pve/betterdocker/ids/$vmid.json");
+my $reservation = read_json("$metadata/ids/$vmid.json");
 die "Guest ownership changed\n" unless $reservation->{id} eq $id;
 my $cfg = PVE::Storage::config();
 my $action = $p->{action};
@@ -38,7 +48,7 @@ if ($volid) {
     die "Volume ownership changed\n" unless $owner == $vmid && !$isbase && $format eq 'raw';
     # A matching numeric VMID alone does not authorize unrelated guest disks.
     my @owned;
-    for my $file ('storage.json', 'storage-transaction.json', 'allocated-volume.json') {
+    for my $file ('storage.json', 'storage-transaction.json', 'allocated-volume.json', 'replication.json') {
         next unless -f "$base/$file";
         my $state = read_json("$base/$file");
         push @owned, $state->{volid}, $state->{target}->{volid}, @{$state->{unused} // []};
@@ -49,8 +59,8 @@ if ($volid) {
     PVE::JSONSchema::parse_storage_id($sid);
 }
 $scfg = PVE::Storage::storage_config($cfg, $sid);
-die "Only local directory and LVM-thin rootdir storage is supported\n"
-    unless ($scfg->{type} eq 'dir' || $scfg->{type} eq 'lvmthin') && $scfg->{content}->{rootdir} && !$scfg->{shared};
+die "Only local directory, LVM-thin and ZFS rootdir storage is supported\n"
+    unless ($scfg->{type} eq 'dir' || $scfg->{type} eq 'lvmthin' || $scfg->{type} eq 'zfspool') && $scfg->{content}->{rootdir} && !$scfg->{shared};
 PVE::Storage::storage_check_enabled($cfg, $sid, $info->{node});
 my $result = {};
 if ($action eq 'allocate') {
@@ -71,10 +81,15 @@ if ($action eq 'allocate') {
 } elsif ($action =~ /\A(snapshot|rollback|snapshot-delete|rollback-check)\z/) {
     my $name = $p->{name};
     die "Invalid snapshot\n" unless $name =~ /\A[a-zA-Z][a-zA-Z0-9_-]{0,39}\z/;
-    die "Storage snapshots unsupported\n" unless $scfg->{type} eq 'lvmthin';
+    die "Storage snapshots unsupported\n" unless $scfg->{type} eq 'lvmthin' || $scfg->{type} eq 'zfspool';
     my (undef, $volume) = PVE::Storage::parse_volume_id($volid);
-    my $volumes = PVE::Storage::LVMPlugin::lvm_list_volumes($scfg->{vgname});
-    my $exists = $volumes->{$scfg->{vgname}}->{"snap_${volume}_$name"};
+    my $exists;
+    if ($scfg->{type} eq 'zfspool') {
+        $exists = PVE::Storage::volume_snapshot_info($cfg, $volid)->{$name};
+    } else {
+        my $volumes = PVE::Storage::LVMPlugin::lvm_list_volumes($scfg->{vgname});
+        $exists = $volumes->{$scfg->{vgname}}->{"snap_${volume}_$name"};
+    }
     die "Storage snapshot does not exist\n" if !$exists && ($action eq 'rollback' || $action eq 'rollback-check');
     if ($action eq 'snapshot') { PVE::Storage::volume_snapshot($cfg, $volid, $name); }
     elsif ($action eq 'rollback') { PVE::Storage::volume_snapshot_rollback($cfg, $volid, $name); }
@@ -90,11 +105,15 @@ if ($action eq 'allocate') {
         my $volumes = PVE::Storage::LVMPlugin::lvm_list_volumes($scfg->{vgname});
         $exists = $volumes->{$scfg->{vgname}}->{$volume};
     }
+    if ($scfg->{type} eq 'zfspool') {
+        my $volumes = PVE::Storage::vdisk_list($cfg, $sid, $vmid);
+        $exists = grep { $_->{volid} eq $volid } @{$volumes->{$sid} // []};
+    }
     PVE::Storage::vdisk_free($cfg, $volid) if $exists;
     print "{}\n"; exit;
 } elsif ($action ne 'inspect') { die "Invalid storage operation\n"; }
 PVE::Storage::activate_volumes($cfg, [$volid]);
 my ($size) = PVE::Storage::volume_size_info($cfg, $volid);
 $result = {volid => $volid, path => scalar(PVE::Storage::path($cfg, $volid)), size_mib => int($size / 1048576),
-    storage => $sid, type => $scfg->{type}, native_snapshots => ($scfg->{type} eq 'lvmthin' ? JSON::true : JSON::false)};
+    storage => $sid, type => $scfg->{type}, native_snapshots => (($scfg->{type} eq 'lvmthin' || $scfg->{type} eq 'zfspool') ? JSON::true : JSON::false)};
 print encode_json($result), "\n";
