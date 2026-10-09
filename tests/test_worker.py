@@ -70,7 +70,7 @@ class WorkerTests(unittest.TestCase):
     def test_duplicate_display_names_allowed_without_sharing_project_or_network(self):
         existing = dict(BASE, id='a' * 32, node='pve', hwaddr='02:00:00:00:00:01')
         with patch.object(worker, 'bridge_addresses', return_value=(INTERFACES, [])), \
-             patch.object(worker, 'check_address') as check, \
+             patch.object(worker, 'check_address') as check, patch.object(worker, 'check_sdn_bridge'), \
              patch.object(worker, 'summaries', return_value=[existing]):
             worker.network_preflight(dict(BASE, address='192.0.2.51'))
             check.assert_called_once_with('192.0.2.51', BASE['bridge'], probe=True)

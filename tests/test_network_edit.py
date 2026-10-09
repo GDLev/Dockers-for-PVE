@@ -18,7 +18,22 @@ class NetworkEditTests(unittest.TestCase):
         worker.write_json(self.metadata/(ID+'.json'), dict(data, id=ID, node='pve', status='stopped', interface='bddddddddddddd'))
         return data
 
-    def test_network_write_requires_host_privileges(self):
+    def test_firewall_toggle_preserves_containers_and_rolls_back_failed_apply(self):
+        self.configure()
+        with patch.object(worker, 'firewall_check') as validate, patch.object(worker, 'remove_network') as remove:
+            worker.project_network(ID, 'pve', {'firewall': 1})
+            validate.assert_called_once_with(ID, 'pve')
+            remove.assert_not_called()
+        self.assertEqual(worker.detail(ID, 'pve')['firewall'], 1)
+        with patch.object(worker, 'run', side_effect=[ValueError('rejected rules'), None]), \
+                patch.object(worker, 'remove_network') as remove:
+            with self.assertRaisesRegex(ValueError, 'rejected rules'):
+                worker.project_network(ID, 'pve', {'firewall': 0})
+            remove.assert_not_called()
+        self.assertEqual(worker.detail(ID, 'pve')['firewall'], 1)
+        self.assertEqual(json.loads((self.directory / 'request.json').read_text())['firewall'], 1)
+
+    def test_network_write_requires_network_field_privileges(self):
         self.configure()
         with patch.dict(os.environ, BETTERDOCKER_CONFIG_KEYS='dns,dns_search'):
             with self.assertRaisesRegex(ValueError, 'Permission denied'):
@@ -27,7 +42,7 @@ class NetworkEditTests(unittest.TestCase):
     def test_running_stale_unsupported_and_restored_writes_do_nothing(self):
         self.configure()
         before = (self.directory/'request.json').read_text()
-        for key in ('ip6', 'tag', 'rate', 'firewall', 'net1'):
+        for key in ('ip6', 'tag', 'rate', 'net1'):
             with self.assertRaisesRegex(ValueError, 'Unsupported'):
                 worker.project_network(ID, 'pve', {key:1})
         with self.assertRaisesRegex(ValueError, 'checksum'):

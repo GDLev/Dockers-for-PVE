@@ -106,7 +106,7 @@ def recover_guest(identifier, node):
                 with transfer.private_metadata(private, current):
                     restored = state.restore_state(folder / 'state', identifier, node,
                         {key: current[key] for key in ('name', 'bridge', 'address', 'cidr', 'hwaddr', 'mtu') if key in current},
-                        current['replication']['storage'], lock_fd=lock.fileno())
+                        current['replication']['storage'], lock_fd=lock.fileno(), live_firewall=current.get('firewall', 0))
             finally:
                 shutil.rmtree(private)
             volume = dict(current['replication'], node=node)

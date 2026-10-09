@@ -14,6 +14,7 @@ use PVE::GuestHelpers;
 use PVE::API2::Storage::Content;
 use PVE::Storage;
 use PVE::JSONSchema;
+use PVE::BetterDocker::Firewall;
 use POSIX qw(LONG_MAX);
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 
@@ -299,6 +300,7 @@ sub hook_native_node_operations {
 }
 
 sub hook_native_cluster_operations {
+    hook_bulk_operations();
     for my $name (qw(create update migrate relocate delete)) {
         my $method = PVE::API2::HA::Resources->map_method_by_name($name)
             or die "Unsupported HA API method $name\n";
@@ -409,7 +411,7 @@ sub register_docker_method {
                     $name eq 'set_network' ? 'network' : $name eq 'set_notes' ? 'options' :
                     ($name eq 'snapshot' && ($param->{action} // '') eq 'restore') ? 'rollback' :
                     ($name eq 'snapshot' || $name eq 'snapshot_edit') ? 'snapshot' :
-                    $name eq 'action' || $name eq 'service_action' ? 'power' : 'configure';
+                    $name eq 'action' || $name eq 'service_action' || $name eq 'shutdown' ? 'power' : 'configure';
         my $creating = $name eq 'create' || ($name eq 'preview' && !$param->{id});
         raise_perm_exc('DCT') unless $creating || ($name eq 'list' && !$param->{diagnostics}) || $caps->{$scope};
         if ($creating) {
@@ -428,7 +430,7 @@ sub register_docker_method {
         my @keys;
         push @keys, qw(cpus cpuunits) if $caps->{cpu};
         push @keys, qw(memory swap) if $caps->{memory};
-        push @keys, qw(dns dns_search) if $caps->{network};
+        push @keys, qw(dns dns_search bridge ipv4mode cidr hwaddr mtu firewall) if $caps->{network};
         push @keys, qw(pids restart protection description tags onboot startup) if $caps->{options};
         push @keys, 'hookscript' if $user eq 'root@pam';
         push @keys, 'disk' if $caps->{disk};
@@ -454,19 +456,75 @@ sub append_lifecycle_list {
     my ($list, $node, $autostart, $filter) = @_;
     my %wanted = map { $_ => 1 } PVE::Tools::split_list($filter // '');
     for my $item (@{summaries()}) {
-        next if $item->{node} ne $node || !$item->{vmid};
+        next if (defined($node) && $item->{node} ne $node) || !$item->{vmid};
         next if defined($filter) && !$wanted{$item->{vmid}};
         next if $item->{template} || $item->{migration};
-        next if PVE::HA::Config::get_service_status("docker:$item->{vmid}")->{managed};
+        next if !defined($filter) && PVE::HA::Config::get_service_status("docker:$item->{vmid}")->{managed};
         next if $autostart && !$item->{onboot};
         my $startup = $item->{startup} ? PVE::JSONSchema::pve_parse_startup_order($item->{startup}) : {};
         die "Invalid DCT startup configuration\n" unless $startup;
         my $vmid = worker_id($item->{vmid});
         my $order = $startup->{order} // LONG_MAX;
         die "Guest ID collision for DCT $vmid\n" if grep { exists($_->{$vmid}) } values %$list;
-        $list->{$order}->{$vmid} = { %$startup, type => 'docker', node => $node };
+        $list->{$order}->{$vmid} = { %$startup, type => 'docker', node => $item->{node} };
     }
     return $list;
+}
+
+
+sub append_migration_list {
+    my ($list, $node, $filter) = @_;
+    my %wanted = map { $_ => 1 } PVE::Tools::split_list($filter // '');
+    for my $item (@{summaries()}) {
+        next if !$item->{vmid} || (defined($node) && $item->{node} ne $node);
+        next if defined($filter) && !$wanted{$item->{vmid}};
+        my $vmid = worker_id($item->{vmid});
+        die "Guest ID collision for DCT $vmid\n" if exists($list->{$vmid});
+        $list->{$vmid} = { type => 'docker', node => $item->{node} };
+    }
+}
+
+sub node_migrate {
+    my ($vmid, $node, $target) = @_;
+    my $id = lifecycle_identifier($vmid, $node);
+    my $state = decode_json(output(['access-state', $id, $node]));
+    die "DCT $vmid must be stopped before migration\n"
+        if $state->{active_containers} && !ha_managed($id, $node);
+    print "Migrating DCT $vmid\n";
+    return __PACKAGE__->map_method_by_name('migrate')->{code}->({ id => $id, node => $node, target => $target });
+}
+
+our $bulk_action;
+sub hook_bulk_operations {
+    return if $native_operation_guards{'bulk'}++;
+    my $class = 'PVE::API2::Cluster::BulkAction::Guest';
+    for my $action (qw(start shutdown migrate suspend)) {
+        my $method = $class->map_method_by_name($action) or die "Unsupported PVE bulk API\n";
+        my $native = $method->{code};
+        $method->{code} = sub { local $bulk_action = $action; return $native->(@_); };
+    }
+    my $native_tasks = \&PVE::API2::Cluster::BulkAction::Guest::handle_task_foreach_guest;
+    my $native_type = \&PVE::API2::Cluster::BulkAction::Guest::get_type_text;
+    no warnings 'redefine';
+    *PVE::API2::Cluster::BulkAction::Guest::get_type_text = sub {
+        return $_[0] eq 'docker' ? 'DCT' : $native_type->(@_);
+    };
+    *PVE::API2::Cluster::BulkAction::Guest::handle_task_foreach_guest = sub {
+        my ($list, $max, $start, $check) = @_;
+        my $action = $bulk_action;
+        my $dispatch = sub {
+            my ($client, $vmid, $guest) = @_;
+            return $start->(@_) unless $guest->{type} eq 'docker';
+            return $start->(@_) if $action eq 'suspend'; # native explicit unsupported warning
+            my $id = lifecycle_identifier($vmid, $guest->{node});
+            my $base = "/nodes/$guest->{node}/docker/$id";
+            # The native callback owns timeout, target and task handling. Translate
+            # only its guest URLs and parameters, retaining the caller's credentials.
+            my $adapter = bless { client => $client, base => $base }, 'PVE::BetterDocker::BulkClient';
+            return $start->($adapter, $vmid, $guest);
+        };
+        return $native_tasks->($list, $max, $dispatch, $check);
+    };
 }
 
 sub lifecycle_identifier {
@@ -491,6 +549,10 @@ sub node_stop {
     my ($vmid, $node, $timeout, $force) = @_;
     my $id = lifecycle_identifier($vmid, $node);
     raise_perm_exc('DCT') unless capabilities($id, $node)->{power};
+    if (ha_managed($id, $node)) {
+        return __PACKAGE__->map_method_by_name('action')->{code}->({ id => $id, node => $node,
+            action => 'shutdown', timeout => $timeout });
+    }
     my $state = decode_json(output(['access-state', $id, $node]));
     return undef unless $state->{active_containers};
     my $rpc = PVE::RPCEnvironment::get();
@@ -580,6 +642,7 @@ register_docker_method({
     description => 'Deploy Docker Compose or an image directly on this node with a dedicated published-port IP.',
     permissions => $root,
     parameters => { additionalProperties => 0, properties => {
+        start => { type => 'boolean', optional => 1, default => 1 },
         node => $node, deployment => { type => 'string', maxLength => 262144 },
         archive => { type => 'string', format => 'pve-volume-id', optional => 1 },
         newid => { type => 'integer', minimum => 100, optional => 1 },
@@ -619,7 +682,7 @@ register_docker_method({
             }
             output(['release-id', $identifier]) if $err;
             die $err if $err;
-            PVE::Tools::run_command([$helper, 'action', $identifier, $param->{node}, 'start']);
+            PVE::Tools::run_command([$helper, 'action', $identifier, $param->{node}, 'start']) if $param->{start} // 1;
         }); };
         if (my $err = $@) { unlink $path; output(['release-id', $identifier]); die $err; }
         return $upid;
@@ -724,6 +787,8 @@ register_docker_method({
                 PVE::Tools::run_command(['ha-manager', 'crm-command', 'relocate', "docker:$vmid", $param->{target}]);
             });
         }
+        my $state = decode_json(output(['access-state', $param->{id}, $param->{node}]));
+        die "DCT must be stopped before migration\n" if $state->{active_containers};
         return $rpc->fork_worker('betterdockermigrate', task_id($param->{id}, $param->{node}), $user, sub {
             PVE::Tools::run_command(['/usr/local/lib/betterdocker/transfer.py', 'migrate',
                 $param->{id}, $param->{node}, $param->{target}, $param->{storage} // '', $param->{digest} // '']);
@@ -798,13 +863,14 @@ register_docker_method({
         cidr => { type => 'string', maxLength => 64, optional => 1 },
         hwaddr => { type => 'string', maxLength => 17, optional => 1 },
         mtu => { type => 'integer', minimum => 0, maximum => 9216, optional => 1 },
+        firewall => { type => 'boolean', optional => 1 },
         digest => { type => 'string', pattern => '^[a-f0-9]{64}$', optional => 1 },
     } },
     returns => { type => 'string' },
     code => sub {
         my ($param) = @_;
         check_digest($param);
-        my %values = map { exists($param->{$_}) ? ($_ => $param->{$_}) : () } qw(bridge ipv4mode cidr hwaddr mtu);
+        my %values = map { exists($param->{$_}) ? ($_ => $param->{$_}) : () } qw(bridge ipv4mode cidr hwaddr mtu firewall);
         my ($fh, $path) = tempfile('betterdocker-network-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh encode_json(\%values); close $fh;
@@ -815,6 +881,27 @@ register_docker_method({
         }); };
         if (my $err = $@) { unlink $path; die $err; }
         return $upid;
+    },
+});
+
+register_docker_method({
+    name => 'shutdown', path => '{id}/shutdown', method => 'POST', protected => 1, proxyto => 'node',
+    description => 'Graceful shutdown with optional forced stop after timeout.', permissions => $root,
+    parameters => { additionalProperties => 0, properties => {
+        node => $node, id => $id,
+        timeout => { type => 'integer', minimum => 0, maximum => 86400, optional => 1, default => 180 },
+        'force-stop' => { type => 'boolean', optional => 1, default => 1 },
+    } }, returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        if (ha_managed($param->{id}, $param->{node})) {
+            return __PACKAGE__->map_method_by_name('action')->{code}->({ id => $param->{id}, node => $param->{node},
+                action => 'shutdown', timeout => $param->{timeout} // 180 });
+        }
+        my $upid = node_stop(task_id($param->{id}, $param->{node}), $param->{node}, $param->{timeout} // 180, $param->{'force-stop'} // 1);
+        return $upid if defined($upid);
+        return __PACKAGE__->map_method_by_name('action')->{code}->({ id => $param->{id}, node => $param->{node},
+            action => 'shutdown', timeout => $param->{timeout} // 180 });
     },
 });
 
@@ -1236,5 +1323,36 @@ register_docker_method({
     returns => { type => 'null' },
     code => sub { my ($p) = @_; output(['snapshot-edit', $p->{id}, $p->{node}, $p->{snapname}, $p->{description}]); return undef; },
 });
+
+1;
+
+PVE::BetterDocker::Firewall::register_api(__PACKAGE__);
+package PVE::BetterDocker::BulkClient;
+sub get {
+    my ($self, $url) = @_;
+    $url =~ s!^/nodes/[^/]+/docker/[0-9]+!$self->{base}!;
+    $url =~ s!/status/current$!/management!;
+    my $state = $self->{client}->get($url);
+    # Native bulk start distinguishes a running VM from a paused VM via qmpstatus.
+    $state->{status} = 'running' if $state->{status} eq 'partial';
+    $state->{qmpstatus} = 'running' if $state->{status} eq 'running';
+    return $state;
+}
+sub post {
+    my ($self, $url, $params) = @_;
+    $url =~ s!^/nodes/[^/]+/docker/[0-9]+!$self->{base}!;
+    if ($url =~ s!/status/(start|shutdown)$!/action!) {
+        my $action = $1;
+        # DCT shutdown uses the native node lifecycle path for timeout/force behavior.
+        if ($action eq 'shutdown') {
+            return $self->{client}->post($self->{base} . '/shutdown', {
+                timeout => $params->{timeout}, 'force-stop' => $params->{forceStop},
+            });
+        }
+        return $self->{client}->post($url, { action => $action });
+    }
+    return $self->{client}->post($url, $params);
+}
+package PVE::API2::BetterDocker;
 
 1;

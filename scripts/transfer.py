@@ -96,7 +96,7 @@ def prepare(token, identifier, source, storage):
             clean_local(identifier, local)
             path.unlink()
         state.restore_state(folder / 'state', identifier, worker.current_node(),
-                            {key: current[key] for key in ('name', 'bridge', 'address', 'cidr', 'hwaddr', 'mtu') if key in current}, storage)
+                            {key: current[key] for key in ('name', 'bridge', 'address', 'cidr', 'hwaddr', 'mtu') if key in current}, storage, live_firewall=current.get('firewall', 0))
         info = state.read(worker.METADATA / (identifier+'.json'))
         info['template'] = bool(current.get('template'))
         info['onboot'] = current.get('onboot', 0)

@@ -16,8 +16,8 @@ const nodeMenuClass = { prototype: { initComponent() { this.nativeInitialized = 
 const nodeConfigClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const storageBrowserClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const storageImageClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
-const context = { window: null, console,
-    PVE: { form: { ViewSelector: viewSelectorClass }, storage: { Browser: storageBrowserClass, ImageView: storageImageClass }, node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {}, initComponent() { this.nativeInitialized = true; } } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
+const context = { window: null, console, gettext: value => value,
+    PVE: { form: { VMSelector: { prototype: { initComponent() {} } }, ViewSelector: viewSelectorClass }, storage: { Browser: storageBrowserClass, ImageView: storageImageClass }, node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {}, initComponent() { this.nativeInitialized = true; } } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
         Utils: { format_ha: value => value.managed ? value.state || 'none' : 'none', isStandaloneNode: () => false, get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { format_boolean: value => value ? 'Yes' : 'No', override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
@@ -75,7 +75,7 @@ assert.equal(definitions['PVE.betterdocker.Config'].extend, 'PVE.panel.Config');
 assert.deepEqual(Array.from(configPanel.tbar.filter(item => item && item.text), item => item.text), ['Start', 'Shutdown', 'Migrate', 'Console', 'More']);
 assert(!configPanel.tbar.find(item => item.text === 'More').menu.some(item => item.text === 'Migrate'));
 assert.deepEqual(Array.from(configPanel.items, card => card.title),
-    ['Summary', 'Console', 'Services', 'Resources', 'Network', 'DNS', 'Options', 'Task History', 'Snapshots', 'Backup', 'Replication', 'Deployment', 'Logs', 'Permissions']);
+    ['Summary', 'Console', 'Services', 'Resources', 'Network', 'DNS', 'Options', 'Task History', 'Snapshots', 'Backup', 'Replication', 'Deployment', 'Logs', 'Firewall', 'Options', 'Alias', 'IPSet', 'Log', 'Permissions']);
 assert.equal(configPanel.items.find(card => card.title === 'Backup').xtype, 'pveBackupView');
 assert(configPanel.items.every(card => card.itemId && card.iconCls));
 assert(configPanel.items.find(card => card.title === 'Resources').tbar.some(button => button.text === 'Edit'));
@@ -266,7 +266,7 @@ context.Ext.create = (name, options) => {
         callParent,
         on(event, callback) { assert.equal(event, 'hide'); this.onHide = callback; },
         showAt(xy) { shownAt = xy; },
-        down(id) { const item = this.items.find(entry => '#' + entry.itemId === id); return { setDisabled: value => { item.disabled = value; } }; },
+        down(id) { const item = this.items.find(entry => '#' + entry.itemId === id); return { setDisabled: value => { item.disabled = value; }, setVisible: value => { item.hidden = !value; } }; },
         destroy() {
             this.destroyed = true;
             this.items.forEach(item => { item.handler = null; });
@@ -282,7 +282,7 @@ assert.deepEqual(shownAt, [100, 200]);
 assert.equal(menuArguments.name, 'PVE.betterdocker.CmdMenu');
 assert.equal(menuArguments.options.pveSelNode, clickedRecord);
 // Ext.menu.Item hides its parent before it reads and invokes its handler.
-for (const label of ['Start', 'Shutdown', 'Reboot', 'Stop', 'Console', 'Edit deployment', 'Remove']) {
+for (const label of ['Start', 'Shutdown', 'Reboot', 'Stop', 'Console']) {
     const record = { data: Object.assign({}, clickedRecord.data, { status: ['Start', 'Remove'].includes(label) ? 'stopped' : 'running' }) };
     const menu = context.PVE.Utils.createCmdMenu(treeView, record, null, 0, { stopEvent() {}, getXY() { return [100, 200]; } });
     const item = menu.items.find(entry => entry.text === label);
@@ -840,6 +840,36 @@ for (const [group, key] of [['resources', 'Memory'], ['dns', 'DNS servers'], ['o
     editor.submit.call(editor);
     assert.equal(digestRequests.at(-1).params.digest, editorDigest, group + ' must not use refreshed version');
 }
+// Polling must not replace an unchanged row between the two mouse clicks.
+const previousEditorFactory = context.Ext.create, previousDigestDown = digestPanel.down;
+let networkLoads = 0, selectedNetwork;
+const networkRows = [];
+const networkSelection = { getSelection: () => selectedNetwork ? [selectedNetwork] : [],
+    select(record) { selectedNetwork = record; } };
+const networkStore = { loadData(data) { networkLoads++; networkRows.splice(0, networkRows.length,
+    ...data.map(values => ({ get: key => values[key] }))); }, getRange: () => networkRows };
+const networkGridMock = { getSelectionModel: () => networkSelection, getStore: () => networkStore };
+digestPanel.down = id => id === '#networkGrid' ? networkGridMock : null;
+loadDigest(editorDigest);
+selectedNetwork = networkRows[0];
+const originalNetworkRow = selectedNetwork;
+loadDigest(editorDigest);
+assert.equal(networkLoads, 1, 'unchanged polling must preserve the network row DOM');
+assert.equal(selectedNetwork, originalNetworkRow);
+const networkEditors = [];
+context.Ext.create = (name, options) => {
+    networkEditors.push({ name, options }); return { on() {}, show() {} };
+};
+const networkCard = digestPanel.items.find(item => item.itemId === 'network');
+networkCard.items[0].listeners.itemdblclick();
+assert.equal(networkEditors.at(-1).name, 'PVE.betterdocker.NetworkEdit');
+loadDigest(editorDigest, { network: 0, configure: 0 });
+networkCard.items[0].listeners.itemdblclick();
+assert.equal(networkEditors.length, 1, 'double click must respect network permissions');
+context.Ext.create = previousEditorFactory;
+digestPanel.down = previousDigestDown;
+loadDigest(editorDigest);
+console.log('Network double click and stable polling passed');
 digestEvents.beforedestroy();
 console.log('Resource, DNS, options and disk edits preserve the version from opening');
 
@@ -862,26 +892,17 @@ console.log('Native pending model, DiffStore updates and Revert controls on all 
 
 let protectionRequest;
 context.Proxmox.Utils.API2Request = options => { protectionRequest = options; };
-const protectionMenu = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), type: 'docker', name: 'app', node: 'pve', status: 'stopped', protection: true } }, callParent() {},
-    down() { return { setDisabled: value => { this.items.find(item => item.itemId === 'removeButton').disabled = value; } }; } };
-definitions['PVE.betterdocker.CmdMenu'].initComponent.call(protectionMenu);
-assert.equal(protectionMenu.items.find(item => item.text === 'Remove').disabled, true, 'Remove waits for current configuration');
-protectionRequest.success({ result: { data: { protection: 0, status: 'stopped', capabilities: { power: 1, configure: 1, console: 1 } } } });
-assert.equal(protectionMenu.items.find(item => item.text === 'Remove').disabled, false, 'stale tree protection must not override the current configuration');
-protectionRequest.success({ result: { data: { protection: 1, status: 'stopped', capabilities: { power: 1, configure: 1, console: 1 } } } });
-assert.equal(protectionMenu.items.find(item => item.text === 'Remove').disabled, true);
-console.log('Protection in the context menu follows current backend configuration, including stale tree clones');
-
 const delegatedMenu = { pveSelNode: clickedRecord, workspace: menuWorkspace, callParent() {},
-    down(id) { const item = this.items.find(entry => '#' + entry.itemId === id); return { setDisabled: value => { item.disabled = value; } }; } };
+    down(id) { const item = this.items.find(entry => '#' + entry.itemId === id); return { setDisabled: value => { item.disabled = value; }, setVisible: value => { item.hidden = !value; } }; } };
 context.Proxmox.UserName = 'delegate@pve';
 definitions['PVE.betterdocker.CmdMenu'].initComponent.call(delegatedMenu);
 protectionRequest.success({ result: { data: { status: 'running', protection: 0, operation: {},
     capabilities: { power: 1, configure: 0, console: 0 } } } });
 assert.equal(delegatedMenu.items.find(item => item.itemId === 'shutdown').disabled, false);
 assert.equal(delegatedMenu.items.find(item => item.itemId === 'console').disabled, true);
-assert.equal(delegatedMenu.items.find(item => item.itemId === 'deployment').disabled, true);
-assert.equal(delegatedMenu.items.find(item => item.itemId === 'removeButton').disabled, true);
+assert(!delegatedMenu.items.some(item => item.itemId === 'deployment'));
+assert(!delegatedMenu.items.some(item => item.itemId === 'removeButton'));
+assert.equal(delegatedMenu.items.find(item => item.itemId === 'clone').hidden, true);
 context.Proxmox.UserName = 'root@pam';
 console.log('Context menu uses per-project power grants without exposing host actions');
 
@@ -913,7 +934,7 @@ lifecycleRows.listeners.itemdblclick(null, { get: () => 'Start at boot' });
 assert.equal(startupEditors[1].options.items[0].name, 'onboot');
 console.log('Native startup editor and Start at boot require Options privileges');
 
-for (const action of ['startall', 'stopall', 'migrateall', 'suspendall', 'backup']) {
+for (const action of ['startall', 'stopall', 'migrateall', 'suspendall', 'start', 'shutdown', 'migrate', 'suspend', 'backup']) {
     let rendered, loaded, removed, initialRemoved;
     const window = { action, nodename: 'pve', down() { return null; } };
     const selector = { columnsDeclaration: [{ dataIndex: 'type', renderer: value => 'native-' + value }],
@@ -926,11 +947,11 @@ for (const action of ['startall', 'stopall', 'migrateall', 'suspendall', 'backup
     loaded({ remove(records) { removed = records; } }, [docker, lxc]);
     assert.equal(selector.columnsDeclaration[0].renderer('docker'), 'DCT');
     assert.equal(selector.columnsDeclaration[0].renderer('lxc'), 'native-lxc');
-    assert.equal(removed?.length || 0, ['startall', 'stopall'].includes(action) ? 0 : 1);
-    assert.equal(initialRemoved?.length || 0, ['startall', 'stopall'].includes(action) ? 0 : 1,
+    assert.equal(removed?.length || 0, action === 'backup' ? 1 : 0);
+    assert.equal(initialRemoved?.length || 0, action === 'backup' ? 1 : 0,
         'already loaded DCTs must be filtered before the next load');
 }
-console.log('Native bulk power selector includes DCT and excludes it from unsupported operations');
+console.log('Native bulk selectors include DCT for node and cluster operations');
 
 // Network editor keeps native form/load/task handling and exposes supported fields only.
 let networkLoad, loadedNetwork, mtuCleared;
@@ -943,7 +964,7 @@ assert.equal(networkEditor.digest, editorDigest);
 assert.equal(mtuCleared, '');
 const networkFields = [...networkEditor.items[0].column1, ...networkEditor.items[0].column2, ...networkEditor.items[0].advancedColumn1];
 for (const name of ['bridge', 'hwaddr', 'cidr', 'mtu']) assert(networkFields.some(field => field.name === name));
-for (const name of ['ip6', 'tag', 'rate', 'firewall', 'gw']) assert(!networkFields.some(field => field.name === name));
+for (const name of ['ip6', 'tag', 'rate', 'gw']) assert(!networkFields.some(field => field.name === name));
 assert.equal(definitions['PVE.betterdocker.NetworkEdit'].showTaskViewer, true);
 assert.equal(networkEditor.items[0].onGetValues({ ipv4mode: 'dhcp', mtu: '' }).cidr, '');
 console.log('Network editor uses native load/digest/task handling and supported fields only');

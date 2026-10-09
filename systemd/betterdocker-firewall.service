@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply native PVE firewall policy to Docker guests
+Requires=pve-cluster.service
+After=pve-cluster.service docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/betterdocker/firewall.py watch
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

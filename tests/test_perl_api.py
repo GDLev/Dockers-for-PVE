@@ -56,6 +56,7 @@ sub vdisk_free { $main::freed = $_[1]; }
             # Storage/PBS contracts are exercised on PVE; this harness isolates route authorization.
             (base / 'PVE/BetterDocker').mkdir()
             (base / 'PVE/BetterDocker/Backup.pm').write_text('package PVE::BetterDocker::Backup; sub hook_storage { 1 } 1;')
+            (base / 'PVE/BetterDocker/Firewall.pm').write_text('package PVE::BetterDocker::Firewall; sub register_api { 1 } 1;')
             # Avoid relying on a locally installed Perl JSON distribution.
             (base / 'JSON.pm').write_text('''
 package JSON;
@@ -268,7 +269,7 @@ die 'native deletion behavior changed' unless $main::freed eq 'local-lvm:vm-103-
 # Unsupported native operations must reject DCT before entering a native handler,
 # including mixed backup lists, clone targets and retained guest IDs.
 my %native_methods;
-for my $class (qw(PVE::API2::LXC PVE::API2::Qemu PVE::API2::Backup PVE::API2::ReplicationConfig PVE::API2::HA::Resources)) {
+for my $class (qw(PVE::API2::LXC PVE::API2::Qemu PVE::API2::Backup PVE::API2::ReplicationConfig PVE::API2::HA::Resources PVE::API2::Cluster::BulkAction::Guest)) {
     no strict 'refs';
     *{"${class}::map_method_by_name"} = sub {
         my ($class, $name) = @_;

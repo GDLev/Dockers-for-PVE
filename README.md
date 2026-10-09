@@ -33,7 +33,11 @@ tar -xzf "$betterdocker_dir/source.tar.gz" --strip-components=1 -C "$betterdocke
 bash "$betterdocker_dir/start.sh" uninstall
 ```
 
-Remove DCT HA resources and replication jobs before uninstalling. Uninstallation removes the web/API integration and restarts the PVE web services. **Docker, existing workloads, their data and network maintenance services remain on the node.** The uninstaller restores the restart policies declared for the services. Removing a DCT through the interface also retains its persistent data; permanent data cleanup is a separate manual step.
+Remove DCT HA resources and replication jobs before uninstalling. Uninstallation removes the CLI and web/API integration and restarts the PVE web services. **Docker, existing workloads, their data, network and firewall maintenance services remain on the node.** The uninstaller restores the restart policies declared for the services. Removing a DCT through the interface also retains its persistent data; permanent data cleanup is a separate manual step.
+
+## CLI and API
+
+Use `dct list`, `dct status <vmid>` and `dct --help` as root on a PVE node. See [API_DOCS.md](API_DOCS.md) for HTTP requests, task handling and CLI examples.
 
 ## Extension files
 
@@ -41,14 +45,15 @@ These paths are on the Proxmox node after installation.
 
 | Path | Contents |
 | --- | --- |
+| `/usr/sbin/dct` | Guest CLI using numeric DCT IDs and the PVE API. Removed on uninstall. |
 | `/usr/local/lib/betterdocker/` | Deployment, networking and integration scripts, including the native hook adapter. |
 | `/usr/share/perl5/PVE/API2/BetterDocker.pm` | Extension API. |
-| `/usr/share/perl5/PVE/BetterDocker/`, `/usr/share/perl5/PVE/VZDump/Docker.pm`, `/usr/share/perl5/PVE/HA/Resources/Docker.pm` | PVE backup, replication and HA providers. |
+| `/usr/share/perl5/PVE/BetterDocker/`, `/usr/share/perl5/PVE/VZDump/Docker.pm`, `/usr/share/perl5/PVE/HA/Resources/Docker.pm` | PVE firewall, backup, replication and HA providers. |
 | `/usr/share/pve-manager/js/betterdocker.js` | Web interface. |
 | `/usr/share/pve-manager/js/betterdocker-locales/` | Separate English and Polish translations. |
 | `/usr/share/pve-manager/css/betterdocker.css` | Interface styles. |
 | `/usr/share/pve-manager/images/betterdocker.svg` | DCT icon. |
-| `/etc/systemd/system/betterdocker-*` | Network maintenance and integration services and timers. |
+| `/etc/systemd/system/betterdocker-*` | Network, firewall and integration services and timers. |
 | `/etc/apparmor.d/local/betterdocker-dhclient` | DHCP rules included by the distribution dhclient profile. Retained with network maintenance on uninstall. |
 | `/var/backups/betterdocker/` | Files backed up by the installer. |
 
@@ -62,6 +67,8 @@ The installer also updates `/usr/share/pve-manager/index.html.tpl`, `/usr/share/
 | --- | --- |
 | `/etc/pve/betterdocker/<id>.json` | DCT metadata, including its guest ID and node. |
 | `/etc/pve/betterdocker/ids/<vmid>.json` | Reservation of the numeric guest ID. |
+| `/etc/pve/firewall/<vmid>.fw` | Native PVE firewall rules, options, aliases and IP sets for the DCT. |
+| `/var/lib/betterdocker/firewall/` | Last applied node rules and firewall status. Retained on uninstall to keep existing DCT protection. |
 | `/var/lib/betterdocker/projects/<id>/` | Deployment configuration, settings, notes and network state. |
 | `/var/lib/betterdocker/projects/<id>/compose.source.yaml` | Imported Compose configuration. |
 | `/var/lib/betterdocker/projects/<id>/.env` | Imported environment variables. |
@@ -87,12 +94,14 @@ Without a managed data disk, application data stays in the bind-mount directorie
 - **Clones and migration:** full clones have independent IDs, addresses and data. Templates must be stopped and support full clones only. Migration requires a stopped DCT, a static IPv4 endpoint and no snapshot history. Install the extension on both nodes. A replicated DCT needs a successful complete checkpoint on its destination; replication jobs reverse direction after the move.
 - **Replication:** native PVE jobs and ZFS transport copy an additional disk containing deployment files, images, writable layers and owned data. Setup requires a managed ZFS data disk. Capturing state briefly pauses services and needs extra space. Snapshot history is not included. Remove HA management, replication jobs and their state disk before deleting a DCT.
 - **HA:** the native PVE manager controls power and fencing. Install the extension on every cluster node. Recovery requires a successful complete replica and quorum after a node fails. Restrict HA placement to nodes with complete replicas using native node-affinity rules. Changes made after the replica can be lost. Relocation stops and transfers the DCT; it is not live migration. Automatic recovery passed a software-watchdog failure test on the test cluster. Production reliability and hardware watchdogs have not been verified.
-- **Networking:** one IPv4 endpoint per DCT, used for published ports. Stop the DCT to change its bridge, static address/DHCP, MAC or MTU. Changes recreate stopped containers; volumes are retained, but writable container layers are replaced. Routing and outbound traffic use the host network. DHCP needs a reachable server and a network that allows an additional MAC address. Multiple interfaces, IPv6, VLAN tags, bandwidth limits, PVE guest firewall and SDN are unsupported. This endpoint does not provide LXC-style network isolation.
+- **Bulk operations:** native node and datacenter start, shutdown and migration include DCTs. Ordinary DCT migration requires a stopped guest; running guests are reported as ineligible. HA-managed DCTs use relocation with downtime. Suspend remains VM-only.
+- **Networking:** one IPv4 endpoint per DCT, used for published ports. Stop the DCT to change its bridge, static address/DHCP, MAC or MTU. Changes recreate stopped containers; volumes are retained, but writable container layers are replaced. Routing and outbound traffic use the host network. DHCP needs a reachable server and a network that allows an additional MAC address. Available Linux bridges and SDN VNets can be selected using native SDN permissions. The bridge must have a connected IPv4 subnet on the node. SDN zones using automatic IPAM or SDN DHCP allocation are unsupported and rejected. Multiple interfaces, IPv6, VLAN tags and bandwidth limits are unsupported. This endpoint does not provide LXC-style network isolation.
 - **Compose:** use existing images and explicit published ports. `build`, profiles and `network_mode` are unsupported. Only YAML and `.env` can be imported; other referenced files must already exist on the host.
 - **Resource limits:** CPU and memory limits apply per service instance. Supported resource limits and restart policies can be changed while running. Settings that cannot be changed while running remain pending until Start or Reboot. Revert discards pending changes. Deployment edits, data disk changes and Restore Compose require stopping the affected service or DCT. Writable-layer disk limits require `overlay2` on XFS with project quotas.
 - **Data disk:** managed disks appear under Docker Volumes in the storage view. Supports local directory, LVM-thin and ZFS storage with `rootdir` content. Use named volumes before moving application data to a managed disk. Create, grow and move require stopped services; shrinking is unsupported. The initial data migration recreates containers to change their mounts, replacing their writable layers. Grow and move preserve existing containers. Remove snapshots before growing or moving. Moving retains the previous disk. Deleting a DCT retains its disks and reserves its guest ID. After removing its snapshots and DCT, root can permanently free those disks with `/usr/local/lib/betterdocker/provision.py purge-retained-storage <project-id>`. Thin disks do not reserve physical space. A mount failure can prevent Docker from starting on the node.
 - **Snapshots:** LVM-thin and ZFS data disks use PVE storage snapshots; other data uses copies. Docker writable layers are saved separately in both cases. Capturing data briefly freezes services and requires additional space. RAM, Docker logs, external writable paths and shared volumes are unsupported. Rollback restores the captured network configuration and leaves the DCT stopped. Network edits after rollback still require redeployment; a later DHCP address change may require restoring again. After an interrupted rollback, retry that snapshot before starting the DCT.
 - **Startup:** Options controls Start at boot and start/shutdown order. Node Start All/Stop All includes DCTs. Order applies to stopped guests; already running services are skipped. Controlled Docker restarts preserve which instances were running. For guests outside HA, Docker restart policies can run before PVE ordering after an abrupt power loss or daemon crash. HA-managed DCTs use the native HA manager instead of Docker restart policies or Start All ordering.
+- **Firewall:** uses native PVE guest rules, macros, aliases, IP sets, security groups and logs. Enable the datacenter firewall, the DCT firewall and the network's Firewall flag. Incoming published connections use the endpoint address and published port in rules; direct container traffic uses its internal address and port. Outgoing and cross-DCT traffic is filtered. Services inside the same DCT can communicate internally. Filtering requires owned IPv4 Docker bridge networks. Privileged deployments and shared networks are rejected. LXC MAC/IP filters, NDP, router advertisements, IPS and per-guest DHCP exceptions are unsupported. IPv6 traffic across protected DCT boundaries is blocked. Rules are applied in a separate nftables table without replacing PVE or Docker tables. Firewall maintenance stays installed when the UI extension is uninstalled.
 - **PVE updates:** changes to Proxmox can require an extension update or integration repair.
 
 ## Support the project
@@ -110,7 +119,8 @@ Grant guest privileges on `/vms/<vmid>` or through a native resource pool. Creat
 | View status and settings | `VM.Audit` |
 | Read logs or open a shell | `VM.Console` |
 | Start, stop or restart | `VM.PowerMgmt` |
-| Edit CPU, memory, DNS or options | Corresponding `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network` or `VM.Config.Options` |
+| Edit CPU, memory or options | Corresponding `VM.Config.CPU`, `VM.Config.Memory` or `VM.Config.Options` |
+| Edit networking, DNS or firewall rules | `VM.Config.Network` |
 | Edit the complete deployment | All five: `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network`, `VM.Config.Disk`, `VM.Config.Options` |
 | Create or resize a data disk | `VM.Config.Disk` and storage `Datastore.AllocateSpace` |
 | Create or delete snapshots | `VM.Snapshot` |

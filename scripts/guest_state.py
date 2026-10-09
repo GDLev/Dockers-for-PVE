@@ -205,6 +205,9 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
                 if source.exists():
                     shutil.copy2(source, config / filename)
             write(config / 'metadata.json', {key: value for key, value in info.items() if key not in ('deployment', 'digest', 'metrics')})
+            firewall = Path('/etc/pve/firewall') / (str(info['vmid']) + '.fw')
+            if firewall.exists():
+                (config / 'firewall.fw').write_text(firewall.read_text())
             settings = worker.storage_config(identifier)
             if settings:
                 write(config / 'storage.json', settings)
@@ -394,7 +397,7 @@ def adapted_state(folder, identifier, address):
     return manifest, runtime, volumes, networks, source
 
 
-def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False, trusted_hook=False):
+def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False, trusted_hook=False, live_firewall=None):
     folder = Path(folder)
     manifest = check_state(folder)
     check_portable_networks(read(folder / 'configuration' / 'compose.runtime.json'))
@@ -427,10 +430,13 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
         elif not overrides.get('address') and not overrides.get('cidr'):
             raise ValueError('Choose an independent IPv4 address for the restored or cloned DCT')
         request['hwaddr'] = overrides.get('hwaddr', '')
+        saved_info = read(folder / 'configuration' / 'metadata.json')
+        # Migration/HA retain the current cluster policy, not an older backup.
+        request['firewall'] = live_firewall if live_firewall is not None else saved_info.get('firewall', request.get('firewall', 0))
         request = worker.validate(request)
         worker.network_preflight(request)
-        saved_info = read(folder / 'configuration' / 'metadata.json')
-        info = {key: saved_info[key] for key in ('tags', 'notes', 'onboot', 'startup', 'hookscript') if key in saved_info}
+        info = {key: saved_info[key] for key in ('tags', 'notes', 'onboot', 'startup', 'hookscript', 'firewall') if key in saved_info}
+        info['firewall'] = request.get('firewall', 0)
         if info.get('hookscript'):
             if not trusted_hook and os.environ.get('BETTERDOCKER_TASK_USER', 'root@pam') != 'root@pam':
                 raise ValueError('Restoring a hookscript is only allowed for root@pam')
@@ -444,7 +450,8 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
         imports.mkdir(parents=True, exist_ok=True, mode=0o700)
         journal = imports / (identifier + '.json')
         state = {'id': identifier, 'node': node, 'phase': 'allocating', 'containers': [], 'volumes': [], 'networks': [],
-                 'source': manifest['id'], 'images': []}
+                 'source': manifest['id'], 'images': [], 'vmid': vmid, 'restore_firewall': live_firewall is None,
+                 'firewall_before': (Path('/etc/pve/firewall') / (str(vmid) + '.fw')).read_text() if (Path('/etc/pve/firewall') / (str(vmid) + '.fw')).exists() else None}
         write(journal, state)
         try:
             worker.write_json(metadata_path, info)
@@ -551,6 +558,9 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
             policies.mkdir(parents=True, exist_ok=True, mode=0o700)
             write(policies / (identifier + '.json'), {'paused': True})
             info['status'] = 'stopped'; worker.write_json(metadata_path,info)
+            firewall = folder / 'configuration' / 'firewall.fw'
+            if live_firewall is None:
+                worker.run(['perl', '-MPVE::Firewall', '-e', 'PVE::Firewall::lock_vmfw_conf($ARGV[0],10,sub { if (-f $ARGV[1]) { PVE::Tools::file_set_contents("/etc/pve/firewall/$ARGV[0].fw",PVE::Tools::file_get_contents($ARGV[1])); } else { unlink "/etc/pve/firewall/$ARGV[0].fw"; } });', str(vmid), str(firewall)])
             (project / 'allocated-volume.json').unlink(missing_ok=True)
             state['phase']='committed'; write(journal,state)
             journal.unlink()
@@ -572,6 +582,12 @@ def cleanup_import(identifier):
         raise ValueError('Invalid DCT import journal')
     if state.get('phase') == 'committed':
         journal.unlink(); return
+    if state.get('vmid') and state.get('restore_firewall'):
+        firewall = Path('/etc/pve/firewall') / (str(int(state['vmid'])) + '.fw')
+        if state.get('firewall_before') is None:
+            firewall.unlink(missing_ok=True)
+        else:
+            firewall.write_text(state['firewall_before'])
     owned = {c['id'] for c in worker.container_records(identifier)}
     if owned:
         worker.run(['docker','rm','-f',*sorted(owned)],capture_output=True)

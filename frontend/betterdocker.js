@@ -137,7 +137,7 @@
                 ],
                 column2: [
                     { xtype: 'pvePoolSelector', name: 'pool', fieldLabel: translate('Resource Pool'), allowBlank: true },
-                    { xtype: 'PVE.form.BridgeSelector', name: 'bridge', nodename: me.nodename, bridgeType: 'bridge',
+                    { xtype: 'pveBetterDockerBridgeSelector', name: 'bridge', nodename: me.nodename, bridgeType: 'any_bridge',
                         fieldLabel: translate('Bridge'), value: 'vmbr0', allowBlank: false },
                     { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 2,
                         items: [
@@ -248,7 +248,7 @@
     const deployment = values => {
         const common = { name: values.name, mode: values.mode, environment: values.environment || '',
             bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
-            hwaddr: values.hwaddr || '', mtu: values.mtu || '' };
+            hwaddr: values.hwaddr || '', mtu: values.mtu || '', firewall: Number(values.firewall) === 1 ? 1 : 0 };
         if (values.vmid) { common.vmid = Number(values.vmid); }
         return Object.assign(common, values.mode === 'compose' ? { compose: values.compose } :
             { image: values.image, ports: values.ports || '' });
@@ -371,6 +371,24 @@
             me.on('afterrender', () => { me.inputEl.dom.spellcheck = false; });
         },
     });
+    Ext.define('PVE.betterdocker.BridgeSelector', {
+        extend: 'PVE.form.BridgeSelector', alias: 'widget.pveBetterDockerBridgeSelector', bridgeType: 'any_bridge',
+        initComponent: function () {
+            this.callParent();
+            this.getStore().addFilter(record => ['bridge', 'vnet'].includes(record.get('type')));
+        },
+    });
+
+    Ext.define('PVE.betterdocker.FirewallOptions', {
+        extend: 'PVE.FirewallOptions', alias: 'widget.pveBetterDockerFirewallOptions',
+        add_boolean_row: function (name) {
+            this.rows.status = { header: gettext('Status'), required: true, defaultValue: 'unknown',
+                renderer: value => gettext({ active: 'Active', inactive: 'Inactive', error: 'Error', unknown: 'Unknown' }[value] || 'Unknown') };
+            if (['dhcp', 'ndp', 'radv', 'macfilter', 'ipfilter'].includes(name)) { return; }
+            return this.callParent(arguments);
+        },
+    });
+
     Ext.define('PVE.betterdocker.NetworkEdit', {
         extend: 'Proxmox.window.Edit', subject: translate('Network Device'), width: 600, showTaskViewer: true,
         initComponent: function () {
@@ -379,8 +397,8 @@
                 column1: [
                     { xtype: 'displayfield', fieldLabel: translate('Name'), value: 'net0' },
                     field('hwaddr', 'MAC address', '', { vtype: 'MacAddress', emptyText: 'auto' }),
-                    field('bridge', 'Bridge', '', { xtype: 'PVE.form.BridgeSelector', nodename: me.nodename,
-                        bridgeType: 'bridge', allowBlank: false }),
+                    field('bridge', 'Bridge', '', { xtype: 'pveBetterDockerBridgeSelector', nodename: me.nodename,
+                        bridgeType: 'any_bridge', allowBlank: false }),
                 ],
                 column2: [
                     { xtype: 'radiogroup', fieldLabel: 'IPv4', columns: 2, items: [
@@ -391,6 +409,7 @@
                         if (address) { address.setDisabled(group.getValue().ipv4mode !== 'static'); }
                     } } },
                     field('cidr', 'IPv4/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false }),
+                    { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'), uncheckedValue: 0 },
                 ],
                 advancedColumn1: [field('mtu', 'MTU', '', { xtype: 'numberfield', minValue: 576, maxValue: 9216,
                     allowDecimals: false, emptyText: translate('Same as bridge') })],
@@ -459,8 +478,10 @@
             }, {
                 xtype: 'inputpanel', title: translate('Network'), onlineHelp: 'chapter_system_administration',
                 column1: [
-                    field('bridge', 'Bridge', defaults.bridge || 'vmbr0', { xtype: 'PVE.form.BridgeSelector',
-                        nodename: me.nodename || Proxmox.NodeName, bridgeType: 'bridge', allowBlank: false, readOnly: Boolean(me.projectId) }),
+                    field('bridge', 'Bridge', defaults.bridge || 'vmbr0', { xtype: 'pveBetterDockerBridgeSelector',
+                        nodename: me.nodename || Proxmox.NodeName, bridgeType: 'any_bridge', allowBlank: false, readOnly: Boolean(me.projectId) }),
+                    { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'),
+                        checked: Boolean(defaults.firewall), uncheckedValue: 0, readOnly: Boolean(me.projectId) },
                     field('hwaddr', 'MAC address', defaults.hwaddr || '', { readOnly: Boolean(me.projectId),
                         emptyText: 'auto', validator: value => !value || /^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(value) || 'Invalid MAC address' }),
                     field('mtu', 'MTU', defaults.mtu || '', { xtype: 'numberfield', readOnly: Boolean(me.projectId),
@@ -481,6 +502,8 @@
                 ],
             }, {
                 title: translate('Confirm'), onlineHelp: 'chapter_system_administration', layout: 'fit',
+                dockedItems: [{ xtype: 'proxmoxcheckbox', name: 'start', dock: 'bottom', margin: '5 0 0 0',
+                    boxLabel: gettext('Start after created'), uncheckedValue: 0, hidden: Boolean(me.projectId), disabled: Boolean(me.projectId) }],
                 validator: function () { const wizard = this.up('window'); return wizard.validatedDeployment === JSON.stringify(deployment(wizard.getValues())); }, tbar: [{ text: translate('Validate Compose'), handler: function () { this.up('window').validateDeployment(); } }], items: [{ xtype: 'grid', itemId: 'reviewGrid',
                     store: { fields: ['key', 'value'], data: [] },
                     columns: [{ text: translate('Name'), dataIndex: 'key', width: 170,
@@ -505,7 +528,7 @@
                     }
                     request({ url: '/nodes/' + encodeURIComponent(values.nodename) + '/docker' + (wizard.projectId ? '/' + wizard.projectId : ''),
                         method: wizard.projectId ? 'PUT' : 'POST',
-                        params: Object.assign({ deployment: JSON.stringify(deployment(values)) }, !wizard.projectId && values.pool ? { pool: values.pool } : {}), waitMsgTarget: wizard,
+                        params: Object.assign({ deployment: JSON.stringify(deployment(values)) }, !wizard.projectId ? { start: values.start || 0, ...(values.pool ? { pool: values.pool } : {}) } : {}), waitMsgTarget: wizard,
                         success: response => { task(response); wizard.close(); } });
                 },
             }];
@@ -635,15 +658,15 @@
             me.callParent();
             me.on('afterrender', function () {
                 const win = me.up('window');
-                const power = win?.nodename && ['startall', 'stopall'].includes(win.action);
+                const bulk = ['startall', 'stopall', 'migrateall', 'start', 'shutdown', 'migrate', 'suspend', 'suspendall'].includes(win?.action);
                 const backup = win?.isXType && win.isXType('pveDcBackupEdit');
                 const filterGuests = (store, records) => {
-                    if (!power && !backup) { store.remove(records.filter(record => record.get('type') === 'docker')); }
+                    if (!bulk && !backup) { store.remove(records.filter(record => record.get('type') === 'docker')); }
                 };
                 const store = me.getStore();
                 me.mon(store, 'load', filterGuests);
                 filterGuests(store, store.getRange());
-                if (power) {
+                if (bulk) {
                     const type = win.down('#typefilter');
                     if (type) { type.getStore().add({ [type.valueField]: 'docker', [type.displayField]: 'DCT' }); }
                     const status = win.down('#statusfilter');
@@ -1084,9 +1107,12 @@
                 const item = me.down('#' + id); if (!item) { return; }
                 const model = item.getSelectionModel && item.getSelectionModel();
                 const selected = model && model.getSelection()[0];
-                const key = selected && (selected.get('id') || selected.get('key'));
+                const key = selected && (selected.get('id') || selected.get('key') || selected.get('name'));
+                const snapshot = JSON.stringify(data);
+                if (item.dockerRowsSnapshot === snapshot) { return; }
+                item.dockerRowsSnapshot = snapshot;
                 if (item.setRows) { item.setRows(data); } else { item.getStore().loadData(data); }
-                if (key && model) { const record = item.getStore().getRange().find(row => (row.get('id') || row.get('key')) === key); if (record) { model.select(record); } }
+                if (key && model) { const record = item.getStore().getRange().find(row => (row.get('id') || row.get('key') || row.get('name')) === key); if (record) { model.select(record); } }
             };
             const service = () => current && current.services.find(item => item.name === selectedService);
             const populate = () => {
@@ -1124,9 +1150,9 @@
                 const summary = me.down('#summary');
                 if (summary) { summary.updateSnapshot(current); }
                 const networkEdit = me.down('#networkEdit');
-                if (networkEdit) { networkEdit.setDisabled(!can('network') || running || locked() || Boolean(current.template)); }
+                if (networkEdit) { networkEdit.setDisabled(!can('network') || locked() || Boolean(current.template)); }
                 rows('networkGrid', [{ name: 'net0', bridge: current.bridge, hwaddr: current.hwaddr || '',
-                    mtu: current.mtu || 'Same as bridge', address: current.address ? (current.ipv4mode === 'dhcp' ? current.address : current.cidr || current.address) : '',
+                    firewall: Boolean(current.firewall), mtu: current.mtu || 'Same as bridge', address: current.address ? (current.ipv4mode === 'dhcp' ? current.address : current.cidr || current.address) : '',
                     mode: current.ipv4mode === 'dhcp' ? 'DHCP' : 'Static' }]);
                 rows('portGrid', current.services.flatMap(item => item.ports.map(port => Object.assign({ service: item.name }, port))));
                 const notes = me.down('#summary')?.down('#notesview');
@@ -1174,7 +1200,7 @@
             };
             me.reloadDocker = reload;
             const editNetwork = () => {
-                if (!can('network') || locked() || current?.containers.some(row => ['running', 'restarting', 'paused'].includes(row.state))) { return; }
+                if (!current || !can('network') || locked() || current.template) { return; }
                 const win = Ext.create('PVE.betterdocker.NetworkEdit', { url: url + '/network', method: 'PUT', nodename: info.node, taskDone: reload,
                     apiCallDone: (success, response) => { if (success) { trackTask(response, me); } } });
                 win.on('destroy', reload);
@@ -1424,8 +1450,8 @@
                 card('Network', 'network', 'exchange', [Object.assign(grid('networkGrid', [
                     { text: translate('Name'), dataIndex: 'name', width: 80, flex: 0 }, { text: translate('Bridge'), dataIndex: 'bridge' },
                     { text: translate('MAC address'), dataIndex: 'hwaddr' }, { text: translate('IPv4'), dataIndex: 'address' },
-                    { text: translate('IPv4 mode'), dataIndex: 'mode' }, { text: translate('MTU'), dataIndex: 'mtu' }],
-                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu']), { flex: 1, listeners: { itemdblclick: editNetwork } }),
+                    { text: translate('IPv4 mode'), dataIndex: 'mode' }, { text: gettext('Firewall'), dataIndex: 'firewall', renderer: Proxmox.Utils.format_boolean }, { text: translate('MTU'), dataIndex: 'mtu' }],
+                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu', 'firewall']), { flex: 1, listeners: { itemdblclick: editNetwork } }),
                     Object.assign(grid('portGrid', [{ text: translate('Service'), dataIndex: 'service' }, { text: translate('IP address'), dataIndex: 'host_ip' },
                         { text: translate('Published port'), dataIndex: 'published' }, { text: translate('Container port'), dataIndex: 'target' },
                         { text: translate('Protocol'), dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: translate('Published ports'), flex: 1 })],
@@ -1450,6 +1476,20 @@
             me.items.splice(9, 0, { xtype: 'pveBackupView', title: translate('Backup'), itemId: 'backup',
                 iconCls: 'fa fa-floppy-o', pveSelNode: me.pveSelNode });
             me.items.splice(10, 0, { xtype: 'pveReplicaView', title: translate('Replication'), itemId: 'replication', iconCls: 'fa fa-retweet', pveSelNode: me.pveSelNode });
+            if (Proxmox.UserName === 'root@pam' || gui.vms?.['VM.Audit']) {
+                me.items.push(
+                    { xtype: 'pveFirewallRules', title: gettext('Firewall'), itemId: 'firewall', iconCls: 'fa fa-shield',
+                        allow_iface: true, firewall_type: 'vm', base_url: url + '/firewall/rules', list_refs_url: url + '/firewall/refs' },
+                    { xtype: 'pveBetterDockerFirewallOptions', title: gettext('Options'), itemId: 'firewall-options', groups: ['firewall'],
+                        iconCls: 'fa fa-gear', fwtype: 'vm', base_url: url + '/firewall/options' },
+                    { xtype: 'pveFirewallAliases', title: gettext('Alias'), itemId: 'firewall-aliases', groups: ['firewall'],
+                        iconCls: 'fa fa-external-link', base_url: url + '/firewall/aliases' },
+                    { xtype: 'pveIPSet', title: gettext('IPSet'), itemId: 'firewall-ipset', groups: ['firewall'],
+                        iconCls: 'fa fa-list-ol', base_url: url + '/firewall/ipset', list_refs_url: url + '/firewall/refs' });
+            }
+            if (consoleAccess) { me.items.push({ xtype: 'proxmoxLogView', title: gettext('Log'), itemId: 'firewall-fwlog',
+                groups: ['firewall'], iconCls: 'fa fa-list', url: '/api2/extjs' + url + '/firewall/log',
+                log_select_timespan: true, submitFormat: 'U' }); }
             me.items.push({ xtype: 'pveACLView', title: translate('Permissions'), itemId: 'permissions', iconCls: 'fa fa-unlock', path: '/vms/' + info.vmid });
             me.loadDockerTasks = () => { const tasks = me.down('#tasks'); if (tasks && tasks.store) { tasks.store.load(); } };
             ['resources', 'dns', 'options'].forEach(group => {
@@ -1534,14 +1574,7 @@
                             !item.destroyed && item.pveSelNode.data.id === info.id);
                         if (panel) { panel.selectById('console'); }
                     } },
-                { text: translate('Edit deployment'), itemId: 'deployment', iconCls: 'fa fa-fw fa-pencil', disabled: !allowed,
-                    handler: () => request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1],
-                        method: 'GET', success: response => Ext.create('PVE.betterdocker.DeploymentEdit', {
-                            projectId: (info.realId || info.id).split('/')[1], vmid: info.vmid, nodename: info.node, deployment: response.result.data.deployment, digest: response.result.data.digest,
-                        }).show() }) },
-                { xtype: 'menuseparator' },
-                { text: translate('Remove'), itemId: 'removeButton', iconCls: 'fa fa-fw fa-trash', disabled: true,
-                    handler: () => removeProject(info) },
+
             ];
             me.callParent();
             request({ url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1] + '/capabilities',
@@ -1555,12 +1588,12 @@
                         const override = verb === 'force-stop' && rights.overrule_shutdown;
                         me.down('#' + verb).setDisabled(!rights.power || busy && !override || (verb === 'start' ? state.template || state.status === 'running' : !active));
                     });
+                    me.down('#clone').setVisible(Boolean(rights.clone ?? rights.configure));
+                    me.down('#migrate').setVisible(!PVE.Utils.isStandaloneNode() && Boolean(rights.migrate ?? rights.configure));
                     me.down('#clone').setDisabled(!(rights.clone ?? rights.configure) || busy);
                     me.down('#migrate').setDisabled(!(rights.migrate ?? rights.configure) || busy || active && !state.ha?.managed);
                     me.down('#template').setDisabled(!(rights.template ?? rights.configure) || busy || active || Boolean(state.template) || state.ha?.managed);
                     me.down('#console').setDisabled(!rights.console || !active || !me.workspace);
-                    me.down('#deployment').setDisabled(!rights.configure || busy || Boolean(state.template) || state.ha?.managed);
-                    me.down('#removeButton').setDisabled(!(rights.remove ?? rights.configure) || Boolean(state.protection) || state.ha?.managed || busy || state.status !== 'stopped');
                 } });
         },
     });

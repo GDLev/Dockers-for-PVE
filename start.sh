@@ -49,11 +49,11 @@ case "$ACTION" in
         python3 "$PROJECT_DIR/scripts/patch.py" remove
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
         systemctl restart pvedaemon pveproxy pvescheduler pve-ha-crm pve-ha-lrm
-        rm -f /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
+        rm -f /usr/sbin/dct /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
             /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg \
             /usr/share/pve-manager/js/betterdocker-locales/en.js /usr/share/pve-manager/js/betterdocker-locales/pl.js \
-            /usr/share/perl5/PVE/BetterDocker/Backup.pm /usr/share/perl5/PVE/BetterDocker/Replication.pm /usr/share/perl5/PVE/VZDump/Docker.pm /usr/share/perl5/PVE/HA/Resources/Docker.pm
-        echo 'UI integration removed. Docker projects, volumes and network/lease maintenance are retained.'
+            /usr/share/perl5/PVE/BetterDocker/Backup.pm /usr/share/perl5/PVE/BetterDocker/Firewall.pm /usr/share/perl5/PVE/BetterDocker/Replication.pm /usr/share/perl5/PVE/VZDump/Docker.pm /usr/share/perl5/PVE/HA/Resources/Docker.pm
+        echo 'UI integration removed. Docker projects, volumes, network/lease and firewall maintenance are retained.'
         exit 0 ;;
     install|repair) ;;
     *) echo 'Usage: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
@@ -61,9 +61,9 @@ esac
 if [[ "$ACTION" == install ]]; then
     echo 'Updating the package index and installing BetterDocker dependencies.'
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs nftables iptables
 else
-    for command in python3 curl arping dhclient; do
+    for command in python3 curl arping dhclient nft iptables-translate; do
         command -v "$command" >/dev/null || { echo "Missing $command; run start.sh install." >&2; exit 1; }
     done
     python3 -c 'import yaml' >/dev/null 2>&1 || { echo 'Missing python3-yaml; run start.sh install.' >&2; exit 1; }
@@ -113,6 +113,13 @@ TARGETS=(
     /usr/local/lib/betterdocker/ha.py
     /usr/share/perl5/PVE/HA/Resources/Docker.pm
     /usr/local/lib/betterdocker/hooks.pl
+    /usr/local/lib/betterdocker/firewall.py
+    /usr/local/lib/betterdocker/firewall.pl
+    /usr/share/perl5/PVE/BetterDocker/Firewall.pm
+    /etc/systemd/system/betterdocker-firewall.service
+    /etc/systemd/system/betterdocker-firewall-restore.service
+    /etc/systemd/system/docker.service.d/betterdocker-firewall.conf
+    /usr/sbin/dct
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -138,6 +145,7 @@ rollback() {
             rm -f "${TARGETS[$index]}"
         fi
     done
+    if [[ ! -e "$BACKUP_DIR/addon-34" ]]; then systemctl disable --now betterdocker-firewall.service || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-8" ]]; then systemctl disable --now betterdocker-refresh.timer || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-13" ]]; then systemctl disable --now betterdocker-integration.timer || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-6" ]]; then systemctl disable --now betterdocker-addresses.service || true; fi
@@ -153,6 +161,14 @@ install -d -m 0755 /usr/local/lib/betterdocker
 install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
 install -d -m 0755 /usr/share/perl5/PVE/BetterDocker /usr/share/perl5/PVE/VZDump
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
+install -m 0755 "$PROJECT_DIR/scripts/dct.py" "${TARGETS[37]}"
+install -m 0755 "$PROJECT_DIR/scripts/firewall.py" "${TARGETS[31]}"
+install -m 0755 "$PROJECT_DIR/scripts/firewall.pl" "${TARGETS[32]}"
+install -m 0644 "$PROJECT_DIR/backend/PVE/BetterDocker/Firewall.pm" "${TARGETS[33]}"
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-firewall.service" "${TARGETS[34]}"
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-firewall-restore.service" "${TARGETS[35]}"
+install -d -m 0755 /etc/systemd/system/docker.service.d
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-firewall-docker.conf" "${TARGETS[36]}"
 install -m 0755 "$PROJECT_DIR/scripts/ha.py" "${TARGETS[28]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/HA/Resources/Docker.pm" "${TARGETS[29]}"
 install -m 0755 "$PROJECT_DIR/scripts/replica.py" "${TARGETS[26]}"
@@ -194,6 +210,9 @@ if [[ -f /etc/apparmor.d/usr.sbin.dhclient ]] && command -v apparmor_parser >/de
 fi
 bash /usr/local/lib/betterdocker/docker-install.sh
 systemctl daemon-reload
+systemctl enable --now betterdocker-firewall.service
+systemctl start betterdocker-firewall-restore.service
+systemctl restart betterdocker-firewall.service
 systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer betterdocker-lifecycle.service
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'

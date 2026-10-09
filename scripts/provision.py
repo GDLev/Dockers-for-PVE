@@ -148,7 +148,7 @@ def summaries():
 def validate(data):
     if not isinstance(data, dict):
         raise ValueError('Deployment must be an object')
-    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid'}
+    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid', 'firewall'}
     if set(data) - allowed:
         raise ValueError('Unknown deployment setting')
     vmid = data.get('vmid')
@@ -198,8 +198,10 @@ def validate(data):
     mtu = int(raw_mtu) if raw_mtu not in (None, '') else 0
     if mtu and not 576 <= mtu <= 9216:
         raise ValueError('MTU must be between 576 and 9216')
+    if data.get('firewall', 0) not in (0, 1, False, True):
+        raise ValueError('Firewall must be 0 or 1')
     return dict(data, mode=mode, environment=environment, address=address, cidr=cidr,
-                ipv4mode=ipv4mode, hwaddr=hwaddr, mtu=mtu)
+                ipv4mode=ipv4mode, hwaddr=hwaddr, mtu=mtu, firewall=int(data.get('firewall', 0)))
 
 
 def parse_ports(text):
@@ -1494,7 +1496,17 @@ def check_address(address, bridge, identifier=None, owned_interface=None, probe=
             raise ValueError('The IP responded to duplicate-address detection; choose an unused address')
 
 
+def check_sdn_bridge(bridge):
+    program = ("use PVE::Network::SDN::Vnets; use PVE::Network::SDN::Zones; "
+               "my $v=PVE::Network::SDN::Vnets::get_vnet($ARGV[0],1); "
+               "if ($v) { my $z=PVE::Network::SDN::Zones::get_zone($v->{zone},1); "
+               "die qq(DCT endpoints do not support automatic SDN IPAM or SDN DHCP allocation\\n) "
+               "if $z->{ipam} || $z->{dhcp}; }")
+    capture(['perl', '-e', program, bridge])
+
+
 def network_preflight(data):
+    check_sdn_bridge(data['bridge'])
     if not trusted_management():
         actor = os.environ.get('BETTERDOCKER_TASK_USER')
         if not actor:
@@ -1759,6 +1771,10 @@ def sync_dhcp(info):
         write_json(directory / 'network-reconcile.json', {'address': assigned['address']})
         stop_network_instances(info['id'])
         reconcile_network_runtime(info)
+        if info.get('firewall'):
+            info['address'] = assigned['address']
+            write_json(METADATA / (info['id'] + '.json'), info)
+            prepare_firewall(info)
         records = container_records(info['id'])
         for saved in resume:
             row = next((row for row in records if row['service'] == saved['service'] and
@@ -1777,13 +1793,31 @@ def sync_dhcp(info):
     return True
 
 
-NETWORK_KEYS = ('bridge', 'ipv4mode', 'cidr', 'hwaddr', 'mtu')
+NETWORK_KEYS = ('bridge', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'firewall')
+
+
+def firewall_check(identifier, node):
+    info = detail(identifier, node)
+    delegated_access(identifier, node)
+    import firewall
+    firewall.networks(info)
+    return info
+
+
+def prepare_firewall(info):
+    if not info.get('firewall'):
+        return
+    firewall_check(info['id'], info['node'])
+    directory = ROOT / info['id']
+    if not (directory / 'snapshot-restored.json').exists():
+        run(compose_base(directory, info['id']) + ['up', '--no-start', '--no-recreate'], timeout=1800)
+    run([str(Path(__file__).with_name('firewall.py')), 'apply'])
 
 
 def network_config(identifier, node):
     info = detail(identifier, node)
     return dict({key: info.get(key, '') for key in NETWORK_KEYS},
-                ipv4mode=info.get('ipv4mode', 'static'), mtu=info.get('mtu', 0),
+                ipv4mode=info.get('ipv4mode', 'static'), mtu=info.get('mtu', 0), firewall=int(info.get('firewall', 0)),
                 cidr=(info.get('cidr') or info.get('address', '')) if info.get('ipv4mode', 'static') == 'static' else '', digest=info['digest'])
 
 
@@ -1825,7 +1859,7 @@ def recover_network_transaction(identifier, node):
 def project_network(identifier, node, values, digest=None):
     if not isinstance(values, dict) or set(values) - set(NETWORK_KEYS):
         raise ValueError('Unsupported network setting')
-    # Routing/bridges are host configuration, not safe VM.Config.Network delegation.
+    # The API grants network fields separately from CPU, memory and options.
     authorize_config_keys(NETWORK_KEYS)
     with locked():
         recover_network_transaction(identifier, node)
@@ -1835,18 +1869,40 @@ def project_network(identifier, node, values, digest=None):
         require_stopped(container_records(identifier))
         if (directory / 'network-resume.json').exists():
             raise ValueError('Stop the DCT explicitly before changing a recovering DHCP network')
-        if (directory / 'snapshot-restored.json').exists():
-            raise ValueError('Redeploy or restore a snapshot before changing a restored DCT network')
-        before = {key: info.get(key, 'static' if key == 'ipv4mode' else 0 if key == 'mtu' else '') for key in NETWORK_KEYS}
+        before = {key: info.get(key, 'static' if key == 'ipv4mode' else 0 if key in ('mtu', 'firewall') else '') for key in NETWORK_KEYS}
         requested = dict(before, **values)
         data = validate(dict(info['deployment'], **requested, address=requested['cidr']))
         requested = {key: data[key] for key in NETWORK_KEYS}
         if requested == before:
             return
-        if any(requested[key] != before[key] for key in NETWORK_KEYS if key != 'mtu'):
+        if all(requested[key] == before[key] for key in NETWORK_KEYS if key != 'firewall'):
+            metadata = METADATA / (identifier + '.json')
+            request = directory / 'request.json'
+            saved_metadata, saved_request = metadata.read_text(), request.read_text()
+            try:
+                candidate = json.loads(saved_metadata)
+                candidate['firewall'] = requested['firewall']
+                deployment = json.loads(saved_request)
+                deployment['firewall'] = requested['firewall']
+                if candidate['firewall']:
+                    firewall_check(identifier, node)
+                write_json(metadata, candidate)
+                write_json(request, deployment)
+                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+            except Exception:
+                write_json(metadata, json.loads(saved_metadata))
+                write_json(request, json.loads(saved_request))
+                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+                raise
+            refresh(node)
+            return
+        if (directory / 'snapshot-restored.json').exists():
+            raise ValueError('Redeploy or restore a snapshot before changing a restored DCT network')
+        check_sdn_bridge(data['bridge'])
+        if any(requested[key] != before[key] for key in NETWORK_KEYS if key not in ('mtu', 'firewall')):
             for manifest in snapshot_root(identifier).glob('*/manifest.json'):
                 captured = manifest.parent / 'configuration' / 'metadata.json'
-                if not captured.exists() or not all(key in json.loads(captured.read_text()) for key in NETWORK_KEYS):
+                if not captured.exists() or not all(key in json.loads(captured.read_text()) for key in NETWORK_KEYS if key != 'firewall'):
                     raise ValueError('Remove snapshots without a restorable network configuration before changing the endpoint')
         _, subnets = bridge_addresses(data['bridge'])
         if data['ipv4mode'] == 'static':
@@ -1883,6 +1939,9 @@ def project_network(identifier, node, values, digest=None):
             write_json(directory / 'network-reconcile.json', {'address': candidate['address']})
             reconcile_network_runtime(candidate)
             write_json(METADATA / (identifier + '.json'), candidate)
+            if candidate.get('firewall'):
+                firewall_check(identifier, node)
+            run([str(Path(__file__).with_name('firewall.py')), 'apply'])
             clear_network_resume(identifier)
             journal.unlink()
         except Exception as error:
@@ -1940,7 +1999,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
                 'address': data['address'], 'status': 'creating', 'created': int(time.time()),
                 'expected': sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values()),
                 'ipv4mode': data.get('ipv4mode', 'static'), 'cidr': data.get('cidr', ''),
-                'interface': 'bd' + identifier[:12], 'mtu': data.get('mtu', 0),
+                'interface': 'bd' + identifier[:12], 'mtu': data.get('mtu', 0), 'firewall': data.get('firewall', 0),
                 'hwaddr': data.get('hwaddr') or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2))}
         if hookscript:
             info['hookscript'] = hookscript
@@ -1952,7 +2011,10 @@ def create(data, node, identifier=None, hookscript=None, start=True):
             if start:
                 guest_hook(info, 'pre-start')
                 expect_guest_hook(info, 'post-start')
+                prepare_firewall(info)
                 run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
+                if info.get('firewall'):
+                    run([str(Path(__file__).with_name('firewall.py')), 'apply'])
                 guest_hook(info, 'post-start')
             else:
                 run(compose_base(directory, identifier) + ['up', '--no-start'], timeout=1800)
@@ -2086,6 +2148,8 @@ def daemon_resume(node):
             # PVE's startall owns boot ordering. Policies are restored by project Start.
             path.unlink()
             return
+        if any(info.get('firewall') for info in summaries() if info['node'] == node):
+            run([str(Path(__file__).with_name('firewall.py')), 'apply'])
         owned = {item['id'] for info in summaries() if info['node'] == node
                  for item in container_records(info['id'])}
         for row in state['containers']:
@@ -2447,12 +2511,15 @@ def action(identifier, node, operation, timeout=60):
             apply_pending_settings(identifier, node)
             guest_hook(info, 'pre-start')
             expect_guest_hook(info, 'post-start')
+            prepare_firewall(info)
             if not restored_start(identifier):
                 containers = container_records(identifier)
                 if containers and (operation in ('restart', 'reboot') or len(containers) == info.get('expected')):
                     run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
                 else:
                     run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
+            if info.get('firewall'):
+                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
             guest_hook(info, 'post-start')
         elif operation == 'stop' and not was_running:
             run(compose_base(directory, identifier) + ['stop'], timeout=1800)
@@ -2473,9 +2540,13 @@ def action(identifier, node, operation, timeout=60):
                 if owner['id'] != identifier:
                     raise ValueError('DCT guest ID ownership changed')
                 write_json(reservation, dict(owner, name=info['name']))
+            if info.get('vmid'):
+                (Path('/etc/pve/firewall') / (str(info['vmid']) + '.fw')).unlink(missing_ok=True)
             hook_journal(identifier).unlink(missing_ok=True)
             (METADATA / (identifier + '.json')).unlink()
             release_id(identifier)
+            if info.get('firewall'):
+                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
             print(f'Project removed. Volumes and bind-mount data are retained at {directory}.')
         else:
             info.pop('deployment', None)
@@ -2494,8 +2565,8 @@ def update(identifier, node, data, digest=None):
         if data.get('vmid') and data['vmid'] != existing.get('vmid'):
             raise ValueError('DCT ID cannot be changed during deployment edits')
         previous = existing['deployment']
-        for key in ('bridge', 'name', 'ipv4mode', 'hwaddr', 'mtu'):
-            default = 'static' if key == 'ipv4mode' else 0 if key == 'mtu' else ''
+        for key in ('bridge', 'name', 'ipv4mode', 'hwaddr', 'mtu', 'firewall'):
+            default = 'static' if key == 'ipv4mode' else 0 if key in ('mtu', 'firewall') else ''
             if data.get(key, default) != previous.get(key, default):
                 raise ValueError('Network settings cannot be changed during redeployment')
         for key in ('bridge', 'name'):
@@ -2690,6 +2761,7 @@ def service_action(identifier, node, service, verb, timeout=60):
             raise ValueError('A DCT template cannot be started; clone it first')
         if verb in ('start', 'restart', 'reboot'):
             prepare_network_start(info)
+            prepare_firewall(info)
         if verb == 'start':
             apply_pending_settings(identifier, node, service)
         if verb in ('shutdown', 'reboot'):
@@ -2714,6 +2786,8 @@ def service_action(identifier, node, service, verb, timeout=60):
                     run(compose_base(directory, identifier) + command + [service], timeout=1800)
         clear_network_resume(identifier, service)
         if verb in ('start', 'restart', 'reboot'):
+            if info.get('firewall'):
+                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
             restore_restart_policy(identifier, service)
         refresh(node)
 
@@ -3077,6 +3151,7 @@ def recover_snapshot_transaction(identifier, restoring=False):
 
 def snapshot_restore_network(identifier, node, configs, current, check_only=False):
     saved = json.loads((configs / 'metadata.json').read_text())
+    saved.setdefault('firewall', 0)
     if not all(key in saved for key in NETWORK_KEYS):
         return dict(saved, **{key: current[key] for key in ('id', 'vmid', 'node', 'address') if key in current})
     request = json.loads((configs / 'request.json').read_text())
@@ -3475,7 +3550,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['network', 'network-config', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -3516,6 +3591,8 @@ def main():
     elif args.operation == 'settings':
         with operation(values[0], 'settings'):
             service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()), values[4] if len(values) > 4 else None)
+    elif args.operation == 'firewall-check':
+        firewall_check(*values)
     elif args.operation == 'delegated-check':
         print(json.dumps(delegated_access(*values)))
     elif args.operation in ('console-check', 'console'):

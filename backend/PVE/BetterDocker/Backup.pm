@@ -70,6 +70,16 @@ my $installed;
 sub hook_storage {
     return if $installed++;
     no warnings 'redefine';
+    require PVE::API2Tools;
+    my $native_pool_members = \&PVE::API2Tools::get_resource_pool_guest_members;
+    *PVE::API2Tools::get_resource_pool_guest_members = sub {
+        return $native_pool_members->(@_) unless caller eq 'PVE::VZDump';
+        # Native pool selection filters membership through the guest inventory.
+        # Extend that inventory only for vzdump, not unrelated VM/CT consumers.
+        my $native_inventory = \&PVE::Cluster::get_vmlist;
+        local *PVE::Cluster::get_vmlist = sub { inventory($native_inventory->(@_)) };
+        return $native_pool_members->(@_);
+    };
     for my $name (qw(dryrun delete)) {
         my $method = PVE::API2::Storage::PruneBackups->map_method_by_name($name);
         my $property = $method->{parameters}->{properties}->{type};

@@ -10,7 +10,7 @@ NODE_BLOCK = '''# BEGIN BETTERDOCKER
 use PVE::API2::BetterDocker;
 __PACKAGE__->register_method({ subclass => 'PVE::API2::BetterDocker', path => 'docker' });
 PVE::API2::BetterDocker::hook_native_node_operations();
-# lifecycle integration 1
+# lifecycle integration 2
 # END BETTERDOCKER
 '''
 CLUSTER_BLOCK = '''# BEGIN BETTERDOCKER
@@ -43,17 +43,19 @@ VZDUMP_PBS = """# BEGIN BETTERDOCKER
 # END BETTERDOCKER
 """
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.52" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.57" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker-locales/en.js?v=19.52"></script>
-<script src="/pve2/js/betterdocker-locales/pl.js?v=19.52"></script>
-<script src="/pve2/js/betterdocker.js?v=19.52"></script>
+<script src="/pve2/js/betterdocker-locales/en.js?v=19.57"></script>
+<script src="/pve2/js/betterdocker-locales/pl.js?v=19.57"></script>
+<script src="/pve2/js/betterdocker.js?v=19.57"></script>
 <!-- END BETTERDOCKER -->'''
 
 
 NODE_LIFECYCLE = [
+    ("    return $res;\n}\n\n# return all VMs", "    PVE::API2::BetterDocker::append_migration_list($res, $nodename, $vmfilter) if $templates;\n"),
+    ('    } else {\n        die "unknown VM type \'$type\'\\n";\n    }\n\n    my $task = PVE::Tools::upid_decode($upid);', "    } elsif ($type eq 'docker') {\n        $upid = PVE::API2::BetterDocker::node_migrate($vmid, $nodename, $target);\n"),
     ("    return $resList;\n}", "    PVE::API2::BetterDocker::append_lifecycle_list($resList, $nodename, $autostart, $vmfilter);\n"),
     ("                        } else {\n                            die \"unknown VM type '$d->{type}'\\n\";", "                        } elsif ($d->{type} eq 'docker') {\n                            print STDERR \"Starting DCT $vmid\\n\";\n                            $upid = PVE::API2::BetterDocker::node_start($vmid, $nodename);\n                            next if !$upid;\n"),
     ('    } else {\n        die "unknown VM type \'$type\'\\n";\n    }\n};\n\n__PACKAGE__->register_method({\n    name => \'stopall\',', "    } elsif ($type eq 'docker') {\n        return PVE::API2::BetterDocker::node_stop($vmid, $nodename, $timeout, $force_stop);\n"),

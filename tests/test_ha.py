@@ -118,7 +118,7 @@ class HATests(unittest.TestCase):
 
     def test_recovery_publishes_only_after_restore_and_replication_direction_change(self):
         current = {'id': ID, 'vmid': 100, 'node': 'pve', 'name': 'app', 'bridge': 'vmbr0',
-                   'address': '10.0.0.10', 'cidr': '10.0.0.10/24',
+                   'address': '10.0.0.10', 'cidr': '10.0.0.10/24', 'firewall': 1,
                    'ha_recovery': {'source': 'other', 'token': 'token'},
                    'replication': {'volid': 'zfs:vm-100-disk-1', 'storage': 'zfs',
                                    'targets': {'pve': {'snapshot': 'snap', 'guid': '1'}}}}
@@ -141,6 +141,7 @@ class HATests(unittest.TestCase):
                 publish.side_effect = lambda *args: order.append('publish')
                 ha.recover_guest(ID, 'pve')
                 self.assertEqual(order, ['restore', 'switch', 'publish'])
+                self.assertEqual(restore.call_args.kwargs['live_firewall'], 1)
                 self.assertTrue((root / ID / 'ha.json').exists())
                 self.assertTrue((root.parent / 'restart-paused' / (ID + '.json')).exists())
                 self.assertEqual(list((root.parent / 'transfers').iterdir()), [])
