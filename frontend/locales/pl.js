@@ -5,6 +5,7 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.": "Po przywróceniu DCT można zmieniać tylko zaporę. Wdróż ponownie, aby zmienić adres lub interfejs sieciowy.",
             'Replication': 'Replikacja',
             "Docker Volumes": "Wolumeny Docker",
             "In use": "W użyciu",
@@ -17,7 +18,7 @@
             "Open in separate window": "Otwórz w osobnym oknie",
             "Could not read file": "Nie można odczytać pliku",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limity dotyczą każdego kontenera. Przywróć Compose usuwa ustawienia GUI. Limit CPU, pamięci lub PID równy 0 oznacza brak limitu; przy limicie pamięci swap 0 wyłącza swap, a -1 oznacza brak limitu.",
-            "Stop the DCT before changing its IPv4 endpoint. Published ports use this address; routing and outbound traffic use the host network.": "Zatrzymaj DCT przed zmianą jego adresu IPv4. Publikowane porty używają tego adresu; routing i ruch wychodzący korzystają z sieci hosta.",
+            "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.": "Zmiany sieci zapisane podczas pracy zostaną zastosowane przy następnym pełnym uruchomieniu lub restarcie DCT. Publikowane porty używają tego adresu; routing i ruch wychodzący korzystają z sieci hosta.",
             "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded.": "Wymaga overlay2 na XFS z project quotas. Nie obejmuje wolumenów ani bind mountów.",
             "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node.": "Zatrzymaj usługi przed utworzeniem lub powiększeniem dysku. Oryginalne dane są zachowywane. Błąd montowania może uniemożliwić uruchomienie Dockera na węźle.",
             "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped.": "Pełne kopie konfiguracji, systemów plików kontenerów i własnych danych. Usługi są zamrażane na czas kopiowania. Bez RAM, logów oraz zewnętrznych lub współdzielonych zapisywalnych montowań. Po przywróceniu DCT pozostaje zatrzymany.",

@@ -14,7 +14,7 @@
         width: 660, height: 460, layout: 'fit', items: [{ xtype: 'component', scrollable: true, padding: 15,
             html: [
                 ["Resources", "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited."],
-                ["Network", "Stop the DCT before changing its IPv4 endpoint. Published ports use this address; routing and outbound traffic use the host network."],
+                ["Network", "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network."],
                 ["Container disk limit", "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded."],
                 ["Project data disk", "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node."],
                 ["Snapshots", "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped."],
@@ -27,6 +27,47 @@
         const button = win.down('proxmoxHelpButton');
         if (button) { button.setHandler(help); }
     }
+    // All entry points share a window and submission guard. Native Edit owns
+    // focus, keyboard submission, Escape, Reset and dirty-form button state.
+    const openEditor = (owner, key, create) => {
+        owner.dockerEditors = owner.dockerEditors || {};
+        const existing = owner.dockerEditors[key];
+        if (existing && !existing.destroyed) { existing.toFront?.(); return existing; }
+        const win = create();
+        if (win.on) {
+            owner.dockerEditors[key] = win;
+            win.on('destroy', () => { if (owner.dockerEditors[key] === win) { delete owner.dockerEditors[key]; } });
+            owner.on?.('beforedestroy', () => win.destroy?.(), owner, { single: true });
+        }
+        const submit = win.submit, apiCallDone = win.apiCallDone;
+        if (submit) {
+            win.submit = function () {
+                const form = this.formPanel.getForm();
+                if (this.dockerSubmitting || !form.isValid() || !this.isCreate && form.isDirty && !form.isDirty()) { return; }
+                this.dockerSubmitting = true;
+                try { return submit.apply(this, arguments); }
+                catch (error) { this.dockerSubmitting = false; throw error; }
+            };
+            win.apiCallDone = function () { this.dockerSubmitting = false; return apiCallDone?.apply(this, arguments); };
+        }
+        win.show();
+        return win;
+    };
+    const editKey = (edit, record, event) => {
+        if (event.getKey() === event.ENTER) { event.stopEvent(); edit(record); }
+    };
+    const networkValue = (data, key) => ({
+        address: data.ipv4mode === 'dhcp' ? data.address || 'DHCP' : data.cidr || data.address || '',
+        mode: data.ipv4mode === 'dhcp' ? 'DHCP' : translate('Static'),
+        mtu: data.mtu || translate('Same as bridge'), firewall: Proxmox.Utils.format_boolean(data.firewall),
+    })[key] ?? data[key] ?? '';
+    const renderNetwork = (value, meta, record) => {
+        const key = meta.column?.dataIndex;
+        const current = networkValue(record.data, key);
+        const pending = record.data.pending;
+        const requested = pending && networkValue(Object.assign({}, record.data, pending), key);
+        return Ext.htmlEncode(current) + (pending && requested !== current ? '<div style="color:darkorange">' + Ext.htmlEncode(requested) + '</div>' : '');
+    };
     const download = (name, value) => {
         const link = document.createElement('a');
         const url = URL.createObjectURL(new Blob([value], { type: 'text/plain;charset=utf-8' }));
@@ -101,9 +142,15 @@
     const field = (name, label, value, extra) => Object.assign({
         xtype: 'textfield', name, fieldLabel: translate(label), value, labelWidth: 100, anchor: '100%',
     }, extra || {});
-    const request = options => Proxmox.Utils.API2Request(Object.assign({
-        failure: response => Ext.Msg.alert(translate('Error'), response.htmlStatus),
-    }, options));
+    const request = options => {
+        const callback = options.callback;
+        return Proxmox.Utils.API2Request(Object.assign({
+            failure: response => Ext.Msg.alert(translate('Error'), response.htmlStatus),
+        }, options, { callback: function () {
+            if (options.waitMsgTarget && typeof options.waitMsgTarget === 'object') { options.waitMsgTarget.dockerSubmitting = false; }
+            return callback?.apply(this, arguments);
+        } }));
+    };
     const task = response => {
         response.dockerTaskVisible = true;
         return Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
@@ -203,7 +250,7 @@
             this.rstore.fireEvent('load', this.rstore, this.rstore.getRange(), true);
         },
         reload: function () { this.ownerPanel.reloadDocker(); },
-        run_editor: function () { this.fireEvent('itemdblclick', this, this.getSelectionModel().getSelection()[0]); },
+        run_editor: function () { const row = this.getSelectionModel().getSelection()[0]; if (row) { this.editRow(row); } },
         renderKey: function (value, meta) {
             const icons = { Memory: 'pmx-itype-icon-memory', Swap: 'fa fa-refresh', 'CPU limit': 'pmx-itype-icon-processor',
                 'CPU units': 'pmx-itype-icon-processor', 'PID limit': 'fa fa-cubes' };
@@ -432,7 +479,7 @@
                         { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: 'DHCP' },
                     ], listeners: { change: function (group) {
                         const address = group.up('window').down('[name=cidr]');
-                        if (address) { address.setDisabled(group.getValue().ipv4mode !== 'static'); }
+                        if (address) { address.setDisabled(me.restoredNetwork || group.getValue().ipv4mode !== 'static'); }
                     } } },
                     field('cidr', 'IPv4/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false }),
                     { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'), uncheckedValue: 0 },
@@ -441,16 +488,23 @@
                     allowDecimals: false, emptyText: translate('Same as bridge') })],
                 onGetValues: function (values) {
                     if (values.ipv4mode === 'dhcp') { values.cidr = ''; }
+                    if (me.restoredNetwork) { return { firewall: values.firewall }; }
                     values.mtu = values.mtu || 0;
                     return values;
                 },
             }];
+            if (me.restoredNetwork) {
+                const panel = me.items[0];
+                [...panel.column1, ...panel.column2, ...panel.advancedColumn1].filter(item => item.name !== 'firewall').forEach(item => { item.disabled = true; });
+            }
             me.callParent();
             me.load({ success: function (response) {
                 const values = response.result.data;
-                me.setValues(values);
+                const requested = Object.assign({}, values, values.pending);
+                if (!requested.mtu) { requested.mtu = ''; }
+                me.setValues(requested);
                 me.digest = values.digest;
-                if (!values.mtu) { me.down('[name=mtu]').setValue(''); }
+                if (!requested.mtu) { me.down('[name=mtu]').setValue(''); }
             } });
         },
     });
@@ -963,13 +1017,22 @@
 
     Ext.define('PVE.betterdocker.SnapshotEdit', {
         extend: 'PVE.window.Snapshot',
+        load: function (options) {
+            const success = options?.success;
+            return this.callParent([Object.assign({}, options, { success: function (response, opts) {
+                // Native load has already saved the digest. Keep it out of the
+                // snapshot's configuration inventory.
+                delete response.result.data.digest;
+                return success?.(response, opts);
+            } })]);
+        },
         submit: function () {
             const me = this, form = me.formPanel.getForm();
             if (me.viewonly || !form.isValid()) { return; }
             const values = form.getValues();
             request({ url: me.url, method: me.isCreate ? 'POST' : 'PUT', waitMsgTarget: me,
                 params: me.isCreate ? { action: 'create', snapname: values.snapname, description: values.description || '' } :
-                    { description: values.description || '' },
+                    { description: values.description || '', digest: me.digest },
                 success: response => {
                     if (me.isCreate) { trackTask(response, me.ownerPanel); task(response); }
                     me.close();
@@ -1015,12 +1078,12 @@
                 const me = this, view = me.getView(), vm = me.getViewModel(), snapname = vm.get('selected');
                 if (edit && (!snapname || snapname === 'current')) { return; }
                 const info = view.ownerPanel.pveSelNode.data;
-                const win = Ext.create('PVE.betterdocker.SnapshotEdit', {
+                if (!edit && !vm.get('snapshotAllowed')) { return; }
+                const win = openEditor(view.ownerPanel, 'snapshot:' + (edit ? snapname : 'new'), () => Ext.create('PVE.betterdocker.SnapshotEdit', {
                     ownerPanel: view.ownerPanel, nodename: info.node, projectId: (info.realId || info.id).split('/')[1], guestId: info.vmid, vmname: info.name,
                     isCreate: !edit, viewonly: !vm.get('snapshotAllowed'), snapname: edit ? snapname : undefined,
                     submitText: !edit ? translate('Take Snapshot') : undefined,
-                });
-                win.show();
+                }));
                 me.mon(win, 'destroy', () => { me.reload(); view.ownerPanel.reloadDocker(); }, me);
             },
             rollback: function () { this.snapshotAction('restore'); },
@@ -1176,11 +1239,10 @@
                 });
                 const summary = me.down('#summary');
                 if (summary) { summary.updateSnapshot(current); }
-                const networkEdit = me.down('#networkEdit');
-                if (networkEdit) { networkEdit.setDisabled(!can('network') || locked() || Boolean(current.template)); }
                 rows('networkGrid', [{ name: 'net0', bridge: current.bridge, hwaddr: current.hwaddr || '',
-                    firewall: Boolean(current.firewall), mtu: current.mtu || 'Same as bridge', address: current.address ? (current.ipv4mode === 'dhcp' ? current.address : current.cidr || current.address) : '',
-                    mode: current.ipv4mode === 'dhcp' ? 'DHCP' : 'Static' }]);
+                    firewall: current.firewall, mtu: current.mtu, address: current.address, cidr: current.cidr,
+                    ipv4mode: current.ipv4mode, pending: current.pending_network }]);
+                updateNetworkActions();
                 rows('portGrid', current.services.flatMap(item => item.ports.map(port => Object.assign({ service: item.name }, port))));
                 const notes = me.down('#summary')?.down('#notesview');
                 if (notes) {
@@ -1226,12 +1288,24 @@
                 });
             };
             me.reloadDocker = reload;
+            const networkEditable = () => Boolean(current && can('network') && !locked() && !current.template);
+            const updateNetworkActions = () => {
+                const selected = me.down('#networkGrid')?.getSelectionModel().getSelection()[0];
+                const edit = me.down('#networkEdit'), revert = me.down('#networkRevert');
+                if (edit) {
+                    edit.setDisabled(!selected || !networkEditable());
+                    edit.setTooltip(current?.network_restored ? translate('Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.') : undefined);
+                }
+                if (revert) { revert.setDisabled(!selected || !networkEditable() || !Object.keys(current?.pending_network || {}).length); }
+            };
             const editNetwork = () => {
-                if (!current || !can('network') || locked() || current.template) { return; }
-                const win = Ext.create('PVE.betterdocker.NetworkEdit', { url: url + '/network', method: 'PUT', nodename: info.node, taskDone: reload,
-                    apiCallDone: (success, response) => { if (success) { trackTask(response, me); } } });
-                win.on('destroy', reload);
-                win.show();
+                if (!networkEditable() || !me.down('#networkGrid')?.getSelectionModel().getSelection()[0]) { return; }
+                openEditor(me, 'network', () => {
+                    const win = Ext.create('PVE.betterdocker.NetworkEdit', { url: url + '/network', method: 'PUT', nodename: info.node, restoredNetwork: current.network_restored, taskDone: reload,
+                        apiCallDone: (success, response) => { if (success) { trackTask(response, me); } } });
+                    win.on('destroy', reload);
+                    return win;
+                });
             };
             const act = operation => { if (!locked() || operation === 'force-stop' && canOverrule()) { dockerAction(info, operation, me); } };
             const editDeployment = () => request({ url, method: 'GET', success: response => {
@@ -1240,122 +1314,122 @@
             } });
             const editDataDisk = () => {
                 if (!can('disk') || locked() || !current) { return; }
-                const existing = current.storage?.limit_mib || 0, digest = current.digest;
-                const win = Ext.create('Proxmox.window.Edit', {
-                    title: translate('Edit data disk'), url: url + '/storage-limit', method: 'PUT', width: 400,
-                    onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
-                    showTaskViewer: true,
-                    items: [{ xtype: 'inputpanel', items: [
-                        { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Storage'), nodename: info.node,
-                            storageContent: 'rootdir', value: current.storage?.storage || undefined, allowBlank: Boolean(existing),
-                            listeners: { afterrender: selector => {
-                                selector.getStore().addFilter(record => ['dir', 'lvmthin', 'zfspool'].includes(record.get('type')) && !record.get('shared'));
-                            } } },
-                        field('size_mib', 'Data disk (MiB)', existing || 1024,
-                            { xtype: 'numberfield', minValue: existing || 256, maxValue: 1048576, allowDecimals: false, allowBlank: false }),
-                    ] }],
-                    submit: function () {
-                        const form = this.formPanel.getForm();
-                        if (!form.isValid()) { return; }
-                        request({ url: url + '/storage-limit', method: 'PUT', waitMsgTarget: win, params: Object.assign({}, form.getValues(), { digest }),
-                            success: response => { trackTask(response, me); task(response); win.close(); } });
-                    },
+                return openEditor(me, 'data-disk', () => {
+                    const existing = current.storage?.limit_mib || 0, digest = current.digest;
+                    const win = Ext.create('Proxmox.window.Edit', {
+                        title: translate('Edit data disk'), url: url + '/storage-limit', method: 'PUT', width: 400,
+                        onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
+                        showTaskViewer: true,
+                        items: [{ xtype: 'inputpanel', items: [
+                            { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Storage'), nodename: info.node,
+                                storageContent: 'rootdir', value: current.storage?.storage || undefined, allowBlank: Boolean(existing),
+                                listeners: { afterrender: selector => {
+                                    selector.getStore().addFilter(record => ['dir', 'lvmthin', 'zfspool'].includes(record.get('type')) && !record.get('shared'));
+                                } } },
+                            field('size_mib', 'Data disk (MiB)', existing || 1024,
+                                { xtype: 'numberfield', minValue: existing || 256, maxValue: 1048576, allowDecimals: false, allowBlank: false }),
+                        ] }],
+                        submit: function () {
+                            const form = this.formPanel.getForm();
+                            if (!form.isValid()) { return; }
+                            request({ url: url + '/storage-limit', method: 'PUT', waitMsgTarget: win, params: Object.assign({}, form.getValues(), { digest }),
+                                success: response => { trackTask(response, me); task(response); win.close(); } });
+                        },
+                    });
+                    return win;
                 });
-                win.show();
             };
             const editSettings = (group, selectedKey) => {
                 const active = service();
                 if (!active || !rowEditable(selectedKey, group) || locked()) { return; }
                 if (selectedKey === 'Settings source') { return; }
                 if (selectedKey === 'Project data disk') { editDataDisk(); return; }
-                if (selectedKey === 'Hookscript') {
-                    const digest = current.digest;
-                    const win = Ext.create('Proxmox.window.Edit', {
-                        subject: gettext('Hookscript'), url: url + '/config', method: 'PUT', width: 500,
-                        items: [{ xtype: 'inputpanel', items: [
-                            { xtype: 'pveStorageSelector', name: 'storage', nodename: info.node,
-                                storageContent: 'snippets', fieldLabel: gettext('Storage'), submitValue: false,
-                                allowBlank: false, value: current.hookscript?.split(':')[0],
-                                listeners: { change: function (_, value) {
-                                    const selector = this.up('window').down('[name=hookscript]');
-                                    if (selector) { selector.setStorage(value); }
-                                } } },
-                            { xtype: 'pveFileSelector', name: 'hookscript', nodename: info.node, storageContent: 'snippets',
-                                fieldLabel: gettext('Hookscript'),
-                                listeners: { afterrender: selector => selector.setStorage(current.hookscript?.split(':')[0], info.node) },
-                                allowBlank: true, value: current.hookscript || '', emptyText: Proxmox.Utils.noneText },
-                        ] }],
+                return openEditor(me, 'setting:' + active.name + ':' + ({ Memory: 'memory', Swap: 'memory', 'CPU limit': 'cpu', 'CPU units': 'cpu', 'DNS servers': 'dns', 'Search domains': 'dns' }[selectedKey] || selectedKey), () => {
+                    if (selectedKey === 'Hookscript') {
+                        const digest = current.digest;
+                        const win = Ext.create('Proxmox.window.Edit', {
+                            subject: gettext('Hookscript'), url: url + '/config', method: 'PUT', width: 500,
+                            items: [{ xtype: 'inputpanel', items: [
+                                { xtype: 'pveStorageSelector', name: 'storage', nodename: info.node,
+                                    storageContent: 'snippets', fieldLabel: gettext('Storage'), submitValue: false,
+                                    allowBlank: false, value: current.hookscript?.split(':')[0],
+                                    listeners: { change: function (_, value) {
+                                        const selector = this.up('window').down('[name=hookscript]');
+                                        if (selector) { selector.setStorage(value); }
+                                    } } },
+                                { xtype: 'pveFileSelector', name: 'hookscript', nodename: info.node, storageContent: 'snippets',
+                                    fieldLabel: gettext('Hookscript'),
+                                    listeners: { afterrender: selector => selector.setStorage(current.hookscript?.split(':')[0], info.node) },
+                                    allowBlank: true, value: current.hookscript || '', emptyText: Proxmox.Utils.noneText },
+                            ] }],
+                            submit: function () {
+                                const values = this.formPanel.getForm().getValues();
+                                const params = values.hookscript ? { hookscript: values.hookscript, digest } : { delete: 'hookscript', digest };
+                                request({ url: url + '/config', method: 'PUT', waitMsgTarget: win, params,
+                                    success: () => { win.close(); reload(); } });
+                            },
+                        });
+                        return win;
+                    }
+                    if (selectedKey === 'Start/Shutdown order') {
+                        return Ext.create('PVE.window.StartupEdit', { url: url + '/config', method: 'PUT',
+                            listeners: { destroy: reload } });
+                    }
+                    if (selectedKey === 'Protection' || selectedKey === 'Start at boot') {
+                        const name = selectedKey === 'Protection' ? 'protection' : 'onboot';
+                        const digest = current.digest;
+                        const win = Ext.create('Proxmox.window.Edit', {
+                            subject: gettext(selectedKey), url: url + '/config', method: 'PUT', width: 400,
+                            items: [{ xtype: 'proxmoxcheckbox', name, uncheckedValue: 0, defaultValue: 0,
+                                fieldLabel: gettext('Enabled'), value: Boolean(current[name]) }],
+                            submit: function () {
+                                request({ url: url + '/config', method: 'PUT', waitMsgTarget: win,
+                                    params: Object.assign({}, this.formPanel.getForm().getValues(), { digest }),
+                                    success: () => { win.close(); reload(); } });
+                            },
+                        });
+                        return win;
+                    }
+                    if (selectedKey === 'Image' || selectedKey?.startsWith('Mount Point')) { return Ext.create('PVE.betterdocker.DeploymentEdit', { ownerPanel: me, projectId: identifier, vmid: info.vmid, nodename: info.node, deployment: current.deployment, digest: current.digest }); }
+                    const values = Object.assign({}, active.settings, active.pending), digest = current.digest;
+                    const numeric = (name, label, maximum, extra) => field(name, label, values[name] || 0,
+                        Object.assign({ xtype: 'numberfield', minValue: 0, maxValue: maximum, allowDecimals: false, allowBlank: false }, extra));
+                    let fields = group === 'resources' ? [
+                        numeric('memory', 'Memory (MiB)', 1048576), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1 }),
+                        numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3 }),
+                        numeric('disk', 'Container disk (MiB)', 1048576, { disabled: !current.storage?.rootfs?.supported }),
+                        numeric('cpuunits', 'CPU units', 262144), numeric('pids', 'PID limit', 4194304),
+                    ] : group === 'dns' ? [
+                        field('dns', 'DNS servers', values.dns.join(', ')), field('dns_search', 'Search domains', values.dns_search.join(', ')),
+                    ] : [field('restart', 'Restart policy', values.restart, { xtype: 'combobox', editable: false, queryMode: 'local',
+                        store: [['no', translate('No')], ['always', translate('Always')], ['unless-stopped', translate('Unless stopped')], ['on-failure', translate('On failure')]] })];
+                    if (group === 'resources' && selectedKey) {
+                        const names = selectedKey === 'Memory' || selectedKey === 'Swap' ? ['memory', 'swap'] :
+                            selectedKey === 'PID limit' ? ['pids'] : selectedKey === 'Container disk limit' ? ['disk'] : ['cpus', 'cpuunits'];
+                        fields = fields.filter(item => !item.name || names.includes(item.name));
+                    }
+                    const fieldScope = { memory: 'memory', swap: 'memory', cpus: 'cpu', cpuunits: 'cpu', pids: 'options', disk: 'disk', dns: 'network', dns_search: 'network', restart: 'options' };
+                    fields = fields.filter(item => !item.name || can(fieldScope[item.name]));
+                    const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate({ resources: 'Resources', dns: 'DNS', options: 'Options' }[group]) + ' - ' + active.name,
+                        url: url + '/settings', method: 'PUT', width: 400, showReset: true,
+                        onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
+                        items: [{ xtype: 'inputpanel', items: fields }],
                         submit: function () {
-                            const values = this.formPanel.getForm().getValues();
-                            const params = values.hookscript ? { hookscript: values.hookscript, digest } : { delete: 'hookscript', digest };
-                            request({ url: url + '/config', method: 'PUT', waitMsgTarget: win, params,
-                                success: () => { win.close(); reload(); } });
+                            const form = this.formPanel.getForm();
+                            if (!form.isValid()) { return; }
+                            const changed = form.getValues();
+                            const settings = {};
+                            Object.keys(changed).forEach(key => { settings[key] = group === 'resources' ? Number(changed[key]) : changed[key]; });
+                            if (group === 'dns') {
+                                ['dns', 'dns_search'].forEach(key => { settings[key] = changed[key].split(',').map(v => v.trim()).filter(Boolean); });
+                            }
+                            request({ url: url + '/settings', method: 'PUT', waitMsgTarget: win,
+                                params: { service: active.name, settings: JSON.stringify(settings), digest },
+                                success: response => { trackTask(response, me); win.close(); } });
                         },
                     });
-                    win.show();
-                    return;
-                }
-                if (selectedKey === 'Start/Shutdown order') {
-                    Ext.create('PVE.window.StartupEdit', { url: url + '/config', method: 'PUT',
-                        listeners: { destroy: reload } }).show();
-                    return;
-                }
-                if (selectedKey === 'Protection' || selectedKey === 'Start at boot') {
-                    const name = selectedKey === 'Protection' ? 'protection' : 'onboot';
-                    const digest = current.digest;
-                    const win = Ext.create('Proxmox.window.Edit', {
-                        subject: gettext(selectedKey), url: url + '/config', method: 'PUT', width: 400,
-                        items: [{ xtype: 'proxmoxcheckbox', name, uncheckedValue: 0, defaultValue: 0,
-                            fieldLabel: gettext('Enabled'), value: Boolean(current[name]) }],
-                        submit: function () {
-                            request({ url: url + '/config', method: 'PUT', waitMsgTarget: win,
-                                params: Object.assign({}, this.formPanel.getForm().getValues(), { digest }),
-                                success: () => { win.close(); reload(); } });
-                        },
-                    });
-                    win.show();
-                    return;
-                }
-                if (selectedKey === 'Image') { editDeployment(); return; }
-                if (selectedKey && selectedKey.startsWith('Mount Point')) { editDeployment(); return; }
-                const values = Object.assign({}, active.settings, active.pending), digest = current.digest;
-                const numeric = (name, label, maximum, extra) => field(name, label, values[name] || 0,
-                    Object.assign({ xtype: 'numberfield', minValue: 0, maxValue: maximum, allowDecimals: false, allowBlank: false }, extra));
-                let fields = group === 'resources' ? [
-                    numeric('memory', 'Memory (MiB)', 1048576), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1 }),
-                    numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3 }),
-                    numeric('disk', 'Container disk (MiB)', 1048576, { disabled: !current.storage?.rootfs?.supported }),
-                    numeric('cpuunits', 'CPU units', 262144), numeric('pids', 'PID limit', 4194304),
-                ] : group === 'dns' ? [
-                    field('dns', 'DNS servers', values.dns.join(', ')), field('dns_search', 'Search domains', values.dns_search.join(', ')),
-                ] : [field('restart', 'Restart policy', values.restart, { xtype: 'combobox', editable: false, queryMode: 'local',
-                    store: [['no', translate('No')], ['always', translate('Always')], ['unless-stopped', translate('Unless stopped')], ['on-failure', translate('On failure')]] })];
-                if (group === 'resources' && selectedKey) {
-                    const names = selectedKey === 'Memory' || selectedKey === 'Swap' ? ['memory', 'swap'] :
-                        selectedKey === 'PID limit' ? ['pids'] : selectedKey === 'Container disk limit' ? ['disk'] : ['cpus', 'cpuunits'];
-                    fields = fields.filter(item => !item.name || names.includes(item.name));
-                }
-                const fieldScope = { memory: 'memory', swap: 'memory', cpus: 'cpu', cpuunits: 'cpu', pids: 'options', disk: 'disk', dns: 'network', dns_search: 'network', restart: 'options' };
-                fields = fields.filter(item => !item.name || can(fieldScope[item.name]));
-                const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate({ resources: 'Resources', dns: 'DNS', options: 'Options' }[group]) + ' - ' + active.name,
-                    url: url + '/settings', method: 'PUT', width: 400, showReset: true,
-                    onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
-                    items: [{ xtype: 'inputpanel', items: fields }],
-                    submit: function () {
-                        const form = this.formPanel.getForm();
-                        if (!form.isValid()) { return; }
-                        const changed = form.getValues();
-                        const settings = {};
-                        Object.keys(changed).forEach(key => { settings[key] = group === 'resources' ? Number(changed[key]) : changed[key]; });
-                        if (group === 'dns') {
-                            ['dns', 'dns_search'].forEach(key => { settings[key] = changed[key].split(',').map(v => v.trim()).filter(Boolean); });
-                        }
-                        request({ url: url + '/settings', method: 'PUT', waitMsgTarget: win,
-                            params: { service: active.name, settings: JSON.stringify(settings), digest },
-                            success: response => { trackTask(response, me); win.close(); } });
-                    },
+                    return win;
                 });
-                win.show();
             };
             const selector = () => ({ xtype: 'combobox', itemId: 'serviceSelector', fieldLabel: translate('Service'), labelWidth: 50,
                 queryMode: 'local', editable: false, displayField: 'name', valueField: 'name',
@@ -1477,12 +1551,17 @@
                 card('Network', 'network', 'exchange', [Object.assign(grid('networkGrid', [
                     { text: translate('Name'), dataIndex: 'name', width: 80, flex: 0 }, { text: translate('Bridge'), dataIndex: 'bridge' },
                     { text: translate('MAC address'), dataIndex: 'hwaddr' }, { text: translate('IPv4'), dataIndex: 'address' },
-                    { text: translate('IPv4 mode'), dataIndex: 'mode' }, { text: gettext('Firewall'), dataIndex: 'firewall', renderer: Proxmox.Utils.format_boolean }, { text: translate('MTU'), dataIndex: 'mtu' }],
-                    ['name', 'bridge', 'hwaddr', 'address', 'mode', 'mtu', 'firewall']), { flex: 1, listeners: { itemdblclick: editNetwork } }),
+                    { text: translate('IPv4 mode'), dataIndex: 'mode' }, { text: gettext('Firewall'), dataIndex: 'firewall', renderer: renderNetwork }, { text: translate('MTU'), dataIndex: 'mtu' }].map(column => Object.assign(column, { renderer: renderNetwork })),
+                    ['name', 'bridge', 'hwaddr', 'address', 'cidr', 'ipv4mode', 'mode', 'mtu', 'firewall', 'pending']), { flex: 1, listeners: { itemdblclick: editNetwork, selectionchange: updateNetworkActions, itemkeydown: (_, record, item, index, event) => editKey(editNetwork, record, event) } }),
                     Object.assign(grid('portGrid', [{ text: translate('Service'), dataIndex: 'service' }, { text: translate('IP address'), dataIndex: 'host_ip' },
                         { text: translate('Published port'), dataIndex: 'published' }, { text: translate('Container port'), dataIndex: 'target' },
                         { text: translate('Protocol'), dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: translate('Published ports'), flex: 1 })],
                     [{ text: translate('Edit'), itemId: 'networkEdit', disabled: true, handler: editNetwork },
+                     { xtype: 'pvePendingRevertButton', itemId: 'networkRevert', disabled: true, handler: () => {
+                         if (!networkEditable() || !me.down('#networkGrid').getSelectionModel().getSelection()[0] || !Object.keys(current.pending_network || {}).length) { return; }
+                         request({ url: url + '/network', method: 'PUT', params: { revert: 1, digest: current.digest },
+                             success: response => trackTask(response, me) });
+                     } },
                      { text: translate('Edit ports'), bdWrite: true, handler: editDeployment }], { layout: { type: 'vbox', align: 'stretch' } }),
                 card('DNS', 'dns', 'globe', [properties('dnsGrid')], [{ text: translate('Edit'), itemId: 'dnsEdit', disabled: true, handler: () => { const row = me.down('#dnsGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('dns', row.get('key')); } } }, revertButton('dnsGrid'), '->', selector()], { layout: 'fit' }),
                 card('Options', 'options', 'cog', [properties('optionGrid')], [{ text: translate('Edit'), itemId: 'optionsEdit', disabled: true, handler: () => { const row = me.down('#optionGrid').getSelectionModel().getSelection()[0]; if (row) { editSettings('options', row.get('key')); } } }, revertButton('optionGrid'), '->', selector()], { layout: 'fit' }),
@@ -1521,7 +1600,9 @@
             me.loadDockerTasks = () => { const tasks = me.down('#tasks'); if (tasks && tasks.store) { tasks.store.load(); } };
             ['resources', 'dns', 'options'].forEach(group => {
                 const entry = me.items.find(item => item.itemId === group);
+                entry.items[0].editRow = record => editSettings(group, record.get('key'));
                 entry.items[0].listeners = { itemdblclick: (_, record) => editSettings(group, record.get('key')),
+                    itemkeydown: (_, record, item, index, event) => editKey(row => editSettings(group, row.get('key')), record, event),
                     selectionchange: (_, records) => {
                         const grid = me.down('#' + { resources: 'resourceGrid', dns: 'dnsGrid', options: 'optionGrid' }[group]);
                         const revert = me.down('#' + grid.itemId + 'Revert');

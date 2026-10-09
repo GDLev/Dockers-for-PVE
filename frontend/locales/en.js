@@ -4,6 +4,7 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.": "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.",
             "Docker Volumes": "Docker Volumes",
             "In use": "In use",
             "Unused": "Unused",
@@ -15,7 +16,7 @@
             "Open in separate window": "Open in separate window",
             "Could not read file": "Could not read file",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.",
-            "Stop the DCT before changing its IPv4 endpoint. Published ports use this address; routing and outbound traffic use the host network.": "Stop the DCT before changing its IPv4 endpoint. Published ports use this address; routing and outbound traffic use the host network.",
+            "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.": "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.",
             "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded.": "Requires overlay2 on XFS with project quotas. Volumes and bind mounts are excluded.",
             "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node.": "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node.",
             "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped.": "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped.",

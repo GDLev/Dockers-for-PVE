@@ -287,7 +287,7 @@ def safe_bind(source, identifier):
     # Deployment files contain credentials and must never be writable by a workload.
     if not relative.parts or relative.parts[0] in {
         'request.json', 'compose.source.yaml', 'compose.runtime.json', '.env',
-        'settings.json', 'pending.json', 'storage.json', 'ha.json', 'snapshots',
+        'settings.json', 'pending.json', 'pending-network.json', 'storage.json', 'ha.json', 'snapshots',
         'export-transaction.json', 'notes.txt', 'allocated-volume.json', 'storage.ext4',
         'snapshot-restored.json', 'snapshot-tree.json', 'snapshot-transaction.json',
         'storage-transaction.json', 'network-transaction.json', 'network-resume.json',
@@ -1244,6 +1244,8 @@ def management(identifier, node, shared_stats=None):
     if public.get('ha_recovery') and public['node'] == node:
         return dict(public, status='stopped', containers=[], services=[], stats=[], metrics={}, storage={}, operation=operation_state(identifier))
     info = detail(identifier, node)
+    info['pending_network'] = load_pending_network(ROOT / identifier)
+    info['network_restored'] = (ROOT / identifier / 'snapshot-restored.json').exists()
     directory = ROOT / identifier
     config = json.loads((directory / 'compose.runtime.json').read_text())
     settings = load_settings(directory)
@@ -1814,11 +1816,23 @@ def prepare_firewall(info):
     run([str(Path(__file__).with_name('firewall.py')), 'apply'])
 
 
+def load_pending_network(directory):
+    path = directory / 'pending-network.json'
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def save_pending_network(directory, values):
+    if values:
+        write_json(directory / 'pending-network.json', values)
+    else:
+        (directory / 'pending-network.json').unlink(missing_ok=True)
+
+
 def network_config(identifier, node):
     info = detail(identifier, node)
     return dict({key: info.get(key, '') for key in NETWORK_KEYS},
                 ipv4mode=info.get('ipv4mode', 'static'), mtu=info.get('mtu', 0), firewall=int(info.get('firewall', 0)),
-                cidr=(info.get('cidr') or info.get('address', '')) if info.get('ipv4mode', 'static') == 'static' else '', digest=info['digest'])
+                cidr=(info.get('cidr') or info.get('address', '')) if info.get('ipv4mode', 'static') == 'static' else '', digest=info['digest'], pending=load_pending_network(ROOT / identifier))
 
 
 def recover_network_transaction(identifier, node):
@@ -1856,102 +1870,139 @@ def recover_network_transaction(identifier, node):
     return True
 
 
+def network_candidate(identifier, node, info, values):
+    directory = ROOT / identifier
+    before = {key: info.get(key, 'static' if key == 'ipv4mode' else 0 if key in ('mtu', 'firewall') else '') for key in NETWORK_KEYS}
+    requested = dict(before, **values)
+    data = validate(dict(info['deployment'], **requested, address=requested['cidr']))
+    requested = {key: data[key] for key in NETWORK_KEYS}
+    if all(requested[key] == before[key] for key in NETWORK_KEYS if key != 'firewall'):
+        return data, before
+    if (directory / 'snapshot-restored.json').exists():
+        raise ValueError('Redeploy or restore a snapshot before changing a restored DCT network')
+    check_sdn_bridge(data['bridge'])
+    if any(requested[key] != before[key] for key in NETWORK_KEYS if key not in ('mtu', 'firewall')):
+        for manifest in snapshot_root(identifier).glob('*/manifest.json'):
+            captured = manifest.parent / 'configuration' / 'metadata.json'
+            if not captured.exists() or not all(key in json.loads(captured.read_text()) for key in NETWORK_KEYS if key != 'firewall'):
+                raise ValueError('Remove snapshots without a restorable network configuration before changing the endpoint')
+    _, subnets = bridge_addresses(data['bridge'])
+    if data['ipv4mode'] == 'static':
+        address = ipaddress.IPv4Interface(data['cidr'])
+        if not any(address.ip in subnet and address.network.prefixlen == subnet.prefixlen for subnet in subnets):
+            raise ValueError('IPv4/CIDR must match a connected subnet on the bridge; routing is inherited from the host')
+        check_address(data['address'], data['bridge'], identifier, info.get('interface'), probe=True)
+    if any(row.get('id') != identifier and row.get('hwaddr') == data['hwaddr'] for row in summaries()):
+        raise ValueError('This MAC address is already used by another project')
+    if not data['hwaddr']:
+        data['hwaddr'] = info['hwaddr']
+    bridge_links = json.loads(capture(['ip', '-j', 'link', 'show', 'dev', data['bridge']]))
+    if data['mtu'] and data['mtu'] > bridge_links[0]['mtu']:
+        raise ValueError('MTU cannot exceed the bridge MTU')
+    return data, before
+
+
+def apply_network(identifier, node, info, values):
+    # Caller owns the global lock; the recovery journal protects each mutation.
+    directory = ROOT / identifier
+    require_stopped(container_records(identifier))
+    if (directory / 'network-resume.json').exists():
+        raise ValueError('Stop the DCT explicitly before changing a recovering DHCP network')
+    data, before = network_candidate(identifier, node, info, values)
+    requested = {key: data[key] for key in NETWORK_KEYS}
+    if requested == before:
+        return
+    if all(requested[key] == before[key] for key in NETWORK_KEYS if key != 'firewall'):
+        metadata = METADATA / (identifier + '.json')
+        request = directory / 'request.json'
+        saved_metadata, saved_request = metadata.read_text(), request.read_text()
+        try:
+            candidate = json.loads(saved_metadata)
+            candidate['firewall'] = requested['firewall']
+            deployment = json.loads(saved_request)
+            deployment['firewall'] = requested['firewall']
+            if candidate['firewall']:
+                firewall_check(identifier, node)
+            write_json(metadata, candidate)
+            write_json(request, deployment)
+            run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+        except Exception:
+            write_json(metadata, json.loads(saved_metadata))
+            write_json(request, json.loads(saved_request))
+            run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+            raise
+        refresh(node)
+        return
+    # The private journal is written before releasing the old link or DHCP client.
+    saved = {'metadata': {key: value for key, value in info.items() if key not in ('deployment', 'digest')},
+             'files': {name: (directory / name).read_text() if (directory / name).exists() else None
+                       for name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf')}}
+    journal = directory / 'network-transaction.json'
+    write_json(journal, saved)
+    try:
+        remove_network(info)
+        (directory / 'dhcp-address.json').unlink(missing_ok=True)
+        (directory / 'dhclient.leases').unlink(missing_ok=True)
+        candidate = dict(saved['metadata'], **{key: data[key] for key in (*NETWORK_KEYS, 'address')},
+                         interface='bd' + identifier[:12], status='stopped')
+        candidate.pop('network_resume', None)
+        write_json(METADATA / (identifier + '.json'), candidate)
+        # Change only network fields. Keep the original Compose, .env and resource overrides.
+        deployment = dict(info['deployment'], **{key: data[key] for key in (*NETWORK_KEYS, 'address')})
+        write_json(directory / 'request.json', deployment)
+        ensure_address(candidate)
+        rebind_runtime(directory, candidate['address'])
+        write_json(directory / 'network-reconcile.json', {'address': candidate['address']})
+        reconcile_network_runtime(candidate)
+        write_json(METADATA / (identifier + '.json'), candidate)
+        if candidate.get('firewall'):
+            firewall_check(identifier, node)
+        run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+        clear_network_resume(identifier)
+        journal.unlink()
+    except Exception as error:
+        try:
+            recover_network_transaction(identifier, node)
+            reconcile_network_runtime(saved['metadata'])
+        except Exception as recovery:
+            raise ValueError(f'Network update failed: {error}; recovery failed: {recovery}') from error
+        raise
+    refresh(node)
+
+
 def project_network(identifier, node, values, digest=None):
-    if not isinstance(values, dict) or set(values) - set(NETWORK_KEYS):
+    if not isinstance(values, dict) or set(values) - set((*NETWORK_KEYS, 'revert')):
         raise ValueError('Unsupported network setting')
-    # The API grants network fields separately from CPU, memory and options.
+    if 'revert' in values and (set(values) != {'revert'} or values['revert'] != 1):
+        raise ValueError('Revert cannot be combined with network settings')
     authorize_config_keys(NETWORK_KEYS)
     with locked():
         recover_network_transaction(identifier, node)
         info = detail(identifier, node)
         assert_configuration_digest(identifier, node, digest)
         directory = ROOT / identifier
-        require_stopped(container_records(identifier))
-        if (directory / 'network-resume.json').exists():
-            raise ValueError('Stop the DCT explicitly before changing a recovering DHCP network')
-        before = {key: info.get(key, 'static' if key == 'ipv4mode' else 0 if key in ('mtu', 'firewall') else '') for key in NETWORK_KEYS}
-        requested = dict(before, **values)
-        data = validate(dict(info['deployment'], **requested, address=requested['cidr']))
-        requested = {key: data[key] for key in NETWORK_KEYS}
-        if requested == before:
+        if info.get('template'):
+            raise ValueError('A DCT template cannot change its network')
+        if not trusted_management():
+            delegated_access(identifier, node)
+        if values.get('revert'):
+            save_pending_network(directory, {})
             return
-        if all(requested[key] == before[key] for key in NETWORK_KEYS if key != 'firewall'):
-            metadata = METADATA / (identifier + '.json')
-            request = directory / 'request.json'
-            saved_metadata, saved_request = metadata.read_text(), request.read_text()
-            try:
-                candidate = json.loads(saved_metadata)
-                candidate['firewall'] = requested['firewall']
-                deployment = json.loads(saved_request)
-                deployment['firewall'] = requested['firewall']
-                if candidate['firewall']:
-                    firewall_check(identifier, node)
-                write_json(metadata, candidate)
-                write_json(request, deployment)
-                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
-            except Exception:
-                write_json(metadata, json.loads(saved_metadata))
-                write_json(request, json.loads(saved_request))
-                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
-                raise
-            refresh(node)
+        requested = dict(load_pending_network(directory), **values)
+        data, before = network_candidate(identifier, node, info, requested)
+        if any(row['state'] in ('running', 'restarting', 'paused') for row in container_records(identifier)):
+            save_pending_network(directory, {key: data[key] for key in NETWORK_KEYS if data[key] != before[key]})
             return
-        if (directory / 'snapshot-restored.json').exists():
-            raise ValueError('Redeploy or restore a snapshot before changing a restored DCT network')
-        check_sdn_bridge(data['bridge'])
-        if any(requested[key] != before[key] for key in NETWORK_KEYS if key not in ('mtu', 'firewall')):
-            for manifest in snapshot_root(identifier).glob('*/manifest.json'):
-                captured = manifest.parent / 'configuration' / 'metadata.json'
-                if not captured.exists() or not all(key in json.loads(captured.read_text()) for key in NETWORK_KEYS if key != 'firewall'):
-                    raise ValueError('Remove snapshots without a restorable network configuration before changing the endpoint')
-        _, subnets = bridge_addresses(data['bridge'])
-        if data['ipv4mode'] == 'static':
-            address = ipaddress.IPv4Interface(data['cidr'])
-            if not any(address.ip in subnet and address.network.prefixlen == subnet.prefixlen for subnet in subnets):
-                raise ValueError('IPv4/CIDR must match a connected subnet on the bridge; routing is inherited from the host')
-            check_address(data['address'], data['bridge'], identifier, info.get('interface'), probe=True)
-        if any(row.get('id') != identifier and row.get('hwaddr') == data['hwaddr'] for row in summaries()):
-            raise ValueError('This MAC address is already used by another project')
-        if not data['hwaddr']:
-            data['hwaddr'] = info['hwaddr']
-        bridge_links = json.loads(capture(['ip', '-j', 'link', 'show', 'dev', data['bridge']]))
-        if data['mtu'] and data['mtu'] > bridge_links[0]['mtu']:
-            raise ValueError('MTU cannot exceed the bridge MTU')
-        # The private journal is written before releasing the old link or DHCP client.
-        saved = {'metadata': {key: value for key, value in info.items() if key not in ('deployment', 'digest')},
-                 'files': {name: (directory / name).read_text() if (directory / name).exists() else None
-                           for name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf')}}
-        journal = directory / 'network-transaction.json'
-        write_json(journal, saved)
-        try:
-            remove_network(info)
-            (directory / 'dhcp-address.json').unlink(missing_ok=True)
-            (directory / 'dhclient.leases').unlink(missing_ok=True)
-            candidate = dict(saved['metadata'], **{key: data[key] for key in (*NETWORK_KEYS, 'address')},
-                             interface='bd' + identifier[:12], status='stopped')
-            candidate.pop('network_resume', None)
-            write_json(METADATA / (identifier + '.json'), candidate)
-            # Change only network fields. Keep the original Compose, .env and resource overrides.
-            deployment = dict(info['deployment'], **{key: data[key] for key in (*NETWORK_KEYS, 'address')})
-            write_json(directory / 'request.json', deployment)
-            ensure_address(candidate)
-            rebind_runtime(directory, candidate['address'])
-            write_json(directory / 'network-reconcile.json', {'address': candidate['address']})
-            reconcile_network_runtime(candidate)
-            write_json(METADATA / (identifier + '.json'), candidate)
-            if candidate.get('firewall'):
-                firewall_check(identifier, node)
-            run([str(Path(__file__).with_name('firewall.py')), 'apply'])
-            clear_network_resume(identifier)
-            journal.unlink()
-        except Exception as error:
-            try:
-                recover_network_transaction(identifier, node)
-                reconcile_network_runtime(saved['metadata'])
-            except Exception as recovery:
-                raise ValueError(f'Network update failed: {error}; recovery failed: {recovery}') from error
-            raise
-        refresh(node)
+        apply_network(identifier, node, info, requested)
+        save_pending_network(directory, {})
+
+
+def apply_pending_network(identifier, node):
+    directory = ROOT / identifier
+    pending = load_pending_network(directory)
+    if pending:
+        apply_network(identifier, node, detail(identifier, node), pending)
+        save_pending_network(directory, {})
 
 
 def remove_network(info):
@@ -2043,6 +2094,9 @@ def configuration_digest(directory, deployment, protection=False, tags='', lifec
     pending = load_pending(directory)
     if pending:
         state['pending'] = pending
+    network = load_pending_network(directory)
+    if network:
+        state['pending_network'] = network
     return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -2486,14 +2540,6 @@ def action(identifier, node, operation, timeout=60):
         recover_guest_hook(info)
         if operation == 'start' and records and len(records) == info.get('expected') and all(item['state'] == 'running' for item in records):
             return
-        if operation in ('start', 'restart', 'reboot'):
-            prepare_network_start(info)
-            info.pop('deployment', None)
-            info.pop('network_resume', None)
-            reconcile_network_runtime(info)
-            clear_network_resume(identifier)
-            info['status'] = 'creating'
-            write_json(METADATA / (identifier + '.json'), info)
         stopping = operation in ('stop', 'shutdown', 'force-stop', 'restart', 'reboot')
         starting = operation in ('start', 'restart', 'reboot')
         if stopping and was_running:
@@ -2508,6 +2554,15 @@ def action(identifier, node, operation, timeout=60):
                 run(compose_base(directory, identifier) + ['stop'], timeout=1800)
             guest_hook(info, 'post-stop')
         if starting:
+            apply_pending_network(identifier, node)
+            info = detail(identifier, node)
+            prepare_network_start(info)
+            info.pop('deployment', None)
+            info.pop('network_resume', None)
+            reconcile_network_runtime(info)
+            clear_network_resume(identifier)
+            info['status'] = 'creating'
+            write_json(METADATA / (identifier + '.json'), info)
             apply_pending_settings(identifier, node)
             guest_hook(info, 'pre-start')
             expect_guest_hook(info, 'post-start')
@@ -2576,8 +2631,8 @@ def update(identifier, node, data, digest=None):
             raise ValueError('The project IP cannot be changed during redeployment')
         require_stopped(container_records(identifier))
         directory = ROOT / identifier
-        if load_pending(directory):
-            raise ValueError('Revert pending service settings before editing deployment')
+        if load_pending(directory) or load_pending_network(directory):
+            raise ValueError('Apply or revert pending changes before editing deployment')
         with tempfile.TemporaryDirectory(prefix='betterdocker-update-', dir=ROOT) as folder:
             staging = Path(folder)
             config = prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory)
@@ -2989,15 +3044,18 @@ def snapshot_config(identifier, node, name):
     storage = folder / 'configuration' / 'storage.json'
     if storage.exists():
         result['data_disk'] = str(json.loads(storage.read_text())['size_mib']) + ' MiB'
+    result['digest'] = hashlib.sha256(json.dumps([identifier, name, result['description']], separators=(',', ':')).encode()).hexdigest()
     return result
 
 
-def snapshot_edit(identifier, node, name, description):
+def snapshot_edit(identifier, node, name, description, digest=None):
     snapshot_name(name)
     if len(description) > 4096:
         raise ValueError('Snapshot description cannot exceed 4096 characters')
     with locked():
-        snapshot_config(identifier, node, name)
+        current = snapshot_config(identifier, node, name)
+        if digest and digest != current['digest']:
+            raise ValueError('detected modified configuration - file checksum changed, please try again')
         state = snapshot_tree_state(identifier)
         state.setdefault('descriptions', {})[name] = description
         snapshot_tree_write(identifier, state)
@@ -3053,7 +3111,7 @@ def snapshot_mounts(identifier, containers, allow_missing=False):
             if mount['Type'] == 'bind':
                 if source.is_symlink() or not source.resolve().is_relative_to(folder.resolve()) or source.resolve() == folder.resolve():
                     raise ValueError('Snapshots require project-owned writable mounts; external host paths are not supported')
-                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'settings.json', 'pending.json', 'storage.json'):
+                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'settings.json', 'pending.json', 'pending-network.json', 'storage.json'):
                     raise ValueError('Deployment files cannot also be writable application mounts')
             elif mount['Type'] == 'volume':
                 volume = json.loads(capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
@@ -3424,7 +3482,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
             else:
                 child.unlink()
         run(['cp', '-a', '--', str(folder / entry['copy']) + '/.', str(target)], timeout=86400)
-    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'notes.txt'):
+    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt'):
         source, target = configs / filename, project / filename
         if source.exists():
             shutil.copy2(source, target)

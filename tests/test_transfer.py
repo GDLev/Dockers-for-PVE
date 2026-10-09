@@ -59,3 +59,14 @@ class TransferTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Cannot clean an active transfer copy'):
                 transfer.clean_local(ID, {'id': ID})
             run.assert_not_called()
+
+    def test_pending_endpoint_cannot_be_silently_discarded_by_migration(self):
+        with patch.object(worker, 'operation'), patch.object(worker, 'locked'), \
+             patch.object(worker, 'detail', return_value={'id':ID,'node':'source'}), \
+             patch.object(worker, 'assert_configuration_digest'), \
+             patch.object(worker, 'load_pending_network', return_value={'mtu':1400}), \
+             patch.object(worker, 'recover_guest_hook') as hooks, patch.object(transfer.state, 'write') as write:
+            with self.assertRaisesRegex(ValueError, 'Apply or revert pending network'):
+                transfer.migrate(ID, 'source', 'target', '')
+            hooks.assert_not_called()
+            write.assert_not_called()

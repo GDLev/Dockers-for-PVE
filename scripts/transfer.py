@@ -272,6 +272,8 @@ def migrate(identifier, node, target, storage, digest=None):
         with worker.locked():
             info = worker.detail(identifier, node)
             worker.assert_configuration_digest(identifier, node, digest)
+            if worker.load_pending_network(worker.ROOT / identifier):
+                raise ValueError('Apply or revert pending network changes before migrating the DCT')
             worker.recover_guest_hook(info)
             worker.require_stopped(worker.container_records(identifier))
             if info.get('replication') and target not in info['replication'].get('targets', {}):

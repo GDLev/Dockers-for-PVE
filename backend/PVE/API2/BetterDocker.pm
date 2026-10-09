@@ -855,7 +855,7 @@ register_docker_method({
 
 register_docker_method({
     name => 'set_network', path => '{id}/network', method => 'PUT', protected => 1, proxyto => 'node',
-    description => 'Change the stopped DCT IPv4 endpoint using guest network privileges.', permissions => $root,
+    description => 'Change the DCT endpoint; running guests apply pending changes at the next full start or reboot.', permissions => $root,
     parameters => { additionalProperties => 0, properties => {
         node => $node, id => $id,
         bridge => { type => 'string', pattern => '^[a-zA-Z0-9_.-]{1,15}$', optional => 1 },
@@ -864,14 +864,19 @@ register_docker_method({
         hwaddr => { type => 'string', maxLength => 17, optional => 1 },
         mtu => { type => 'integer', minimum => 0, maximum => 9216, optional => 1 },
         firewall => { type => 'boolean', optional => 1 },
+        revert => { type => 'boolean', optional => 1, description => 'Discard pending net0 changes.' },
         digest => { type => 'string', pattern => '^[a-f0-9]{64}$', optional => 1 },
     } },
     returns => { type => 'string' },
     code => sub {
         my ($param) = @_;
         check_digest($param);
-        my %values = map { exists($param->{$_}) ? ($_ => $param->{$_}) : () } qw(bridge ipv4mode cidr hwaddr mtu firewall);
+        my %values = map { exists($param->{$_}) ? ($_ => $param->{$_}) : () } qw(bridge ipv4mode cidr hwaddr mtu firewall revert);
         $values{firewall} = $values{firewall} ? 1 : 0 if exists($values{firewall});
+        if (exists($values{revert})) {
+            die "Revert cannot be combined with network settings\n" if !$values{revert} || keys(%values) != 1;
+            $values{revert} = 1;
+        }
         my ($fh, $path) = tempfile('betterdocker-network-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh encode_json(\%values); close $fh;
@@ -1320,9 +1325,10 @@ register_docker_method({
     description => 'Edit a DCT snapshot description without changing its saved contents.',
     parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
         snapname => { type => 'string', pattern => '[A-Za-z][A-Za-z0-9_-]{0,39}', maxLength => 40 },
-        description => { type => 'string', maxLength => 4096 } } },
+        description => { type => 'string', maxLength => 4096 },
+        digest => { type => 'string', pattern => '^[a-f0-9]{64}$', optional => 1 } } },
     returns => { type => 'null' },
-    code => sub { my ($p) = @_; output(['snapshot-edit', $p->{id}, $p->{node}, $p->{snapname}, $p->{description}]); return undef; },
+    code => sub { my ($p) = @_; output(['snapshot-edit', $p->{id}, $p->{node}, $p->{snapname}, $p->{description}, $p->{digest} // '']); return undef; },
 });
 
 1;

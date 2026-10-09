@@ -844,16 +844,16 @@ context.Ext.create = (name, options) => {
     capturedEditors.push(editor); return editor;
 };
 definitions['PVE.betterdocker.Config'].initComponent.call(digestPanel);
-function loadDigest(digest, capabilities = { configure: 1, power: 1 }) {
+function loadDigest(digest, capabilities = { configure: 1, power: 1 }, extra = {}) {
     digestPanel.reloadDocker();
     digestRequests.at(-1).success({ result: { data: Object.assign({}, summaryData, {
         digest, operation: {}, capabilities, storage: { rootfs: {}, limit_mib: 0 },
         services: [{ name: 'app', image: 'busybox', ports: [], mounts: [], overridden: true,
             settings: { cpus: 1, memory: 32, swap: 0, cpuunits: 0, pids: 0, dns: [], dns_search: [], restart: 'no' } }],
-    }) } });
+    }, extra) } });
 }
 for (const [group, key] of [['resources', 'Memory'], ['dns', 'DNS servers'], ['options', 'Restart policy'], ['resources', 'Project data disk']]) {
-    loadDigest(editorDigest);
+    loadDigest(editorDigest, undefined, key === 'Project data disk' ? { containers: [] } : {});
     const grid = digestPanel.items.find(item => item.itemId === group).items[0];
     grid.listeners.itemdblclick(null, { get: () => key });
     const editor = capturedEditors.at(-1);
@@ -1039,3 +1039,70 @@ for (const clone of [false, true]) {
 }
 assert.equal(definitions['PVE.betterdocker.Migrate'].showTaskViewer, true);
 console.log('Native clone, restore and migration feedback policies passed');
+
+// The same row action handles keyboard and double click, and one live editor
+// survives refreshes and failed submissions until explicitly closed.
+const pendingEditWindows = [];
+context.Ext.create = (name, options) => {
+    const events = {}, form = { isValid: () => true, isDirty: () => true,
+        getValues: () => ({ memory: 128, swap: 0 }) };
+    const win = Object.assign({ formPanel: { getForm: () => form },
+        on(event, callback) { events[event] = callback; }, show() {}, toFront() { this.focused = true; },
+        close() { this.destroy(); }, destroy() { this.destroyed = true; events.destroy?.(); } }, options);
+    pendingEditWindows.push(win); return win;
+};
+digestPanel.dockerEditors = {};
+digestPanel.pendingTask = null;
+context.Proxmox.Utils.API2Request = options => digestRequests.push(options);
+loadDigest(editorDigest);
+const memoryRow = { get: () => 'Memory' };
+resourceRows.listeners.itemdblclick(null, memoryRow);
+const guardedEditor = pendingEditWindows.at(-1);
+resourceRows.listeners.itemdblclick(null, memoryRow);
+let stoppedKey = false;
+resourceRows.listeners.itemkeydown(null, memoryRow, null, 0, { ENTER:13, getKey: () => 13, stopEvent() { stoppedKey = true; } });
+assert.equal(pendingEditWindows.length, 1);
+assert.equal(guardedEditor.focused, true);
+assert.equal(stoppedKey, true);
+const requestCount = digestRequests.length;
+guardedEditor.formPanel.getForm().isDirty = () => false;
+guardedEditor.submit();
+assert.equal(digestRequests.length, requestCount, 'unchanged forms do not submit');
+guardedEditor.formPanel.getForm().isDirty = () => true;
+guardedEditor.submit();
+const submitted = digestRequests.at(-1);
+guardedEditor.submit();
+assert.equal(digestRequests.at(-1), submitted, 'Enter twice cannot submit twice');
+const previousEditAlert = context.Ext.Msg.alert, conflictAlerts = [];
+context.Ext.Msg.alert = (title, message) => conflictAlerts.push(message);
+submitted.failure({ htmlStatus: 'checksum mismatch' });
+context.Ext.Msg.alert = previousEditAlert;
+assert.deepEqual(conflictAlerts, ['checksum mismatch']);
+submitted.callback();
+assert.equal(guardedEditor.destroyed, undefined, 'conflict keeps the editor and its input');
+assert.equal(guardedEditor.dockerSubmitting, false);
+guardedEditor.submit();
+assert.notEqual(digestRequests.at(-1), submitted, 'a failed request can be retried');
+guardedEditor.destroy();
+resourceRows.listeners.itemdblclick(null, memoryRow);
+assert.equal(pendingEditWindows.length, 2, 'closing allows a fresh editor');
+pendingEditWindows.at(-1).destroy();
+const pendingAddressRenderer = networkCard.items[0].columns.find(column => column.dataIndex === 'address').renderer;
+assert.equal(pendingAddressRenderer(null, { column: { dataIndex: 'address' } }, {
+    data: { address:'192.0.2.216', cidr:'192.0.2.216/20', pending: { cidr:'192.0.2.217/20' } },
+}), '192.0.2.216/20<div style="color:darkorange">192.0.2.217/20</div>');
+let nativeSnapshotLoaded;
+definitions['PVE.betterdocker.SnapshotEdit'].load.call({ callParent(args) {
+    args[0].success({ result: { data: { digest:'a'.repeat(64), description:'notes' } } });
+} }, { success(response) { nativeSnapshotLoaded = response.result.data; } });
+assert.equal(nativeSnapshotLoaded.digest, undefined, 'digest is not shown as snapshot configuration');
+assert.equal(nativeSnapshotLoaded.description, 'notes');
+console.log('Shared keyboard editing, duplicate prevention, unchanged forms, conflict retry and pending network values passed');
+
+const restoredEditor = { restoredNetwork:true, callParent, load() {}, down() { return null; } };
+definitions['PVE.betterdocker.NetworkEdit'].initComponent.call(restoredEditor);
+const restoredFields = [...restoredEditor.items[0].column1, ...restoredEditor.items[0].column2, ...restoredEditor.items[0].advancedColumn1];
+assert(restoredFields.filter(item => item.name !== 'firewall').every(item => item.disabled));
+assert(!restoredFields.find(item => item.name === 'firewall').disabled);
+assert.deepEqual(JSON.parse(JSON.stringify(restoredEditor.items[0].onGetValues({ firewall:1, mtu:1400 }))), { firewall:1 });
+console.log('Restored endpoints expose only their supported firewall edit');

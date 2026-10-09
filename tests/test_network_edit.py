@@ -47,8 +47,6 @@ class NetworkEditTests(unittest.TestCase):
                 worker.project_network(ID, 'pve', {key:1})
         with self.assertRaisesRegex(ValueError, 'checksum'):
             worker.project_network(ID, 'pve', {'cidr':'192.0.2.51/20'}, 'a'*64)
-        with patch.object(worker, 'container_records', return_value=[{'state':'running'}]):
-            with self.assertRaises(ValueError): worker.project_network(ID, 'pve', {'mtu':1400})
         (self.directory/'snapshot-restored.json').write_text('{}')
         with self.assertRaisesRegex(ValueError, 'restored'):
             worker.project_network(ID, 'pve', {'mtu':1400})
@@ -125,3 +123,86 @@ class NetworkEditTests(unittest.TestCase):
                 worker.project_network(ID,'pve',{'cidr':'192.0.2.51/20'})
             remove.assert_not_called()
         self.assertEqual((self.directory/'request.json').read_text(),before)
+
+    def network_environment(self):
+        from contextlib import ExitStack
+        import ipaddress
+        stack = ExitStack()
+        for name in ('check_sdn_bridge', 'check_address', 'remove_network', 'ensure_address', 'rebind_runtime', 'reconcile_network_runtime'):
+            stack.enter_context(patch.object(worker, name))
+        stack.enter_context(patch.object(worker, 'bridge_addresses', return_value=([], [ipaddress.IPv4Network('10.0.0.0/20')])))
+        stack.enter_context(patch.object(worker, 'capture', return_value='[{"mtu":1500}]'))
+        return stack
+
+    def test_running_queue_merges_changes_revert_and_digest_without_touching_runtime(self):
+        self.configure()
+        source = (self.directory/'request.json').read_text()
+        runtime = (self.directory/'compose.runtime.json').read_text()
+        digest = worker.detail(ID, 'pve')['digest']
+        with self.network_environment(), patch.object(worker, 'container_records', return_value=[{'state':'running'}]):
+            worker.project_network(ID, 'pve', {'mtu':1400}, digest)
+            first = worker.network_config(ID, 'pve')
+            self.assertEqual(first['mtu'], 0)
+            self.assertEqual(first['pending'], {'mtu':1400})
+            self.assertNotEqual(first['digest'], digest)
+            with self.assertRaisesRegex(ValueError, 'checksum'):
+                worker.project_network(ID, 'pve', {'mtu':1401}, digest)
+            worker.project_network(ID, 'pve', {'cidr':'192.0.2.51/20'}, first['digest'])
+            self.assertEqual(worker.load_pending_network(self.directory), {'cidr':'192.0.2.51/20', 'mtu':1400})
+            self.assertEqual((self.directory/'request.json').read_text(), source)
+            self.assertEqual((self.directory/'compose.runtime.json').read_text(), runtime)
+            worker.project_network(ID, 'pve', {'revert':1}, worker.detail(ID, 'pve')['digest'])
+            self.assertEqual(worker.network_config(ID, 'pve')['pending'], {})
+            self.assertEqual(worker.detail(ID, 'pve')['digest'], digest)
+
+    def test_pending_network_revalidates_rolls_back_and_remains_retryable(self):
+        self.configure()
+        worker.save_pending_network(self.directory, {'cidr':'192.0.2.51/20'})
+        source = (self.directory/'request.json').read_text()
+        with self.network_environment():
+            with patch.object(worker, 'check_address', side_effect=ValueError('Address became occupied')):
+                with self.assertRaisesRegex(ValueError, 'occupied'): worker.apply_pending_network(ID, 'pve')
+            self.assertEqual(worker.load_pending_network(self.directory), {'cidr':'192.0.2.51/20'})
+            with patch.object(worker, 'rebind_runtime', side_effect=ValueError('Interrupted write')):
+                with self.assertRaisesRegex(ValueError, 'Interrupted'): worker.apply_pending_network(ID, 'pve')
+            self.assertEqual((self.directory/'request.json').read_text(), source)
+            self.assertEqual(worker.detail(ID, 'pve')['address'], '192.0.2.50')
+            self.assertEqual(worker.load_pending_network(self.directory), {'cidr':'192.0.2.51/20'})
+            self.assertFalse((self.directory/'network-transaction.json').exists())
+            worker.apply_pending_network(ID, 'pve')
+            self.assertEqual(worker.detail(ID, 'pve')['address'], '192.0.2.51')
+            self.assertEqual(worker.load_pending_network(self.directory), {})
+
+    def test_queue_rejects_invalid_fields_templates_and_unauthorized_revert(self):
+        self.configure()
+        worker.save_pending_network(self.directory, {'mtu':1400})
+        for values in ({'revert':1,'mtu':1401}, {'revert':0}, {'revert':'1'}):
+            with self.assertRaisesRegex(ValueError, 'Revert'): worker.project_network(ID, 'pve', values)
+        with patch.dict(os.environ, BETTERDOCKER_CONFIG_KEYS='cpus'):
+            with self.assertRaisesRegex(ValueError, 'Permission denied'): worker.project_network(ID, 'pve', {'revert':1})
+        with self.network_environment(), patch.object(worker, 'container_records', return_value=[{'state':'running'}]):
+            with self.assertRaisesRegex(ValueError, 'MTU'): worker.project_network(ID, 'pve', {'mtu':9000})
+        info = json.loads((self.metadata/(ID+'.json')).read_text())
+        worker.write_json(self.metadata/(ID+'.json'), dict(info, template=True))
+        with self.assertRaisesRegex(ValueError, 'template'): worker.project_network(ID, 'pve', {'revert':1})
+        self.assertEqual(worker.load_pending_network(self.directory), {'mtu':1400})
+
+    def test_full_reboot_stops_every_instance_before_applying_network(self):
+        self.configure()
+        calls = []
+        running = [{'id':'a','state':'running','service':'app'}]
+        def stop(*args):
+            calls.append('stop')
+            running[0]['state'] = 'exited'
+        def apply(*args):
+            self.assertEqual(running[0]['state'], 'exited')
+            calls.append('network')
+        with patch.object(worker, 'container_records', return_value=running), \
+             patch.object(worker, 'graceful_shutdown', side_effect=stop), \
+             patch.object(worker, 'apply_pending_network', side_effect=apply), \
+             patch.object(worker, 'prepare_network_start', side_effect=lambda *args: calls.append('prepare')), \
+             patch.object(worker, 'reconcile_network_runtime'), patch.object(worker, 'apply_pending_settings'), \
+             patch.object(worker, 'prepare_firewall'), patch.object(worker, 'restored_start', return_value=False), \
+             patch.object(worker, 'restore_restart_policy'):
+            worker.action(ID, 'pve', 'reboot')
+        self.assertEqual(calls, ['stop','network','prepare'])

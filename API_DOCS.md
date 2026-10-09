@@ -20,18 +20,21 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | POST | `/nodes/<node>/docker` | Create a DCT; send `deployment` as a JSON-encoded string and optional `pool` and `start`. Omitted `start` keeps the legacy API default of starting immediately. |
 | GET | `G/management` | Status, services, capabilities and configuration digest. |
 | GET / PUT | `G/config` | Notes, tags, protection, startup and hook configuration. |
-| GET / PUT | `G/network` | Endpoint settings and firewall flag. |
-| GET | `G/pending` | Pending service changes. |
+| GET / PUT | `G/network` | Endpoint settings, pending changes and firewall flag. PUT `revert=1` with `digest` to discard pending net0 changes. |
+| GET / PUT | `G/pending` | Service effective/pending values. PUT `service`, comma-separated `revert` keys and `digest` to discard selected changes. |
 | PUT | `G/settings` | Service settings; send `service`, JSON-encoded `settings` and `digest`. |
 | POST | `G/action` | `action`: `start`, `shutdown`, `force-stop` or `reboot`. Optional `timeout` in seconds. |
 | POST | `G/migrate` | Move to `target`; requires a stopped DCT or HA relocation. Optional `storage` and `digest`. |
 | POST | `G/clone` | Clone with `newid`, JSON-encoded destination `deployment`, optional `pool`, `storage` and `digest`. |
 | GET | `G/snapshots` | List snapshots. |
+| GET / PUT | `G/snapshot/<name>/config` | Snapshot metadata. PUT `description` with the digest returned by GET. |
 | POST | `G/snapshot` | `action`: `create`, `restore` or `delete`; also send `snapname`. |
 | GET / POST | `G/firewall/rules` | Read or add native PVE firewall rules. |
 | PUT / DELETE | `G/firewall/rules/<position>` | Edit or remove a firewall rule. |
 | GET / PUT | `G/firewall/options` | Read or edit firewall options. |
 | DELETE | `G` | Remove the DCT; persistent data is retained. Protection and HA restrictions apply. |
+
+Network changes on a running DCT are queued. GET returns the effective fields and a `pending` object; `/management` includes `pending_network`. A full DCT start, reboot or restart applies them after all containers stop. Restarting one service does not apply them. Failed application keeps the pending changes and restores the previous network. Stopped guests apply edits immediately. Apply or revert pending network changes before migration. Clone/restore use the destination endpoint and discard the source's pending endpoint. Restored DCTs allow firewall changes; endpoint changes require redeployment.
 
 ## Start a guest and follow its task
 

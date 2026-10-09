@@ -20,7 +20,7 @@ from urllib.parse import quote
 import provision as worker
 
 CONFIG_FILES = ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json',
-                'settings.json', 'pending.json', 'notes.txt')
+                'settings.json', 'pending.json', 'pending-network.json', 'notes.txt')
 
 
 def read(path):
@@ -464,6 +464,7 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
             containers = read(folder / 'containers.json')
             info['expected'] = len(containers)
             worker.write_json(metadata_path, info)
+            (project / 'pending-network.json').unlink(missing_ok=True)
             saved_disk = folder / 'configuration' / 'storage.json'
             if saved_disk.exists():
                 disk = read(saved_disk)
@@ -644,7 +645,7 @@ def make_template(identifier, node, digest=None):
         info = worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         worker.check_protection(info, "can't convert protected DCT to a template")
-        if worker.load_pending(worker.ROOT / identifier):
+        if worker.load_pending(worker.ROOT / identifier) or worker.load_pending_network(worker.ROOT / identifier):
             raise ValueError('Apply or revert pending settings before converting the DCT to a template')
         if any(c['state'] in ('running', 'paused', 'restarting') for c in worker.container_records(identifier)):
             raise ValueError('Stop the DCT before converting it to a template')

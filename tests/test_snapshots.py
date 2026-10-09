@@ -181,7 +181,10 @@ class SnapshotTests(unittest.TestCase):
             worker.write_json(configs / 'compose.runtime.json', {'services': {'app': {'image': 'busybox', 'environment': {'PASSWORD': 'secret'}, 'command': 'secret'}}})
             worker.write_json(folder / 'checksums.json', worker.snapshot_digest(folder))
             old_digest = worker.snapshot_list(ID, 'pve')[-1]['digest']
-            worker.snapshot_edit(ID, 'pve', 'first', 'changed description')
+            config_digest = worker.snapshot_config(ID, 'pve', 'first')['digest']
+            worker.snapshot_edit(ID, 'pve', 'first', 'changed description', config_digest)
+            with self.assertRaisesRegex(ValueError, 'checksum'):
+                worker.snapshot_edit(ID, 'pve', 'first', 'stale description', config_digest)
             worker.snapshot_check(ID, 'first')
             response = worker.snapshot_config(ID, 'pve', 'first')
             self.assertEqual(response['description'], 'changed description')
