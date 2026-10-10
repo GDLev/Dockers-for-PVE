@@ -1095,15 +1095,39 @@ for (const action of ['startall', 'stopall', 'migrateall', 'suspendall', 'start'
 }
 console.log('Native bulk selectors include DCT for node and cluster operations');
 
-// Network editor keeps native form/load/task handling and exposes supported fields only.
-let networkLoad, loadedNetwork, mtuCleared;
-const networkEditor = { nodename: 'pve', callParent() {}, load(options) { networkLoad = options; },
-    setValues(values) { loadedNetwork = values; }, down() { return { setValue(value) { mtuCleared = value; } }; } };
+// Network loading preserves native form values and ignores replies after Escape.
+let networkLoad, loadedNetwork;
+const networkAPI = context.Proxmox.Utils.API2Request, networkAlert = context.Ext.Msg.alert;
+let networkAlerts = 0;
+context.Ext.Msg.alert = () => { networkAlerts++; };
+context.Proxmox.Utils.API2Request = options => { networkLoad = options; };
+let networkClosed, networkCleared = 0, radioReset = 0, networkMask;
+const networkEditor = { nodename: 'pve', url:'/network', callParent() {},
+    on(event, callback) { assert.equal(event, 'beforedestroy'); networkClosed = callback; },
+    setLoading(value) { networkMask = value; },
+    formPanel: { getForm: () => ({ clearInvalid() { networkCleared++; } }) },
+    query: () => [{ resetOriginalValue() { radioReset++; } }],
+    setValues(values) { loadedNetwork = values; } };
 definitions['PVE.betterdocker.NetworkEdit'].initComponent.call(networkEditor);
 networkLoad.success({ result: { data: { bridge: 'vmbr0', ipv4mode: 'static', cidr: '192.0.2.250/20', mtu: 0, digest: editorDigest } } });
 assert.equal(loadedNetwork.cidr, '192.0.2.250/20');
 assert.equal(networkEditor.digest, editorDigest);
-assert.equal(mtuCleared, '');
+assert.equal(loadedNetwork.mtu, '');
+assert.equal(networkCleared, 1);
+assert.equal(radioReset, 1);
+assert.equal(networkMask, false);
+assert.equal(networkLoad.method, 'GET');
+networkLoad.failure({ htmlStatus:'current error' });
+assert.equal(networkAlerts, 1);
+networkClosed();
+loadedNetwork = null;
+networkLoad.success({ result: { data: { bridge:'obsolete' } } });
+networkLoad.failure({ htmlStatus:'obsolete error' });
+assert.equal(loadedNetwork, null, 'closed editor must not receive delayed values');
+assert.equal(networkCleared, 1, 'closed native form must not be accessed');
+assert.equal(networkAlerts, 1, 'closed editor must not show a late error');
+context.Ext.Msg.alert = networkAlert;
+context.Proxmox.Utils.API2Request = networkAPI;
 const networkFields = [...networkEditor.items[0].column1, ...networkEditor.items[0].column2, ...networkEditor.items[0].advancedColumn1];
 for (const name of ['bridge', 'hwaddr', 'cidr', 'mtu']) assert(networkFields.some(field => field.name === name));
 for (const name of ['ip6', 'tag', 'rate', 'gw']) assert(!networkFields.some(field => field.name === name));
@@ -1215,7 +1239,7 @@ assert.equal(nativeSnapshotLoaded.digest, undefined, 'digest is not shown as sna
 assert.equal(nativeSnapshotLoaded.description, 'notes');
 console.log('Shared keyboard editing, duplicate prevention, unchanged forms, conflict retry and pending network values passed');
 
-const restoredEditor = { restoredNetwork:true, callParent, load() {}, down() { return null; } };
+const restoredEditor = { restoredNetwork:true, callParent, on() {}, setLoading() {}, down() { return null; } };
 definitions['PVE.betterdocker.NetworkEdit'].initComponent.call(restoredEditor);
 const restoredFields = [...restoredEditor.items[0].column1, ...restoredEditor.items[0].column2, ...restoredEditor.items[0].advancedColumn1];
 assert(restoredFields.filter(item => item.name !== 'firewall').every(item => item.disabled));
@@ -1589,3 +1613,97 @@ definitions['PVE.betterdocker.FileButton'].afterRender.call(accessibleFile);
 definitions['PVE.betterdocker.FileButton'].createFileInput.call(accessibleFile);
 assert.deepEqual(fileLabels, [['aria-label', 'Wczytaj YAML'], ['aria-label', 'Wczytaj YAML']]);
 console.log('Localized file-picker names survive native input recreation');
+
+// Exercise complete edit flows with the production Config handlers. Permission
+// changes and task locks must affect every entry point, including keyboard use.
+const acceptanceSaved = { create: context.Ext.create, request: context.Proxmox.Utils.API2Request,
+    alert: context.Ext.Msg.alert, user: context.Proxmox.UserName };
+const acceptanceRequests = [], acceptanceWindows = [], acceptanceAlerts = [];
+context.Proxmox.Utils.API2Request = options => acceptanceRequests.push(options);
+context.Ext.Msg.alert = (title, message) => acceptanceAlerts.push({ title, message });
+context.Ext.create = (name, options) => {
+    const events = {}, values = { memory: 128, swap: 0, dns: '1.1.1.1', dns_search: 'example.test', restart: 'no' };
+    const input = options.items[0], names = [...(input.items || []), ...(input.column1 || []),
+        ...(input.column2 || []), ...(input.advancedColumn2 || [])].filter(item => item.name).map(item => item.name);
+    const form = { isValid: () => true, isDirty: () => true,
+        getValues: () => Object.fromEntries(names.map(name => [name, values[name]])) };
+    const win = Object.assign({ values, formPanel: { getForm: () => form },
+        on(event, callback) { events[event] = callback; }, show() {}, toFront() { this.focused = true; },
+        close() { this.destroyed = true; events.destroy?.(); }, destroy() { this.close(); } }, options);
+    acceptanceWindows.push({ name, win }); return win;
+};
+context.Proxmox.UserName = 'ux-reader@pve';
+const acceptanceControls = {}, acceptanceGrids = {}, acceptanceEvents = {};
+const acceptancePanel = { pveSelNode: configPanel.pveSelNode, callParent, query: () => [],
+    on(event, callback) { acceptanceEvents[event] = callback; },
+    down(id) { return acceptanceGrids[id] || acceptanceControls[id] || null; } };
+definitions['PVE.betterdocker.Config'].initComponent.call(acceptancePanel);
+for (const [group, gridId, key] of [['resources', 'resourceGrid', 'Memory'], ['dns', 'dnsGrid', 'DNS servers'], ['options', 'optionGrid', 'Restart policy']]) {
+    const card = acceptancePanel.items.find(item => item.itemId === group), row = { get: () => key };
+    const button = card.tbar.find(item => item.itemId === (group === 'resources' ? 'resourceEdit' : group + 'Edit'));
+    acceptanceControls['#' + button.itemId] = Object.assign(button, { setDisabled(value) { this.disabled = value; } });
+    acceptanceGrids['#' + gridId] = { itemId: gridId, setRows() {}, getSelectionModel: () => ({ getSelection: () => [row] }) };
+    const refresh = (capabilities, extra = {}) => {
+        acceptancePanel.reloadDocker();
+        const managementRequest = acceptanceRequests.filter(item => item.url.endsWith('/management')).at(-1);
+        managementRequest.success({ result: { data: Object.assign({}, summaryData, {
+            digest: editorDigest, operation: {}, capabilities, storage: {},
+            services: [{ name: 'app', image: 'busybox', ports: [], mounts: [], overridden: false,
+                settings: { memory: 32, swap: 0, cpus: 1, cpuunits: 0, pids: 0, disk: 0, dns: [], dns_search: [], restart: 'no' } }],
+        }, extra) } });
+    };
+    const enter = () => card.items[0].listeners.itemkeydown(null, row, null, 0,
+        { ENTER: 13, getKey: () => 13, stopEvent() {} });
+    const gestures = [() => button.handler(), () => card.items[0].listeners.itemdblclick(null, row), enter];
+    for (const extra of [{}, { operation: { active: true } }, { migration: { target: 'other' } }, { template: true }]) {
+        refresh({ configure: 0 }, extra);
+        card.items[0].listeners.selectionchange(null, [row]);
+        const before = acceptanceWindows.length;
+        gestures.forEach(gesture => gesture());
+        assert.equal(button.disabled, true);
+        assert.equal(acceptanceWindows.length, before, group + ' read-only gestures create no window');
+    }
+    for (const restriction of [{ operation: { active: true } }, { migration: { target: 'other' } },
+        { template: true }, { ha: { managed: true } }]) {
+        refresh({ configure: 1 }, restriction);
+        card.items[0].listeners.selectionchange(null, [row]);
+        const lockedCount = acceptanceWindows.length;
+        gestures.forEach(gesture => gesture());
+        assert.equal(button.disabled, true);
+        assert.equal(acceptanceWindows.length, lockedCount, group + ' respects operation, migration, template and HA restrictions');
+    }
+    refresh({ configure: 1 });
+    card.items[0].listeners.selectionchange(null, [row]);
+    assert.equal(button.disabled, false);
+    const beforeOpen = acceptanceWindows.length;
+    gestures.forEach(gesture => gesture());
+    assert.equal(acceptanceWindows.length, beforeOpen + 1, group + ' all gestures share one editor');
+    const win = acceptanceWindows.at(-1).win;
+    assert.equal(win.focused, true);
+    const inputName = { resources: 'memory', dns: 'dns', options: 'restart' }[group];
+    const inputValue = { resources: 256, dns: '9.9.9.9', options: 'always' }[group];
+    win.values[inputName] = inputValue;
+    refresh({ configure: 1 }, { digest: '2'.repeat(64) });
+    assert.equal(win.formPanel.getForm().getValues()[inputName], inputValue, 'polling retains unsaved input');
+    win.submit();
+    const rejected = acceptanceRequests.at(-1);
+    const alertCount = acceptanceAlerts.length;
+    rejected.failure({ htmlStatus: 'detected modified configuration' }); rejected.callback();
+    assert.equal(acceptanceAlerts.length, alertCount + 1);
+    assert.equal(win.destroyed, undefined);
+    assert.equal(win.formPanel.getForm().getValues()[inputName], inputValue);
+    win.submit();
+    const retry = acceptanceRequests.at(-1);
+    assert.notEqual(retry, rejected);
+    const beforeSave = acceptanceWindows.length;
+    retry.success({ result: { data: 'UPID:pve:1:2:3:betterdockersettings:100:ux-reader@pve:' } }); retry.callback();
+    assert.equal(win.destroyed, true);
+    assert.equal(acceptanceWindows.length, beforeSave, group + ' saves close without an extra task window');
+    acceptancePanel.pendingTask = null;
+}
+acceptanceEvents.beforedestroy();
+context.Ext.create = acceptanceSaved.create;
+context.Proxmox.Utils.API2Request = acceptanceSaved.request;
+context.Ext.Msg.alert = acceptanceSaved.alert;
+context.Proxmox.UserName = acceptanceSaved.user;
+console.log('Acceptance: Edit/Enter/double-click, read-only/locked state, retained input, conflict retry and quiet saves passed');

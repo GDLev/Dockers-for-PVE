@@ -1068,6 +1068,19 @@ register_docker_method({
     code => sub {
         my ($param) = @_;
         check_digest($param);
+        my $settings = decode_json($param->{settings});
+        die "Settings must be a JSON object\n" unless ref($settings) eq 'HASH';
+        my $allowed = $ENV{BETTERDOCKER_CONFIG_KEYS} // '*';
+        if ($allowed ne '*') {
+            my %granted = map { $_ => 1 } split(',', $allowed);
+            my $rows = decode_json(output(['pending', $param->{id}, $param->{node}, $param->{service}]));
+            my %effective = map { $_->{key} => exists($_->{pending}) ? $_->{pending} : $_->{value} } @$rows;
+            for my $key (keys %$settings) {
+                next if $granted{$key};
+                next if exists($effective{$key}) && encode_json($settings->{$key}) eq encode_json($effective{$key});
+                raise_perm_exc('configuration field requires additional privileges');
+            }
+        }
         my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh $param->{settings}; close $fh;

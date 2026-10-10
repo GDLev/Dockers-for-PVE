@@ -624,14 +624,29 @@
                 [...panel.column1, ...panel.column2, ...panel.advancedColumn1].filter(item => item.name !== 'firewall').forEach(item => { item.disabled = true; });
             }
             me.callParent();
-            me.load({ success: function (response) {
-                const values = response.result.data;
-                const requested = Object.assign({}, values, values.pending);
-                if (!requested.mtu) { requested.mtu = ''; }
-                me.setValues(requested);
-                me.digest = values.digest;
-                if (!requested.mtu) { me.down('[name=mtu]').setValue(''); }
-            } });
+            // Native Edit.load touches its form before invoking success. A
+            // delayed response must not touch a network editor closed with Escape.
+            let closed = false;
+            me.on('beforedestroy', () => { closed = true; });
+            me.setLoading(gettext('Please wait...'));
+            Proxmox.Utils.API2Request({ url: me.url, method: 'GET',
+                success: function (response) {
+                    if (closed) { return; }
+                    me.setLoading(false);
+                    me.formPanel.getForm().clearInvalid();
+                    const values = response.result.data;
+                    const requested = Object.assign({}, values, values.pending);
+                    if (!requested.mtu) { requested.mtu = ''; }
+                    me.setValues(requested);
+                    me.digest = values.digest;
+                    me.query('radiofield').forEach(item => item.resetOriginalValue());
+                },
+                failure: function (response) {
+                    if (closed) { return; }
+                    me.setLoading(false);
+                    Ext.Msg.alert(gettext('Error'), response.htmlStatus, () => { if (!closed) { me.close(); } });
+                },
+            });
         },
     });
 

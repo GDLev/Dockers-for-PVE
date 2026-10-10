@@ -76,6 +76,48 @@ print 'PASS';
             result = subprocess.run(['perl', '-e', code, folder], check=True, capture_output=True, text=True)
             self.assertEqual(result.stdout, 'PASS')
 
+    def test_settings_rejects_ungranted_changes_before_creating_a_task(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        start = source.index('    code => sub {', source.index("name => 'settings',"))
+        end = source.index('\n    },\n});', start)
+        body = source[start:end].removeprefix('    code => sub {').replace("DIR => '/run'", 'DIR => $tmpdir')
+        with tempfile.TemporaryDirectory() as folder:
+            code = r'''
+use JSON::PP qw(decode_json encode_json);
+use File::Temp qw(tempfile);
+my $tmpdir = $ARGV[0]; my $helper = '/helper';
+our $forks = 0; our $pending = 0;
+sub check_digest {}
+sub task_id { 101 }
+sub raise_perm_exc { die 'Permission denied' }
+sub output { encode_json([{key=>'restart',value=>'no',($pending ? (pending=>'always') : ())}]) }
+package PVE::RPCEnvironment;
+sub get { bless {}, __PACKAGE__ }
+sub get_user { 'editor@pve' }
+sub fork_worker { $main::forks++; 'UPID:test' }
+package main;
+my $edit = sub { BODY };
+local $ENV{BETTERDOCKER_CONFIG_KEYS} = 'memory,swap';
+my %args = (id=>'a' x 32, node=>'pve', service=>'app');
+$edit->({%args, settings=>' {"memory":128,"swap":0} '});
+die 'Allowed edit rejected' unless $forks == 1;
+eval { $edit->({%args,settings=>'{"restart":"always"}'}); };
+die 'Denied change created a task' unless $@ =~ /Permission denied/ && $forks == 1;
+$edit->({%args,settings=>'{"restart":"no"}'});
+die 'Unchanged field rejected' unless $forks == 2;
+$pending = 1;
+eval { $edit->({%args,settings=>'{"restart":"no"}'}); };
+die 'Ignored effective pending value' unless $@ =~ /Permission denied/ && $forks == 2;
+for my $invalid ('[]','null') {
+ eval { $edit->({%args,settings=>$invalid}); };
+ die 'Invalid settings created a task' unless $@ =~ /JSON object/ && $forks == 2;
+}
+unlink $_ for glob "$tmpdir/betterdocker-*";
+print 'PASS';
+'''.replace('BODY', body)
+            result = subprocess.run(['perl', '-e', code, folder], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, 'PASS')
+
     def test_host_api_has_no_lxc_schema_and_resources_do_not_expose_secrets(self):
         with tempfile.TemporaryDirectory() as folder:
             base = Path(folder)
