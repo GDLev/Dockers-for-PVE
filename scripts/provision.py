@@ -1245,6 +1245,8 @@ def management(identifier, node, shared_stats=None):
         return dict(public, status='stopped', containers=[], services=[], stats=[], metrics={}, storage={}, operation=operation_state(identifier))
     info = detail(identifier, node)
     info['pending_network'] = load_pending_network(ROOT / identifier)
+    snapshots = snapshot_root(identifier)
+    info['has_snapshots'] = snapshots.exists() and any(snapshots.iterdir())
     info['network_restored'] = (ROOT / identifier / 'snapshot-restored.json').exists()
     directory = ROOT / identifier
     config = json.loads((directory / 'compose.runtime.json').read_text())
@@ -2142,7 +2144,14 @@ def parse_startup(value):
 
 def access_state(identifier, node):
     info = detail(identifier, node)
-    return {'status': info['status'], 'protection': int(bool(info.get('protection'))),
+    directory = ROOT / identifier
+    snapshots = snapshot_root(identifier)
+    return {'status': info['status'], 'ipv4mode': info.get('ipv4mode', 'static'),
+            'has_snapshots': snapshots.exists() and any(snapshots.iterdir()), 'protection': int(bool(info.get('protection'))),
+            'template': bool(info.get('template')), 'migration': info.get('migration'),
+            'replication': bool(info.get('replication')),
+            'pending_network': load_pending_network(directory),
+            'pending_settings': bool(load_pending(directory)),
             'operation': operation_state(identifier),
             'active_containers': int(any(item['state'] in ('running', 'restarting', 'paused')
                                          for item in container_records(identifier)))}

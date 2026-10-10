@@ -992,7 +992,7 @@ register_docker_method({
         my $owner = $op->{user} // '';
         my $actor = $ENV{BETTERDOCKER_TASK_USER};
         $owner =~ s/!.*$//; $actor =~ s/!.*$//;
-        $info->{capabilities}->{overrule_shutdown} = ($op->{active} && $op->{action} eq 'shutdown' &&
+        $info->{capabilities}->{overrule_shutdown} = (!$info->{ha}->{managed} && $op->{active} && $op->{action} eq 'shutdown' &&
             $info->{capabilities}->{power} && ($ENV{BETTERDOCKER_TASK_SYS_MODIFY} eq '1' ||
             ($owner ne '' && $owner eq $actor))) ? 1 : 0;
         delete $info->{deployment} unless $info->{capabilities}->{configure};
@@ -1009,10 +1009,11 @@ register_docker_method({
         my ($p) = @_;
         my $state = decode_json(output(['access-state', $p->{id}, $p->{node}]));
         $state->{capabilities} = capabilities($p->{id}, $p->{node});
+        $state->{ha} = PVE::HA::Config::get_service_status("docker:" . task_id($p->{id}, $p->{node}));
         my $op = $state->{operation} // {};
         my $owner = $op->{user} // ''; my $actor = $ENV{BETTERDOCKER_TASK_USER};
         $owner =~ s/!.*$//; $actor =~ s/!.*$//;
-        $state->{capabilities}->{overrule_shutdown} = ($op->{active} && $op->{action} eq 'shutdown' &&
+        $state->{capabilities}->{overrule_shutdown} = (!$state->{ha}->{managed} && $op->{active} && $op->{action} eq 'shutdown' &&
             !$op->{service} && $state->{capabilities}->{power} &&
             ($ENV{BETTERDOCKER_TASK_SYS_MODIFY} eq '1' || ($owner ne '' && $owner eq $actor))) ? 1 : 0;
         return $state;

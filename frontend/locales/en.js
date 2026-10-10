@@ -4,6 +4,18 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "DCT migration requires a static IPv4 address.": "DCT migration requires a static IPv4 address.",
+            "DCT migration with snapshot history is not supported.": "DCT migration with snapshot history is not supported.",
+            "Apply or revert pending network changes before migrating the DCT.": "Apply or revert pending network changes before migrating the DCT.",
+            "Stop the DCT before migration.": "Stop the DCT before migration.",
+            "Remove the DCT from HA before converting it to a template.": "Remove the DCT from HA before converting it to a template.",
+            "Apply or revert pending settings before converting the DCT to a template.": "Apply or revert pending settings before converting the DCT to a template.",
+            "Stop the DCT before converting it to a template.": "Stop the DCT before converting it to a template.",
+            "Remove the DCT from HA before deleting it.": "Remove the DCT from HA before deleting it.",
+            "Remove replication jobs and their state disk before deleting the DCT.": "Remove replication jobs and their state disk before deleting the DCT.",
+            "Stop the DCT before removal.": "Stop the DCT before removal.",
+            "Protection mode enabled": "Protection mode enabled",
+
             "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.": "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.",
             "Docker Volumes": "Docker Volumes",
             "In use": "In use",
@@ -13,7 +25,6 @@
             "Start/Shutdown order": "Start/Shutdown order",
 
             "Volumes, bind mounts and deployment files are retained.": "Volumes, bind mounts and deployment files are retained.",
-            "Open in separate window": "Open in separate window",
             "Could not read file": "Could not read file",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.",
             "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.": "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.",
@@ -21,7 +32,6 @@
             "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node.": "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node.",
             "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped.": "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped.",
             "Persistent data and deployment files are retained.": "Persistent data and deployment files are retained.",
-            "Remove Snapshot": "Remove Snapshot",
             "HA State": "HA State",
             "Manage HA": "Manage HA",
             "Snapshots": "Snapshots",

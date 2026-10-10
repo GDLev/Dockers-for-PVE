@@ -77,3 +77,18 @@ class LifecycleTests(unittest.TestCase):
         with patch.object(worker,'container_records',return_value=[{'state':'running'}]):
             self.assertEqual(worker.access_state(ID,'pve')['active_containers'],1)
         self.assertEqual(worker.access_state(ID,'pve')['active_containers'],0)
+
+    def test_context_state_contains_action_restrictions_without_deployment_secrets(self):
+        info = {'status': 'stopped', 'template': True, 'protection': 1,
+                'migration': {'target': 'pve2'}, 'replication': {'targets': {'pve2': {}}},
+                'deployment': {'environment': 'secret'}}
+        with patch.object(worker, 'detail', return_value=info), \
+             patch.object(worker, 'load_pending_network', return_value={'mtu': 1400}), \
+             patch.object(worker, 'load_pending', return_value={'app': {'memory': 128}}):
+            state = worker.access_state(ID, 'pve')
+        self.assertTrue(state['template'])
+        self.assertTrue(state['replication'])
+        self.assertTrue(state['pending_settings'])
+        self.assertEqual(state['migration'], {'target': 'pve2'})
+        self.assertEqual(state['pending_network'], {'mtu': 1400})
+        self.assertNotIn('deployment', state)

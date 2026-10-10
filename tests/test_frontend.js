@@ -7,6 +7,31 @@ function callParent() {
     assert.ok(callParent.caller, 'ExtJS callParent must have a non-strict caller');
     this.initialized = true;
 }
+function memoryStore(initial = []) {
+    const store = { records: [], writes: 0, additions: 0, removals: 0,
+        getRange() { return this.records.slice(); }, indexOf(record) { return this.records.indexOf(record); },
+        getById(id) { return this.records.find(record => (record.data.id ?? record.data.key) === id); },
+        add(values) {
+            const record = { data: values, get(key) { return this.data[key]; },
+                beginEdit() {}, endEdit() {}, set(changes) { store.writes++; Object.assign(this.data, changes); }, commit() {} };
+            this.records.push(record); this.additions++; return [record];
+        },
+        remove(records) { records.forEach(record => { this.records.splice(this.records.indexOf(record), 1); this.removals++; }); },
+    };
+    initial.forEach(row => store.add(row));
+    Object.defineProperty(store, 'rows', { get() { return this.records.map(record => record.data); } });
+    return store;
+}
+function tableView(store) {
+    const position = { x: 41, y: 287 }, column = { dataIndex: 'value', width: 231 }, navigation = { record: null, focused: false, restores: 0 };
+    return { store, position, column, navigation, getStore: () => store,
+        getView: () => ({ el: { contains: () => navigation.focused },
+            getScrollable: () => ({ getPosition: () => ({ ...position }), scrollTo(x, y) { Object.assign(position, { x, y }); } }),
+            getNavigationModel: () => ({ getPosition: () => ({ record: navigation.record, column }),
+                setPosition(record, cell) { navigation.restores++; navigation.record = record; assert.equal(cell, column); } }),
+        }),
+    };
+}
 const tree = { typeDefaults: {}, prototype: { addChildSorted: (node, info) => info,
     getTypeOrder: type => ({ lxc: 0, qemu: 1, node: 2, storage: 4 })[type] ?? 9,
     nodeSortFn: (a, b) => a.data.vmid - b.data.vmid } };
@@ -18,7 +43,8 @@ const storageBrowserClass = { prototype: { initComponent() { this.nativeInitiali
 const storageImageClass = { prototype: { initComponent() { this.nativeInitialized = true; } } };
 const context = { window: null, console, gettext: value => value,
     PVE: { form: { VMSelector: { prototype: { initComponent() {} } }, ViewSelector: viewSelectorClass }, storage: { Browser: storageBrowserClass, ImageView: storageImageClass }, node: { CmdMenu: nodeMenuClass, Config: nodeConfigClass }, panel: { Config: { prototype: { activateCard() {}, initComponent() { this.nativeInitialized = true; } } } }, window: { Wizard: {} }, StdWorkspace: workspaceClass, tree: { ResourceTree: tree },
-        Utils: { format_ha: value => value.managed ? value.state || 'none' : 'none', isStandaloneNode: () => false, get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
+        Utils: { getFormattedGuestIdentifier: (vmid, name) => name ? `${vmid} (${name})` : vmid,
+            formatGuestTaskConfirmation: (taskType, vmid, name) => context.taskDescriptions[taskType](taskType, context.PVE.Utils.getFormattedGuestIdentifier(vmid, name)), format_ha: value => value.managed ? value.state || 'none' : 'none', isStandaloneNode: () => false, get_object_icon_class: () => 'fa fa-cube', createCmdMenu: () => 'native-menu' } },
     Proxmox: { NodeName: 'pve', UserName: 'root@pam', Utils: { format_boolean: value => value ? 'Yes' : 'No', override_task_descriptions: descriptions => { context.taskDescriptions = descriptions; } } },
     Ext: { define: (name, definition) => { definitions[name] = definition; },
         override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
@@ -180,6 +206,7 @@ assert.equal(resourceView.items[0].xtype, 'pveBetterDockerPendingProperties');
 assert.equal(definitions['PVE.betterdocker.PendingProperties'].hideHeaders, true);
 assert.equal(definitions['PVE.betterdocker.PendingProperties'].extend, 'Proxmox.grid.PendingObjectGrid');
 console.log('Native status widgets, Notes, RRD charts and full-size resource grid passed');
+context.Proxmox.Utils.format_size = value => `${value} B`;
 const summaryFields = {};
 context.Proxmox.Utils.format_duration_long = value => String(value);
 context.Proxmox.Utils.render_cpu_usage = (value, cpus) => `${value * 100}% of ${cpus} CPU(s)`;
@@ -220,6 +247,7 @@ context.Ext.Msg = { confirm: (title, message, callback) => callback('yes') };
 configPanel.query = () => [];
 context.Ext.create = (name, options) => { createdWindows.push({ name, options }); return {}; };
 configPanel.reloadDocker = () => {};
+configPanel.pveSelNode.data.status = 'running';
 const shutdownButton = configPanel.tbar.find(button => button.itemId === 'stopButton');
 shutdownButton.handler();
 assert.equal(consoleRequest.params.action, 'shutdown');
@@ -230,6 +258,7 @@ assert.equal(consoleRequest.params.action, 'reboot');
 consoleRequest.success({ result: { data: 'UPID:restart' } });
 configPanel.pendingTask = null;
 assert.equal(createdWindows.length, 0, 'shutdown and restart must not open TaskViewer');
+configPanel.pveSelNode.data.status = 'stopped';
 configPanel.tbar.find(button => button.itemId === 'startButton').handler();
 consoleRequest.success({ result: { data: 'UPID:start' } });
 configPanel.pendingTask = null;
@@ -248,7 +277,8 @@ const beforeRestart = createdWindows.length;
 consoleRequest.success({ result: { data: 'UPID:restart-other' } });
 assert.equal(createdWindows.length, beforeRestart);
 commandMenu.items.find(item => item.text === 'Console').handler();
-assert.deepEqual(navigation, [clickedRecord.data.id, 'console']);
+assert.equal(createdWindows.at(-1).name, 'Ext.window.Window');
+assert.deepEqual(navigation, [], 'context Console opens a window like native LXC');
 context.Ext.tree = { View: class {} };
 const treeView = new context.Ext.tree.View();
 treeView.up = () => menuWorkspace;
@@ -260,7 +290,7 @@ context.Ext.defer = (callback, delay) => {
 };
 context.Ext.create = (name, options) => {
     menuArguments = { name, options };
-    if (name === 'Proxmox.window.SafeDestroy') { return {}; }
+    if (['Proxmox.window.SafeDestroy', 'Ext.window.Window'].includes(name)) { return {}; }
     if (name === 'PVE.betterdocker.GuestStop') { return { show() {} }; }
     const menu = Object.assign({
         callParent,
@@ -299,7 +329,7 @@ for (const label of ['Start', 'Shutdown', 'Reboot', 'Stop', 'Console']) {
     item.handler();
     if (label === 'Remove') { assert.equal(menuArguments.name, 'Proxmox.window.SafeDestroy'); assert.equal(menuArguments.options.item.id, record.data.name); }
     else if (label === 'Stop') { assert.equal(menuArguments.name, 'PVE.betterdocker.GuestStop'); menuArguments.options.onConfirm(false); assert.equal(consoleRequest.params.action, 'force-stop'); }
-    else if (label === 'Console') { assert.equal(navigation.at(-1), 'console'); }
+    else if (label === 'Console') { assert.equal(menuArguments.name, 'Ext.window.Window'); }
     else if (label === 'Edit deployment') { assert.equal(consoleRequest.method, 'GET'); }
     else { assert.equal(consoleRequest.params.action, { Start: 'start', Shutdown: 'shutdown', Reboot: 'reboot', Stop: 'force-stop' }[label]); }
     deferredMenuCleanup.shift()();
@@ -338,7 +368,7 @@ context.Proxmox.UserName = 'root@pam';
 console.log('Silent shutdown/restart and project-scoped native context menu passed');
 console.log('Node context menu Create DCT ordering, permissions and selected-node wizard passed');
 
-for (const [operation, label] of Object.entries({ create: 'Deploy', start: 'Start', stop: 'Shutdown', restart: 'Restart', delete: 'Remove', console: 'Console' })) {
+for (const [operation, label] of Object.entries({ create: 'Create', start: 'Start', stop: 'Shutdown', restart: 'Restart', delete: 'Destroy', snapshotcreate: 'Snapshot', snapshotdelete: 'Delete Snapshot', console: 'Console' })) {
     assert.equal(context.taskDescriptions['betterdocker' + operation]('', '101'), 'DCT 101 - ' + label);
 }
 assert(!context.taskDescriptions.betterdocker('', 'a'.repeat(32)).includes('a'.repeat(32)));
@@ -346,6 +376,7 @@ assert(!context.taskDescriptions.betterdockerconsole('', 'a'.repeat(32)).include
 assert.equal(wizard.items[0].column1.find(item => item.name === 'vmid').emptyText, 'Next available guest ID');
 console.log('Readable DCT task descriptions and numeric ID wizard passed');
 
+configPanel.pveSelNode.data.status = 'running';
 for (const [handler, operation] of [
     [shutdownButton.handler, 'shutdown'], [shutdownButton.menu[0].handler, 'reboot'],
     [commandMenu.items.find(item => item.text === 'Shutdown').handler, 'shutdown'],
@@ -370,6 +401,7 @@ for (const [handler, operation] of [
     configPanel.pendingTask = null;
     assert.equal(createdWindows.length, windowsBefore, 'Confirmed action must not open task output');
 }
+configPanel.pveSelNode.data.status = 'stopped';
 context.Ext.Msg.confirm = () => { throw new Error('Start must not ask for confirmation'); };
 configPanel.tbar.find(button => button.itemId === 'startButton').handler();
 assert.equal(consoleRequest.params.action, 'start');
@@ -585,7 +617,7 @@ const logPanel = { apiUrl: '/nodes/pve/docker/project', callParent,
 definitions['PVE.betterdocker.Logs'].initComponent.call(logPanel);
 for (const spec of [...logPanel.tbar, ...logPanel.bbar, ...logPanel.items]) {
     if (!spec.itemId) { continue; }
-    const store = { loadData(rows) { this.rows = rows; } };
+    const store = memoryStore();
     logControls['#' + spec.itemId] = { value: spec.value ?? spec.checked ?? '',
         getValue() { return this.value; }, setValue(value) { this.value = value; }, getStore() { return store; },
     };
@@ -636,7 +668,7 @@ console.log('Measured usage without capacities, service-scoped log filters and d
     await importHandler.call(upload);
     assert.equal(resets, 1);
     assert.equal(writes, 0);
-    assert.equal(alerts[0].message, 'Could not read file');
+    assert.equal(alerts.filter(item => item.message === 'Could not read file').length, 1);
     upload.fileInputEl.dom.files[0].text = async () => 'services: {}';
     await importHandler.call(upload);
     assert.equal(resets, 2);
@@ -709,7 +741,7 @@ assert.equal(statusRequests.length, 3);
 console.log('Supported chart history, hidden chart lifecycle and non-overlapping status recovery passed');
 
 const initialWidgets = summaryItems[0].items[0].items.filter(item => item.xtype === 'pmxInfoWidget');
-assert(initialWidgets.every(item => item.text === ''), 'initial measurements remain empty');
+assert(initialWidgets.every(item => item.text === '' && !item.printBar), 'initial measurements and progress labels remain empty');
 for (const [status, expected] of [['running', 'Running'], ['stopped', 'Stopped'], ['partial', 'Partially running']]) {
     definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, { ...summaryData, status });
     assert.equal(summaryFields['#statusValue'].text, expected);
@@ -744,8 +776,9 @@ const removal = stage2Windows.at(-1);
 assert.equal(removal.name, 'Proxmox.window.SafeDestroy');
 assert.equal(removal.options.item.id, configPanel.pveSelNode.data.vmid);
 assert(removal.options.note.includes('retained'));
-assert.equal(removal.options.showProgress, true);
+assert.equal(removal.options.showProgress, false, 'native guest removal closes without a progress dialog');
 assert.equal(statusRequests.length, requestsBeforeRemove, 'opening the dialog cannot remove a project');
+configPanel.pveSelNode.data.status = 'running';
 configPanel.tbar.find(item => item.itemId === 'consoleButton').menu[0].handler();
 const detachedConsole = stage2Windows.at(-1);
 assert.equal(detachedConsole.name, 'Ext.window.Window');
@@ -756,6 +789,7 @@ assert.equal(shutdownButton.menu[0].text, 'Reboot');
 console.log('Native removal dialog and separate console keep the selected DCT scope');
 
 // Stop uses the native MessageBox/checkbox pattern and sends override only after confirmation.
+configPanel.pveSelNode.data.status = 'running';
 const stopWindows = [];
 context.Ext.create = (name, options) => { stopWindows.push({ name, options }); return { show() {} }; };
 configPanel.pendingTask = null;
@@ -785,6 +819,10 @@ destroyed = false;
 confirmationConfig.callback('yes');
 assert.equal(performed, true);
 assert.equal(destroyed, true);
+fakeStop.haManaged = true; fakeStop.activeShutdown = false;
+guestStopClass.initComponent.call(fakeStop);
+assert.equal(fieldConfig.hidden, false, 'Sys.Modify users retain the native checkbox in HA');
+assert.equal(fieldConfig.disabled, true, 'HA always disables shutdown override');
 console.log('Stop override requires confirmation and cancellation submits no request');
 // Active Shutdown keeps Stop reachable, including its splitbutton parent.
 const overrideEvents = {}, disabledPower = {};
@@ -846,11 +884,18 @@ context.Ext.create = (name, options) => {
 definitions['PVE.betterdocker.Config'].initComponent.call(digestPanel);
 function loadDigest(digest, capabilities = { configure: 1, power: 1 }, extra = {}) {
     digestPanel.reloadDocker();
-    digestRequests.at(-1).success({ result: { data: Object.assign({}, summaryData, {
+    const data = Object.assign({}, summaryData, {
         digest, operation: {}, capabilities, storage: { rootfs: {}, limit_mib: 0 },
         services: [{ name: 'app', image: 'busybox', ports: [], mounts: [], overridden: true,
             settings: { cpus: 1, memory: 32, swap: 0, cpuunits: 0, pids: 0, dns: [], dns_search: [], restart: 'no' } }],
-    }, extra) } });
+    }, extra);
+    // A forced refresh after an edit may wait behind an earlier status fetch.
+    for (let i = 0; i < 3; i++) {
+        const pending = digestRequests.filter(request => request.url.endsWith('/management')).at(-1);
+        pending.success({ result: { data } });
+        if (digestRequests.at(-1) === pending) { return; }
+    }
+    throw new Error('management refresh did not settle');
 }
 for (const [group, key] of [['resources', 'Memory'], ['dns', 'DNS servers'], ['options', 'Restart policy'], ['resources', 'Project data disk']]) {
     loadDigest(editorDigest, undefined, key === 'Project data disk' ? { containers: [] } : {});
@@ -874,9 +919,12 @@ let networkLoads = 0, selectedNetwork;
 const networkRows = [];
 const networkSelection = { getSelection: () => selectedNetwork ? [selectedNetwork] : [],
     select(record) { selectedNetwork = record; } };
-const networkStore = { loadData(data) { networkLoads++; networkRows.splice(0, networkRows.length,
-    ...data.map(values => ({ get: key => values[key] }))); }, getRange: () => networkRows };
-const networkGridMock = { getSelectionModel: () => networkSelection, getStore: () => networkStore };
+const networkStore = memoryStore();
+networkStore.getRange = () => networkRows.slice();
+networkStore.add = data => { networkLoads++; const record = { data: { ...data }, get(key) { return this.data[key]; },
+    beginEdit() {}, endEdit() {}, set(changes) { Object.assign(this.data, changes); }, commit() {} }; networkRows.push(record); return [record]; };
+const networkGridMock = Object.assign(tableView(networkStore), { getSelectionModel: () => networkSelection,
+    setRows(data) { definitions['PVE.betterdocker.Table'].setRows.call(this, data); } });
 digestPanel.down = id => id === '#networkGrid' ? networkGridMock : null;
 loadDigest(editorDigest);
 selectedNetwork = networkRows[0];
@@ -902,21 +950,30 @@ digestEvents.beforedestroy();
 console.log('Resource, DNS, options and disk edits preserve the version from opening');
 
 const pendingProperties = definitions['PVE.betterdocker.PendingProperties'];
-const pendingLoads = [], pendingEvents = [];
-const pendingGrid = { rows: {}, rstore: { loadData(data) { pendingLoads.push(data); },
-    getRange() { return pendingLoads.at(-1); }, fireEvent(...args) { pendingEvents.push(args); } } };
+const pendingStore = memoryStore(), pendingGrid = Object.assign(tableView(pendingStore), { rows: {}, rstore: memoryStore() });
 pendingProperties.setRows.call(pendingGrid, [{ key: 'CPU limit', value: 1, pending: 'Unlimited' },
     { key: 'DNS servers', value: 'Docker default', pending: '1.1.1.1' }]);
-assert.equal(pendingLoads[0][0].pending, 'Unlimited');
-assert.equal(pendingEvents[0][0], 'load');
-assert.equal(pendingEvents[0][3], true, 'native DiffStore receives a successful load');
+assert.equal(pendingStore.getById('CPU limit').get('pending'), 'Unlimited');
+assert.notEqual(pendingGrid.rstore.getById('CPU limit').data, pendingStore.getById('CPU limit').data,
+    'native ExtJS models must not share source/display data objects');
 assert.equal(pendingGrid.rows['DNS servers'].renderer('1.1.1.1'), '1.1.1.1');
+const pendingCPU = pendingStore.getById('CPU limit');
+pendingGrid.navigation.record = pendingCPU; pendingGrid.navigation.focused = true;
+pendingProperties.setRows.call(pendingGrid, [{ key: 'CPU limit', value: 2 }, { key: 'DNS servers', value: '1.1.1.1' }]);
+assert.equal(pendingStore.getById('CPU limit'), pendingCPU, 'pending apply retains the selected record');
+assert.equal(pendingCPU.get('pending'), undefined, 'applied or reverted pending values must disappear');
+assert.equal(pendingStore.writes, 2, 'each changed visible property must emit its own record update');
+assert.equal(pendingGrid.navigation.record, pendingCPU);
+assert.equal(pendingGrid.position.y, 287);
+pendingProperties.setRows.call(pendingGrid, [{ key: 'CPU limit', value: 2 }]);
+assert.equal(pendingStore.getById('DNS servers'), undefined);
+assert.equal(pendingGrid.rows['DNS servers'], undefined, 'obsolete row definitions do not survive service changes');
 for (const [group, id] of [['resources', 'resourceGrid'], ['dns', 'dnsGrid'], ['options', 'optionGrid']]) {
     const card = digestPanel.items.find(item => item.itemId === group);
     assert.equal(card.items[0].xtype, 'pveBetterDockerPendingProperties');
     assert.equal(card.tbar.find(button => button.itemId === id + 'Revert').xtype, 'pvePendingRevertButton');
 }
-console.log('Native pending model, DiffStore updates and Revert controls on all settings pages passed');
+console.log('Native pending model, stable record updates and Revert controls on all settings pages passed');
 
 let protectionRequest;
 context.Proxmox.Utils.API2Request = options => { protectionRequest = options; };
@@ -1022,12 +1079,12 @@ context.Proxmox.Utils.API2Request = options => { guestActionRequest = options; }
 context.Ext.create = (name, options) => { guestActionWindow = { name, options }; return {}; };
 commandMenu.items.find(item => item.itemId === 'migrate').handler();
 assert(guestActionRequest.url.endsWith('/management'), 'context action must load capabilities and digest');
-guestActionRequest.success({ result: { data: { status: 'stopped', name: 'other', digest: 'current-version', capabilities: { configure: 1 } } } });
+guestActionRequest.success({ result: { data: { status: 'stopped', name: 'other', digest: 'current-version', capabilities: { configure: 1, migrate: 1 } } } });
 assert.equal(guestActionWindow.name, 'PVE.betterdocker.Migrate');
 assert.equal(guestActionWindow.options.projectId, 'c'.repeat(32));
 assert.equal(guestActionWindow.options.digest, 'current-version');
 guestActionWindow = undefined;
-guestActionRequest.success({ result: { data: { status: 'running', capabilities: { configure: 1 } } } });
+guestActionRequest.success({ result: { data: { status: 'running', capabilities: { configure: 1, migrate: 1 } } } });
 assert.equal(guestActionWindow, undefined, 'a running guest cannot open stopped migration');
 console.log('Context guest actions load current capabilities, state and configuration digest');
 
@@ -1035,6 +1092,8 @@ for (const clone of [false, true]) {
     const restoreEditor = { callParent, projectId: clone ? 'a'.repeat(32) : undefined, nodename: 'pve', vmid: 100 };
     definitions['PVE.betterdocker.StateRestore'].initComponent.call(restoreEditor);
     assert.equal(restoreEditor.showTaskViewer, !clone, 'restore shows logs; clone closes quietly like LXC');
+    assert.equal(restoreEditor.title, clone ? 'Clone DCT 100' : 'Restore: DCT');
+    assert.equal(restoreEditor.submitText, clone ? 'Clone' : 'Restore');
     assert.equal(typeof restoreEditor.apiCallDone, clone ? 'function' : 'undefined');
 }
 assert.equal(definitions['PVE.betterdocker.Migrate'].showTaskViewer, true);
@@ -1106,3 +1165,305 @@ assert(restoredFields.filter(item => item.name !== 'firewall').every(item => ite
 assert(!restoredFields.find(item => item.name === 'firewall').disabled);
 assert.deepEqual(JSON.parse(JSON.stringify(restoredEditor.items[0].onGetValues({ firewall:1, mtu:1400 }))), { firewall:1 });
 console.log('Restored endpoints expose only their supported firewall edit');
+
+// Stable rows must survive changed values, not merely identical polling responses.
+const stableStore = memoryStore(), stableGrid = tableView(stableStore), table = definitions['PVE.betterdocker.Table'];
+table.setRows.call(stableGrid, [{ id: 'net0', value: 1400 }, { id: 'net1', value: 1500 }]);
+const selectedStable = stableStore.getById('net0');
+stableGrid.navigation.record = selectedStable; stableGrid.navigation.focused = true;
+table.setRows.call(stableGrid, [{ id: 'net0', value: 1401 }, { id: 'net1', value: 1500 }]);
+assert.equal(stableStore.getById('net0'), selectedStable);
+assert.equal(selectedStable.get('value'), 1401);
+assert.equal(stableStore.writes, 1, 'only the changed record is written');
+assert.equal(stableStore.additions, 2, 'changed values must not recreate records');
+assert.equal(stableGrid.navigation.record, selectedStable);
+assert.deepEqual(stableGrid.position, { x: 41, y: 287 });
+assert.equal(stableGrid.column.width, 231);
+const focusedRestores = stableGrid.navigation.restores;
+stableGrid.navigation.focused = false;
+table.setRows.call(stableGrid, [{ id: 'net0', value: 1402 }, { id: 'net1', value: 1500 }]);
+assert.equal(stableGrid.navigation.restores, focusedRestores, 'polling cannot steal editor focus');
+table.setRows.call(stableGrid, [{ id: 'net1', value: 1501 }, { id: 'net2', value: 1600 }]);
+assert.equal(stableStore.getById('net0'), undefined);
+assert.equal(stableStore.records.length, 2);
+assert.equal(stableStore.getById('net1').get('value'), 1501);
+assert.equal(table.stateful, true);
+assert.equal(table.viewConfig.loadMask, false);
+assert.equal(table.viewConfig.preserveScrollOnRefresh, true);
+
+const missingMetrics = { ...summaryData, metrics: {} };
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, missingMetrics);
+assert.equal(summaryFields['#cpuValue'].text, 'Unavailable');
+assert.equal(summaryFields['#memoryValue'].text, 'Unavailable');
+assert.equal(summaryBars['#cpuValue'], false);
+assert.equal(summaryBars['#memoryValue'], false);
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, { ...summaryData,
+    metrics: { ...summaryData.metrics, mem: 0, cpu: 0, disk: 0, swap: 0 } });
+assert.equal(summaryFields['#cpuValue'].text, '0% of 1 CPU(s)');
+assert.equal(summaryFields['#memoryValue'].text, '0 / 512');
+assert.equal(summaryBars['#cpuValue'], true);
+
+// A late response from an old card must not mask the newly active native view.
+const scopedEvents = {}, scopedRequests = [], scopedMasks = [], scopedTimers = new Map();
+let timerId = 100, activeCard = { itemId: 'network', isVisible: () => true };
+context.setInterval = handler => { scopedTimers.set(++timerId, handler); return timerId; };
+context.clearInterval = id => scopedTimers.delete(id);
+context.Proxmox.Utils.API2Request = options => scopedRequests.push(options);
+context.Proxmox.Utils.setErrorMask = (view, value) => scopedMasks.push([view, value]);
+const scopedPanel = { pveSelNode: configPanel.pveSelNode, callParent, query: () => [], down: () => null,
+    getLayout: () => ({ getActiveItem: () => activeCard }), isVisible: () => true,
+    on(event, handler) { scopedEvents[event] = handler; } };
+definitions['PVE.betterdocker.Config'].initComponent.call(scopedPanel);
+scopedEvents.afterrender();
+const oldCard = activeCard;
+oldCard.destroyed = true; activeCard = { itemId: 'backup', isVisible: () => true };
+scopedRequests[0].failure({ htmlStatus: 'old request error' });
+assert.equal(scopedMasks.length, 0);
+scopedPanel.reloadDocker();
+scopedRequests[1].failure({ htmlStatus: 'management error' });
+assert.equal(scopedMasks.length, 0, 'management must not own a native Backup error mask');
+activeCard = { itemId: 'network', isVisible: () => true };
+scopedPanel.reloadDocker(); scopedRequests[2].failure({ htmlStatus: 'network management error' });
+assert.equal(scopedMasks.at(-1)[0], activeCard);
+assert.equal(scopedMasks.at(-1)[1], 'network management error');
+scopedPanel.reloadDocker(); scopedPanel.reloadDocker();
+const lastStarted = scopedRequests.length;
+scopedRequests.at(-1).success({ result: { data: summaryData } });
+assert.equal(scopedMasks.at(-1)[1], false);
+assert.equal(scopedRequests.length, lastStarted + 1, 'task completion queues one fresh fetch behind an outstanding request');
+assert.equal(scopedTimers.size, 1);
+scopedEvents.hide(); assert.equal(scopedTimers.size, 0);
+scopedEvents.show(); assert.equal(scopedTimers.size, 1);
+scopedPanel.destroyed = true; scopedEvents.beforedestroy();
+scopedRequests.at(-1).success({ result: { data: summaryData } });
+assert.equal(scopedTimers.size, 0, 'destroyed guests cannot restart polling');
+console.log('Changed rows, cell focus, scroll, column settings, missing measurements and scoped refresh lifecycle passed');
+
+// The first numeric sample must update both native label and bar. Showing a
+// previously hidden bar after updateValue would leave it at the default zero.
+const firstSampleWidgets = {};
+const firstSampleSummary = { down(id) {
+    if (id === '#statusPanel') { return { setTitle() {} }; }
+    return firstSampleWidgets[id] ||= { bar: false, progress: null, setPrintBar(value) { this.bar = value; },
+        updateValue(text, usage) { this.text = text; if (this.bar) { this.progress = usage; } } };
+} };
+definitions['PVE.betterdocker.Summary'].updateSnapshot.call(firstSampleSummary, summaryData);
+assert.equal(firstSampleWidgets['#cpuValue'].progress, 0.25);
+assert.equal(firstSampleWidgets['#memoryValue'].progress, 0.25);
+
+const delayedLogEvents = {}, delayedLogRequests = [], delayedControls = {}, delayedLogTimers = new Map();
+context.setInterval = handler => { delayedLogTimers.set(++timerId, handler); return timerId; };
+context.clearInterval = id => delayedLogTimers.delete(id);
+context.Proxmox.Utils.API2Request = options => delayedLogRequests.push(options);
+const delayedLogs = { apiUrl: '/nodes/pve/docker/project', callParent, isVisible: () => true,
+    down: id => delayedControls[id], on(event, callback) { delayedLogEvents[event] = callback; } };
+definitions['PVE.betterdocker.Logs'].initComponent.call(delayedLogs);
+for (const spec of [...delayedLogs.tbar, ...delayedLogs.bbar, ...delayedLogs.items]) {
+    if (!spec.itemId) { continue; }
+    const store = memoryStore();
+    delayedControls['#' + spec.itemId] = { value: spec.value ?? spec.checked ?? '', getStore: () => store,
+        getValue() { return this.value; }, setValue(value) { this.value = value; } };
+}
+delayedLogEvents.afterrender();
+const oldLogRequest = delayedLogRequests.find(request => request.url.endsWith('/logs'));
+delayedControls['#logService'].setValue('sidecar'); delayedLogs.reloadLogs();
+oldLogRequest.success({ result: { data: 'old app output' } });
+assert.equal(delayedControls['#logOutput'].getValue(), '', 'an old filter response must not appear as sidecar output');
+const currentLogRequest = delayedLogRequests.filter(request => request.url.endsWith('/logs')).at(-1);
+assert.equal(currentLogRequest.params.service, 'sidecar');
+currentLogRequest.success({ result: { data: 'current sidecar output' } });
+assert.equal(delayedControls['#logOutput'].getValue(), 'current sidecar output');
+assert.equal(delayedLogTimers.size, 1);
+delayedLogEvents.deactivate(); assert.equal(delayedLogTimers.size, 0);
+delayedLogEvents.activate(); assert.equal(delayedLogTimers.size, 1);
+delayedLogs.destroyed = true; delayedLogEvents.beforedestroy();
+delayedLogRequests.filter(request => request.url.endsWith('/logs')).at(-1).success({ result: { data: 'late destroyed output' } });
+assert.equal(delayedControls['#logOutput'].getValue(), 'current sidecar output');
+assert.equal(delayedLogTimers.size, 0);
+
+function snapshotNode(data, parentNode = null) {
+    return { data: { ...data }, parentNode, childNodes: [], get(key) { return this.data[key]; },
+        beginEdit() {}, endEdit() {}, set(changes) { Object.assign(this.data, changes); }, commit() {}, expand() { this.expanded = true; },
+        cascadeBy(fn) { fn(this); this.childNodes.forEach(node => node.cascadeBy(fn)); },
+        appendChild(value) {
+            const node = value.data ? value : snapshotNode(value);
+            if (node.parentNode) { node.remove(); }
+            node.parentNode = this; this.childNodes.push(node); return node;
+        },
+        remove() { this.parentNode.childNodes.splice(this.parentNode.childNodes.indexOf(this), 1); this.parentNode = null; },
+    };
+}
+const snapshotRoot = snapshotNode({ name: '__root' }), snapshotStore = { getRange() {
+    const nodes = []; snapshotRoot.cascadeBy(node => { if (node !== snapshotRoot) { nodes.push(node); } }); return nodes;
+}, indexOf(node) { return this.getRange().indexOf(node); }, sort() {} };
+const stableSnapshots = Object.assign(tableView(snapshotStore), { apiUrl: '/nodes/pve/docker/project',
+    getRootNode: () => snapshotRoot, updateActions() {} });
+const snapshotRequests = [], snapshotValues = {}, snapshotDelays = [];
+context.Proxmox.Utils.API2Request = options => snapshotRequests.push(options);
+const snapshotController = { getView: () => stableSnapshots, getViewModel: () => ({ set(key, value) { snapshotValues[key] = value; } }),
+    load_task: { delay(value) { snapshotDelays.push(value); } } };
+const snapshotReload = definitions['PVE.betterdocker.Snapshots'].controller.reload;
+snapshotReload.call(snapshotController);
+snapshotRequests.at(-1).success({ result: { data: [{ name: 'first', description: 'before', order: 0 },
+    { name: 'current', parent: 'first', running: true, digest: 'a', order: 1 }] } });
+const selectedSnapshot = snapshotStore.getRange().find(node => node.get('name') === 'first');
+let snapshotSelection = [selectedSnapshot];
+stableSnapshots.getSelectionModel = () => ({ getSelection: () => snapshotSelection, select(records) { snapshotSelection = records; } });
+snapshotStore.sort = () => { snapshotSelection = []; };
+stableSnapshots.navigation.record = selectedSnapshot; stableSnapshots.navigation.focused = true;
+snapshotReload.call(snapshotController);
+snapshotRequests.at(-1).success({ result: { data: [{ name: 'first', description: 'after', order: 0 },
+    { name: 'current', parent: 'first', running: true, digest: 'b', order: 1 }] } });
+assert.equal(snapshotRoot.childNodes[0], selectedSnapshot);
+assert.equal(selectedSnapshot.get('description'), 'after');
+assert.equal(stableSnapshots.navigation.record, selectedSnapshot);
+assert.equal(snapshotSelection[0], selectedSnapshot, 'native tree sort pruning must not lose the selected existing node');
+assert.equal(selectedSnapshot.childNodes[0].get('name'), 'current');
+snapshotReload.call(snapshotController);
+stableSnapshots.destroyed = true;
+const delaysBeforeDestroy = snapshotDelays.length;
+snapshotRequests.at(-1).success({ result: { data: [] } });
+assert.equal(snapshotDelays.length, delaysBeforeDestroy, 'late snapshot responses cannot restart a destroyed tree timer');
+assert.equal(snapshotRoot.childNodes[0], selectedSnapshot);
+console.log('First-sample native bars, stale log filters, timer teardown and incremental snapshot nodes passed');
+
+// PVE's Config is rendered before its parent card becomes visible. Starting a
+// timer must not depend on that first visibility check succeeding.
+const preLayoutEvents = {}, preLayoutRequests = [], preLayoutTimers = new Map();
+let preLayoutVisible = false;
+context.setInterval = handler => { preLayoutTimers.set(++timerId, handler); return timerId; };
+context.clearInterval = id => preLayoutTimers.delete(id);
+context.Proxmox.Utils.API2Request = options => preLayoutRequests.push(options);
+const preLayoutPanel = { pveSelNode: configPanel.pveSelNode, callParent, query: () => [], down: () => null,
+    isVisible: () => preLayoutVisible, on(event, handler) { preLayoutEvents[event] = handler; } };
+definitions['PVE.betterdocker.Config'].initComponent.call(preLayoutPanel);
+preLayoutEvents.afterrender();
+assert.equal(preLayoutTimers.size, 1);
+assert.equal(preLayoutRequests.length, 0);
+preLayoutVisible = true; [...preLayoutTimers.values()][0]();
+assert.equal(preLayoutRequests.length, 1, 'the first visible tick must begin polling without another show event');
+preLayoutPanel.destroyed = true; preLayoutEvents.beforedestroy();
+assert.equal(preLayoutTimers.size, 0);
+console.log('Native hidden-before-layout guest polling and destruction regression passed');
+
+// A one-service selector is intentionally hidden. Its visible owner still needs
+// updates so adding another service can reveal it without reopening the card.
+const selectorStore = memoryStore(), pickerOwner = { isVisible: () => true };
+const hiddenPicker = { hidden: true, value: '', isVisible() { return !this.hidden; }, up: () => pickerOwner,
+    getStore: () => selectorStore, getValue() { return this.value; }, setValue(value) { this.value = value; },
+    setHidden(value) { this.hidden = value; } };
+const pickerRequests = [];
+context.Proxmox.Utils.API2Request = options => pickerRequests.push(options);
+const pickerPanel = { pveSelNode: configPanel.pveSelNode, callParent, on() {}, down: () => null,
+    query(selector) { return selector === '[itemId=serviceSelector]' ? [hiddenPicker] : []; } };
+definitions['PVE.betterdocker.Config'].initComponent.call(pickerPanel);
+pickerPanel.reloadDocker();
+pickerRequests.at(-1).success({ result: { data: { ...summaryData,
+    services: [summaryData.services[0], { ...summaryData.services[0], name: 'sidecar' }] } } });
+assert.equal(hiddenPicker.hidden, false);
+assert.equal(selectorStore.getRange().length, 2);
+assert.equal(hiddenPicker.value, 'app');
+console.log('Hidden service selector refreshes with its visible owner passed');
+
+// Both entry points must react to the same runtime restrictions, including
+// a failed deployment with live containers and HA-managed shutdown overrides.
+context.Proxmox.UserName = 'root@pam';
+const actionInfo = { id: 'docker/' + 'd'.repeat(32), node: 'pve', vmid: 120, name: 'actions', status: 'stopped' };
+const actionRights = { power: 1, console: 1, clone: 1, migrate: 1, template: 1, remove: 1, ha: 1 };
+let actionRequest;
+context.Proxmox.Utils.API2Request = options => { actionRequest = options; };
+const makeActionMenu = info => {
+    const menu = { pveSelNode: { data: info }, callParent() {},
+        down(id) { return this.items.find(item => '#' + item.itemId === id); },
+        getComponent(id) { return this.items.find(item => item.itemId === id); } };
+    menu.callParent = function () { this.items.forEach(item => {
+        item.setDisabled = value => { item.disabled = value; };
+        item.setHidden = value => { item.hidden = value; };
+        item.setTooltip = value => { item.tooltip = value; };
+    }); };
+    definitions['PVE.betterdocker.CmdMenu'].initComponent.call(menu);
+    return menu;
+};
+const actionMenu = makeActionMenu(actionInfo);
+const capabilityResponse = actionRequest;
+const actionEvents = {}, actionButtons = {};
+const actionPanel = { pveSelNode: { data: actionInfo }, callParent() {
+        const more = this.tbar.find(item => item.text === 'More');
+        this.tbar.concat(this.tbar.find(item => item.itemId === 'stopButton').menu, more.menu).filter(item => item && typeof item === 'object').forEach(item => {
+            item.setDisabled = value => { item.disabled = value; };
+            item.setHidden = value => { item.hidden = value; };
+            item.setTooltip = value => { item.tooltip = value; };
+            item.setText = value => { item.text = value; };
+            item.loadTags = value => { item.tags = value; };
+            if (item.itemId) actionButtons[item.itemId] = item;
+        });
+    }, on(event, callback) { actionEvents[event] = callback; }, down(id) { return actionButtons[id.slice(1)]; },
+    query(selector) { return selector === '[bdWrite=true]' ? this.tbar.find(item => item.text === 'More').menu.concat([actionButtons.migrateButton]) : []; } };
+definitions['PVE.betterdocker.Config'].initComponent.call(actionPanel);
+const applyActions = changes => {
+    const state = { status: 'stopped', containers: [], services: [], capabilities: actionRights, ...changes };
+    capabilityResponse.success({ result: { data: state } });
+    actionEvents.afterrender();
+    actionRequest.success({ result: { data: state } });
+    for (const [id, action] of Object.entries({ startButton: 'start', restartButton: 'reboot', forceStopButton: 'force-stop', consoleButton: 'console', migrateButton: 'migrate' })) {
+        assert.equal(Boolean(actionButtons[id].disabled), Boolean(actionMenu.down('#' + action).disabled), action + ': toolbar/context disabled parity');
+        assert.equal(Boolean(actionButtons[id].hidden), Boolean(actionMenu.down('#' + action).hidden), action + ': toolbar/context hidden parity');
+    }
+};
+applyActions({ status: 'error', active_containers: 1 });
+assert.equal(actionMenu.down('#shutdown').disabled, false, 'failed deployment can still have live instances');
+assert.equal(actionMenu.down('#migrate').disabled, true);
+applyActions({ ipv4mode: 'dhcp' });
+assert.equal(actionMenu.down('#migrate').disabled, true);
+assert(actionMenu.down('#migrate').tooltip.includes('static IPv4'));
+applyActions({ has_snapshots: true });
+assert.equal(actionMenu.down('#migrate').disabled, true);
+assert(actionMenu.down('#migrate').tooltip.includes('snapshot history'));
+applyActions({ protection: 1 });
+assert.equal(actionButtons.removeButton.disabled, true);
+assert.equal(actionMenu.down('#template').disabled, true);
+applyActions({ pending_network: { mtu: 1400 } });
+assert.equal(actionMenu.down('#migrate').disabled, true);
+assert(actionMenu.down('#migrate').tooltip.includes('pending network'));
+applyActions({ pending_settings: true });
+assert.equal(actionMenu.down('#template').disabled, true);
+applyActions({ template: true });
+assert.equal(actionButtons.startButton.hidden, true);
+assert.equal(actionButtons.consoleButton.hidden, true);
+const templateMenu = makeActionMenu({ ...actionInfo, template: 1 });
+assert.deepEqual(Array.from(templateMenu.items, item => item.itemId), ['migrate', 'clone']);
+applyActions({ status: 'running', ha: { managed: 1 }, operation: { active: true, action: 'shutdown' }, capabilities: { ...actionRights, overrule_shutdown: 1 } });
+assert.equal(actionMenu.down('#force-stop').disabled, true, 'HA cannot overrule shutdown');
+applyActions({ capabilities: { power: 1, console: 1 } });
+assert.equal(actionMenu.down('#clone').hidden, true);
+assert.equal(actionMenu.down('#actionsSeparator').hidden, true);
+assert.equal(actionButtons.migrateButton.hidden, true);
+applyActions({ replication: true });
+assert.equal(actionButtons.removeButton.disabled, true);
+assert(actionButtons.removeButton.tooltip.includes('replication'));
+applyActions({});
+let confirmation;
+context.Ext.Msg.confirm = (title, message, callback) => { confirmation = { title, message, callback }; };
+actionPanel.tbar.find(item => item.text === 'More').menu.find(item => item.bdScope === 'template').handler();
+assert.equal(confirmation.message, 'DCT 120 (actions) - Convert to template');
+const beforeTemplate = actionRequest;
+confirmation.callback('no');
+assert.equal(actionRequest, beforeTemplate);
+const originalIdentifier = context.PVE.Utils.getFormattedGuestIdentifier;
+context.PVE.Utils.getFormattedGuestIdentifier = (vmid, name) => `${name} (${vmid})`;
+actionMenu.down('#shutdown').handler(); // stopped: ignored without opening a dialog
+applyActions({ status: 'running' });
+actionMenu.down('#shutdown').handler();
+assert.equal(confirmation.message, 'DCT actions (120) - Shutdown', 'honor native tree identifier preference');
+context.PVE.Utils.getFormattedGuestIdentifier = originalIdentifier;
+actionEvents.beforedestroy();
+console.log('Shared toolbar/context rules, native template menu, HA/replication/protection/pending restrictions and confirmation identifiers passed');
+
+const titledClone = { callParent, projectId: 'a'.repeat(32), nodename: 'pve', vmid: 120, guestname: 'actions', isTemplate: true };
+definitions['PVE.betterdocker.StateRestore'].initComponent.call(titledClone);
+assert.equal(titledClone.title, 'Clone DCT Template 120 (actions)');
+const titledMigrate = { callParent, nodename: 'pve', vmid: 120, vmname: 'actions', projectId: 'a'.repeat(32), down() { return { on() {} }; } };
+definitions['PVE.betterdocker.Migrate'].initComponent.call(titledMigrate);
+assert.equal(titledMigrate.title, 'Migrate DCT 120 (actions)');
+assert.equal(titledMigrate.submitText, 'Migrate');
+console.log('Clone and migration titles retain VMID, guest name and template context');

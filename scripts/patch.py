@@ -43,13 +43,13 @@ VZDUMP_PBS = """# BEGIN BETTERDOCKER
 # END BETTERDOCKER
 """
 UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.61" />
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.75" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker-locales/en.js?v=19.61"></script>
-<script src="/pve2/js/betterdocker-locales/pl.js?v=19.61"></script>
-<script src="/pve2/js/betterdocker.js?v=19.61"></script>
+<script src="/pve2/js/betterdocker-locales/en.js?v=19.75"></script>
+<script src="/pve2/js/betterdocker-locales/pl.js?v=19.75"></script>
+<script src="/pve2/js/betterdocker.js?v=19.75"></script>
 <!-- END BETTERDOCKER -->'''
 
 

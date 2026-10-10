@@ -5,6 +5,18 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "DCT migration requires a static IPv4 address.": "Migracja DCT wymaga statycznego adresu IPv4.",
+            "DCT migration with snapshot history is not supported.": "Migracja DCT z historią migawek nie jest obsługiwana.",
+            "Apply or revert pending network changes before migrating the DCT.": "Zastosuj lub wycofaj oczekujące zmiany sieci przed migracją DCT.",
+            "Stop the DCT before migration.": "Zatrzymaj DCT przed migracją.",
+            "Remove the DCT from HA before converting it to a template.": "Usuń DCT z HA przed konwersją na szablon.",
+            "Apply or revert pending settings before converting the DCT to a template.": "Zastosuj lub wycofaj oczekujące ustawienia przed konwersją DCT na szablon.",
+            "Stop the DCT before converting it to a template.": "Zatrzymaj DCT przed konwersją na szablon.",
+            "Remove the DCT from HA before deleting it.": "Usuń DCT z HA przed usunięciem.",
+            "Remove replication jobs and their state disk before deleting the DCT.": "Usuń zadania replikacji i ich dysk stanu przed usunięciem DCT.",
+            "Stop the DCT before removal.": "Zatrzymaj DCT przed usunięciem.",
+            "Protection mode enabled": "Ochrona jest włączona",
+
             "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.": "Po przywróceniu DCT można zmieniać tylko zaporę. Wdróż ponownie, aby zmienić adres lub interfejs sieciowy.",
             'Replication': 'Replikacja',
             "Docker Volumes": "Wolumeny Docker",
@@ -15,7 +27,6 @@
             "Start/Shutdown order": "Kolejność uruchamiania/zamykania",
 
             "Volumes, bind mounts and deployment files are retained.": "Wolumeny, bind mounty i pliki wdrożenia są zachowywane.",
-            "Open in separate window": "Otwórz w osobnym oknie",
             "Could not read file": "Nie można odczytać pliku",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limity dotyczą każdego kontenera. Przywróć Compose usuwa ustawienia GUI. Limit CPU, pamięci lub PID równy 0 oznacza brak limitu; przy limicie pamięci swap 0 wyłącza swap, a -1 oznacza brak limitu.",
             "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.": "Zmiany sieci zapisane podczas pracy zostaną zastosowane przy następnym pełnym uruchomieniu lub restarcie DCT. Publikowane porty używają tego adresu; routing i ruch wychodzący korzystają z sieci hosta.",
@@ -23,7 +34,6 @@
             "Stop services before creating or enlarging the disk. Original data is kept. A mount failure can prevent Docker from starting on the node.": "Zatrzymaj usługi przed utworzeniem lub powiększeniem dysku. Oryginalne dane są zachowywane. Błąd montowania może uniemożliwić uruchomienie Dockera na węźle.",
             "Full copies of configuration, container filesystems and owned data. Services are frozen during capture. RAM, logs and external or shared writable mounts are excluded. Rollback leaves DCT stopped.": "Pełne kopie konfiguracji, systemów plików kontenerów i własnych danych. Usługi są zamrażane na czas kopiowania. Bez RAM, logów oraz zewnętrznych lub współdzielonych zapisywalnych montowań. Po przywróceniu DCT pozostaje zatrzymany.",
             "Persistent data and deployment files are retained.": "Dane trwałe i pliki wdrożenia są zachowywane.",
-            "Remove Snapshot": "Usuń migawkę",
             "HA State": "Stan HA",
             "Manage HA": "Zarządzaj HA",
             "Snapshots": "Migawki",
