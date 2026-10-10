@@ -460,7 +460,12 @@
     PVE.tree.ResourceTree.typeDefaults.docker = { iconCls: 'fa bd-docker-icon', text: translate('Docker') };
     const originalIcon = PVE.Utils.get_object_icon_class;
     PVE.Utils.get_object_icon_class = function (type, record) {
-        if (type === 'docker') { return 'fa bd-docker-icon ' + (['running', 'stopped'].includes(record.status) ? record.status : 'unknown'); }
+        if (type === 'docker') {
+            if (record.template) {
+                return originalIcon.call(this, 'lxc', record).replace(/\blxc\b/g, 'bd-docker-template-icon');
+            }
+            return 'fa bd-docker-icon ' + (['running', 'stopped'].includes(record.status) ? record.status : 'unknown');
+        }
         const icon = originalIcon.apply(this, arguments);
         // Existing LXC guests from the first release remain manageable as LXC.
         return record && record.type === 'lxc' && String(record.tags || '').split(';').includes('betterdocker') &&
