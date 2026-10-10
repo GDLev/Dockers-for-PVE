@@ -43,13 +43,13 @@ def main():
                     'bridge':'vmbr0','ipv4mode':'static','cidr':'192.0.2.216/20'}
         vmid=api('get','/cluster/nextid')
         path=Path('/root/'+state['name']+'.json');path.write_text(json.dumps(deployment));path.chmod(0o600)
-        try:remote('pve1',['dct','create',str(vmid),'--node','pve3','--file',str(path),'--pool',state['pool']])
+        try:remote('pve1',['dct','create',str(vmid),str(path),'--node','pve3','--pool',state['pool']])
         finally:path.unlink()
         assert api('get',base()+'/management')['status']=='stopped'
         print('PASS CLI creation leaves guest stopped',flush=True)
     guest=info();vmid=guest['vmid'];state['vmid']=vmid;state['id']=guest['id'];save()
     remote('pve1',['dct','stop',str(vmid)])
-    assert json.loads(remote('pve1',['dct','status',str(vmid)]).stdout)['status']=='stopped'
+    assert json.loads(remote('pve1',['dct','status',str(vmid),'--output-format','json']).stdout)['status']=='stopped'
     print('PASS CLI resolves guest on remote node',flush=True)
     state['role']='Native'+state['name'][-8:];state['user']=state['name']+'@pve';save()
     if not any(i['userid']==state['user'] for i in api('get','/access/users')):

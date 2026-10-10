@@ -114,7 +114,7 @@ case "$ACTION" in
         fi
         python3 "$PROJECT_DIR/scripts/patch.py" remove
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
-        rm -f /usr/sbin/dct /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
+        rm -f /usr/sbin/dct /usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
             /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg \
             /usr/share/pve-manager/js/betterdocker-locales/en.js /usr/share/pve-manager/js/betterdocker-locales/pl.js \
             /usr/share/perl5/PVE/BetterDocker/Backup.pm /usr/share/perl5/PVE/BetterDocker/Firewall.pm /usr/share/perl5/PVE/BetterDocker/Replication.pm /usr/share/perl5/PVE/VZDump/Docker.pm /usr/share/perl5/PVE/HA/Resources/Docker.pm
@@ -204,6 +204,7 @@ done
 for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     TARGETS+=("/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")")
 done
+TARGETS+=(/usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py)
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
         cp -a "${TARGETS[$index]}" "$BACKUP_DIR/addon-$index"
@@ -260,7 +261,10 @@ for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     install -m 0644 "$source" "/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")"
 done
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
-install -m 0755 "$PROJECT_DIR/scripts/dct.py" "${TARGETS[37]}"
+install -d -m 0755 /usr/share/perl5/PVE/CLI
+install -m 0644 "$PROJECT_DIR/backend/PVE/CLI/dct.pm" /usr/share/perl5/PVE/CLI/dct.pm
+install -m 0755 "$PROJECT_DIR/scripts/dct.py" /usr/local/lib/betterdocker/dct.py
+install -m 0755 "$PROJECT_DIR/scripts/dct" "${TARGETS[37]}"
 install -m 0755 "$PROJECT_DIR/scripts/runtime.py" "${TARGETS[38]}"
 install -m 0755 "$PROJECT_DIR/scripts/runtime_install.py" "${TARGETS[39]}"
 install -m 0755 "$PROJECT_DIR/scripts/host.py" "${TARGETS[40]}"
@@ -336,6 +340,7 @@ systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
+perl -I/usr/share/perl5 -MPVE::CLI::dct -e 'PVE::CLI::dct->validate_method_schemas(1)'
 finish_services
 systemctl is-active --quiet pvedaemon pveproxy
 NODE=$(hostname -s)

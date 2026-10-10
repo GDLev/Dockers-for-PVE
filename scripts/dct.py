@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Manage DCT guests through the installed PVE API. Run as root on a PVE node."""
-import argparse
+"""Operations behind the native PVE dct command handler."""
 import json
+import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+
+CONFIG_KEYS = ('description', 'tags', 'protection', 'onboot', 'startup', 'hookscript', 'delete')
+RESOURCE_KEYS = {'cpulimit': 'cpus', 'cpuunits': 'cpuunits', 'memory': 'memory', 'swap': 'swap',
+                 'pids': 'pids', 'nameserver': 'dns', 'searchdomain': 'dns_search', 'restart-policy': 'restart'}
 
 
 def api(method, path, **params):
@@ -16,7 +21,19 @@ def api(method, path, **params):
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE)
     if result.returncode:
         raise RuntimeError('PVE API request failed')
-    return json.loads(result.stdout) if result.stdout.strip() else None
+    lines = result.stdout.splitlines()
+    if not lines:
+        return None
+    # Local pvesh workers can write task logs before their JSON response.
+    for index in range(len(lines) - 1, -1, -1):
+        try:
+            value = json.loads(lines[index])
+        except json.JSONDecodeError:
+            continue
+        if index:
+            print('\n'.join(lines[:index]))
+        return value
+    raise RuntimeError('PVE API returned no JSON response')
 
 
 def guest(vmid):
@@ -49,65 +66,245 @@ def wait_task(upid):
         time.sleep(1)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--no-wait', action='store_true', help='print the task UPID without waiting')
-    commands = parser.add_subparsers(dest='command', required=True)
-    commands.add_parser('list', help='list DCTs across the cluster')
-    create = commands.add_parser('create', help='create from a deployment JSON file')
-    create.add_argument('vmid', type=int); create.add_argument('--node', required=True)
-    create.add_argument('--file', required=True); create.add_argument('--pool'); create.add_argument('--start', action='store_true')
-    for name in ('status', 'config', 'pending', 'network', 'snapshots', 'start', 'shutdown', 'stop', 'reboot', 'destroy', 'migrate', 'clone', 'snapshot', 'rollback', 'set'):
-        cmd = commands.add_parser(name)
-        cmd.add_argument('vmid', type=int)
-        if name in ('shutdown', 'reboot'): cmd.add_argument('--timeout', type=int, default=60)
-        if name == 'destroy': cmd.add_argument('--confirm', type=int, required=True, help='repeat the guest ID')
-        if name == 'migrate': cmd.add_argument('target'); cmd.add_argument('--storage')
-        if name == 'clone':
-            cmd.add_argument('newid', type=int); cmd.add_argument('--file', required=True, help='destination deployment JSON'); cmd.add_argument('--pool')
-        if name in ('snapshot', 'rollback'): cmd.add_argument('name')
-        if name == 'set': cmd.add_argument('--file', required=True, help='configuration changes as JSON')
-    task = commands.add_parser('task', help='inspect or stop a PVE task')
-    task.add_argument('action', choices=['status', 'log', 'wait', 'stop']); task.add_argument('upid')
-    args = parser.parse_args(argv)
-    def read_json(path):
-        with open(path) as stream: value = json.load(stream)
-        if not isinstance(value, dict): raise ValueError('The JSON file must contain an object')
-        return value
-    if args.command == 'list':
-        result = [i for i in api('get', '/cluster/resources', type='vm') if i['type'] == 'docker']
-    elif args.command == 'task':
-        base = task_path(args.upid)
-        if args.action == 'wait': result = wait_task(args.upid)
-        elif args.action == 'stop': result = api('delete', base)
-        else: result = api('get', base + '/' + args.action)
-    elif args.command == 'create':
-        data = read_json(args.file); data['vmid'] = args.vmid
-        result = api('create', '/nodes/' + args.node + '/docker', deployment=data, pool=args.pool, start=int(args.start))
-    else:
-        base = guest(args.vmid)
-        reads = {'status': 'management', 'config': 'config', 'pending': 'pending', 'network': 'network', 'snapshots': 'snapshots'}
-        if args.command in reads:
-            result = api('get', base + '/' + reads[args.command])
-        elif args.command in ('start', 'shutdown', 'stop', 'reboot'):
-            result = api('create', base + '/action', action='force-stop' if args.command == 'stop' else args.command,
-                         timeout=getattr(args, 'timeout', None))
-        else:
-            digest = api('get', base + '/management')['digest']
-            if args.command == 'destroy':
-                if args.confirm != args.vmid: raise ValueError('--confirm must match the guest ID')
-                result = api('delete', base)
-            elif args.command == 'migrate':
-                result = api('create', base + '/migrate', target=args.target, storage=args.storage, digest=digest)
-            elif args.command == 'clone':
-                result = api('create', base + '/clone', newid=args.newid, deployment=read_json(args.file), pool=args.pool, digest=digest)
-            elif args.command in ('snapshot', 'rollback'):
-                result = api('create', base + '/snapshot', action='create' if args.command == 'snapshot' else 'restore', snapname=args.name)
-            else:
-                result = api('set', base + '/config', **dict(read_json(args.file), digest=digest))
-    print(json.dumps(result, indent=2))
-    if isinstance(result, str) and result.startswith('UPID:') and not args.no_wait:
+def finish_task(result, params):
+    if isinstance(result, str) and result.startswith('UPID:'):
         wait_task(result)
+
+
+def net0(value):
+    values = {}
+    for part in value.split(','):
+        key, separator, setting = part.partition('=')
+        if not separator or key in values:
+            raise ValueError('Use net0 key=value pairs without duplicate keys')
+        values[key] = setting
+    unknown = set(values) - {'name', 'bridge', 'ip', 'hwaddr', 'mtu', 'firewall'}
+    if unknown:
+        raise ValueError('Unsupported DCT net0 option: ' + ', '.join(sorted(unknown)))
+    if values.get('name', 'eth0') != 'eth0':
+        raise ValueError('DCT supports only the net0 endpoint')
+    result = {key: values[key] for key in ('bridge', 'hwaddr') if key in values}
+    if 'ip' in values:
+        result.update(ipv4mode='dhcp' if values['ip'] == 'dhcp' else 'static',
+                      cidr='' if values['ip'] == 'dhcp' else values['ip'])
+    for key in ('mtu', 'firewall'):
+        if key in values:
+            result[key] = int(values[key])
+    return result
+
+
+def format_net0(info):
+    values = {'bridge': info['bridge'], 'ip': 'dhcp' if info.get('ipv4mode') == 'dhcp' else info.get('cidr', info.get('address', ''))}
+    values.update({key: info[key] for key in ('hwaddr', 'mtu', 'firewall') if key in info})
+    return ','.join(f'{key}={value}' for key, value in values.items())
+
+
+def output(value, params):
+    if params.get('output-format', 'text') != 'text':
+        print(json.dumps(value, indent=2 if params['output-format'] == 'json-pretty' else None))
+        return
+    if isinstance(value, dict):
+        for key, item in sorted(value.items()):
+            if item is not None:
+                print(f'{key}: {json.dumps(item) if isinstance(item, (dict, list)) else item}')
+    else:
+        print(value)
+
+
+def table(rows, columns):
+    rendered = [[str(row.get(key, '')) for key, _ in columns] for row in rows]
+    headers = [title for _, title in columns]
+    widths = [max([len(headers[i]), *(len(row[i]) for row in rendered)]) for i in range(len(columns))]
+    for row in [headers, *rendered]:
+        print(' '.join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+
+
+def service(info, name=None):
+    services = info.get('services', [])
+    matches = [entry for entry in services if not name or entry['name'] == name]
+    if len(matches) != 1:
+        raise ValueError('Choose a Compose service with --service' if not name else f'Service {name} not found')
+    return matches[0]
+
+
+def configuration(base, info, params):
+    value = api('get', base + '/config')
+    value.pop('digest', None)
+    value['hostname'] = info['name']
+    network = api('get', base + '/network')
+    if not params.get('current'):
+        network.update(network.get('pending', {}))
+    value['net0'] = format_net0(network)
+    services = [service(info, params['service'])] if params.get('service') else info.get('services', [])
+    for entry in services:
+        settings = dict(entry['settings'])
+        if not params.get('current'):
+            settings.update(entry.get('pending', {}))
+        prefix = '' if len(services) == 1 else entry['name'] + '.'
+        for native, key in RESOURCE_KEYS.items():
+            item = settings.get(key)
+            if isinstance(item, list):
+                item = ' '.join(item)
+            if item is not None:
+                value[prefix + native] = item
+    storage = info.get('storage', {})
+    if storage.get('volid'):
+        value['data-disk'] = storage['volid']
+    return value
+
+
+def create(params):
+    source = Path(params['source'])
+    if source.is_file():
+        content = source.read_text()
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict) or 'mode' not in data:
+            data = {'mode': 'compose', 'compose': content}
+    else:
+        if params['source'].endswith(('.yaml', '.yml', '.json')):
+            raise ValueError('Deployment file does not exist')
+        data = {'mode': 'image', 'image': params['source'], 'ports': params.get('ports', '').replace(',', '\n')}
+    data.update(vmid=params['vmid'], name=params.get('hostname') or data.get('name') or f'dct-{params["vmid"]}')
+    if params.get('net0'):
+        data.update(net0(params['net0']))
+    if params.get('env-file'):
+        data['environment'] = Path(params['env-file']).read_text()
+    if not data.get('bridge') or not (data.get('cidr') or data.get('ipv4mode') == 'dhcp'):
+        raise ValueError('Specify --net0 bridge=<bridge>,ip=<CIDR|dhcp>')
+    node = params.get('node') or os.uname().nodename.split('.')[0]
+    return api('create', '/nodes/' + node + '/docker', deployment=data, pool=params.get('pool'), start=params.get('start', 0))
+
+
+def set_options(base, info, params):
+    changes = {key: params[key] for key in CONFIG_KEYS if key in params}
+    limits = {key: params[native] for native, key in RESOURCE_KEYS.items() if native in params}
+    network = net0(params['net0']) if 'net0' in params else {}
+    if not changes and not limits and not network:
+        raise ValueError('No configuration options specified')
+    chosen = service(info, params.get('service')) if limits else None
+    if chosen:
+        values = dict(chosen['settings'])
+        values.update(chosen.get('pending', {}))
+        for key in ('dns', 'dns_search'):
+            if key in limits:
+                limits[key] = limits[key].split()
+        values.update(limits)
+    # Re-read the digest between distinct API updates in a combined set command.
+    if changes:
+        finish_task(api('set', base + '/config', **changes, digest=info['digest']), params)
+    if network:
+        digest = api('get', base + '/management')['digest']
+        finish_task(api('set', base + '/network', **network, digest=digest), params)
+    if limits:
+        digest = api('get', base + '/management')['digest']
+        finish_task(api('set', base + '/settings', service=chosen['name'], settings=values, digest=digest), params)
+
+
+def dispatch(command, params):
+    # PVE validates numeric options, but Perl can encode their scalars as strings.
+    params = dict(params)
+    for key in ('vmid', 'newid', 'memory', 'swap', 'cpuunits', 'pids', 'timeout',
+                'onboot', 'protection', 'start', 'cluster', 'current', 'verbose', 'full'):
+        if key in params:
+            params[key] = int(params[key])
+    if 'cpulimit' in params:
+        params['cpulimit'] = float(params['cpulimit'])
+    if command == 'list':
+        rows = [entry for entry in api('get', '/cluster/resources', type='vm') if entry['type'] == 'docker'
+                and (params.get('cluster') or entry['node'] == os.uname().nodename.split('.')[0])]
+        rows.sort(key=lambda entry: int(entry['vmid']))
+        if params.get('output-format', 'text') == 'text':
+            columns = [('vmid', 'VMID'), ('status', 'Status'), ('lock', 'Lock'), ('name', 'Name')]
+            if params.get('cluster'):
+                columns.append(('node', 'Node'))
+            table(rows, columns)
+        else:
+            output(rows, params)
+        return
+    if command.startswith('task-'):
+        action = command[5:]
+        base = task_path(params['upid'])
+        if action == 'wait':
+            output(wait_task(params['upid']), params)
+        elif action == 'stop':
+            api('delete', base)
+        elif action == 'log':
+            for line in api('get', base + '/log'):
+                print(line['t'])
+        else:
+            output(api('get', base + '/status'), params)
+        return
+    if command == 'create':
+        finish_task(create(params), params)
+        return
+    base = guest(params['vmid'])
+    if command in ('start', 'shutdown', 'stop', 'reboot'):
+        finish_task(api('create', base + '/action', action='force-stop' if command == 'stop' else command,
+                        timeout=params.get('timeout', 60) if command in ('shutdown', 'reboot') else None), params)
+        return
+    if command == 'destroy':
+        finish_task(api('delete', base), params)
+        return
+    if command == 'network':
+        output(api('get', base + '/network'), params)
+        return
+    if command == 'listsnapshot':
+        snapshots = api('get', base + '/snapshots')
+        if params.get('output-format', 'text') != 'text':
+            output(snapshots, params)
+        else:
+            table(snapshots, [('name', 'Name'), ('parent', 'Parent'), ('description', 'Description')])
+        return
+    if command in ('snapshot', 'delsnapshot', 'rollback'):
+        finish_task(api('create', base + '/snapshot', action={'snapshot': 'create', 'delsnapshot': 'delete', 'rollback': 'restore'}[command],
+                        snapname=params['snapname'], description=params.get('description')), params)
+        return
+    info = api('get', base + '/management')
+    if command == 'status':
+        if params.get('output-format', 'text') != 'text' or params.get('verbose'):
+            output({key: value for key, value in info.items() if key in ('vmid', 'name', 'node', 'status', 'template', 'metrics')}, params)
+        else:
+            print('status: ' + info['status'])
+    elif command == 'config':
+        output(configuration(base, info, params), params)
+    elif command == 'pending':
+        services = [service(info, params['service'])] if params.get('service') else info.get('services', [])
+        rows = []
+        for entry in services:
+            rows += [dict(row, service=entry['name']) for row in api('get', base + '/pending', service=entry['name'])]
+        network = api('get', base + '/network')
+        if network.get('pending'):
+            rows.append({'key':'net0', 'value':format_net0(network), 'pending':format_net0(dict(network, **network['pending'])), 'service':''})
+        if params.get('output-format', 'text') == 'text':
+            table(rows, [('service', 'Service'), ('key', 'Option'), ('value', 'Current'), ('pending', 'Pending')])
+        else:
+            output(rows, params)
+    elif command == 'set':
+        set_options(base, info, params)
+    elif command == 'migrate':
+        finish_task(api('create', base + '/migrate', target=params['target'], storage=params.get('target-storage'), digest=info['digest']), params)
+    elif command == 'clone':
+        destination = net0(params['net0'])
+        if 'firewall' in destination:
+            raise ValueError('Clones inherit firewall settings; omit firewall from --net0')
+        if not destination.get('cidr') and destination.get('ipv4mode') != 'dhcp':
+            raise ValueError('Specify an independent IP address or DHCP in --net0')
+        destination['name'] = params.get('hostname') or info['name'][:55] + '-clone'
+        finish_task(api('create', base + '/clone', newid=params['newid'], deployment=destination, pool=params.get('pool'),
+                        storage=params.get('storage'), digest=info['digest']), params)
+    elif command == 'template':
+        finish_task(api('create', base + '/template', digest=info['digest']), params)
+    else:
+        raise ValueError('Unknown command: ' + command)
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise ValueError('Use /usr/sbin/dct help for command syntax')
+    dispatch(sys.argv[1], json.load(sys.stdin))
 
 
 if __name__ == '__main__':

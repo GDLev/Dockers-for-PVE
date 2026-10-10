@@ -62,7 +62,7 @@ Remove DCT HA resources and replication jobs before uninstalling. Uninstallation
 
 ## CLI and API
 
-Use `dct list`, `dct status <vmid>` and `dct --help` as root on a PVE node. See [API_DOCS.md](API_DOCS.md) for HTTP requests, task handling and CLI examples.
+Use `dct list`, `dct status <vmid>` and `dct help` as root on a PVE node. See [API_DOCS.md](API_DOCS.md) for HTTP requests, task handling and CLI examples.
 
 ## Extension files
 
@@ -71,6 +71,7 @@ These paths are on the Proxmox node after installation.
 | Path | Contents |
 | --- | --- |
 | `/usr/sbin/dct` | Guest CLI using numeric DCT IDs and the PVE API. Removed on uninstall. |
+| `/usr/share/perl5/PVE/CLI/dct.pm` | Native PVE command definitions and help. Removed on uninstall. |
 | `/usr/local/lib/betterdocker/` | Deployment, networking and integration scripts, including the native hook adapter. |
 | `/usr/share/perl5/PVE/API2/BetterDocker.pm` | Extension API. |
 | `/usr/share/perl5/PVE/BetterDocker/`, `/usr/share/perl5/PVE/VZDump/Docker.pm`, `/usr/share/perl5/PVE/HA/Resources/Docker.pm` | PVE firewall, backup, replication and HA providers. |

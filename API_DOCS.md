@@ -87,12 +87,29 @@ Run `dct` as root on an extension-enabled PVE node. It resolves the numeric gues
 ```bash
 dct list
 dct status 150
-dct create 150 --node pve1 --file deployment.json
+dct create 150 deployment.json
 dct start 150
 dct shutdown 150 --timeout 60
 dct migrate 150 pve2
-dct --no-wait snapshot 150 before-update
-dct task status 'UPID:...'
+dct snapshot 150 before-update --description "Before application update"
+dct set 150 --onboot 1 --tags 'web;demo'
+dct set 150 --service web --memory 256 --cpulimit 1
+dct listsnapshot 150
+dct delsnapshot 150 before-update
+dct help
+dct help create
 ```
 
-CLI creation leaves the DCT stopped unless `--start` is supplied. Commands wait for asynchronous tasks by default and return a nonzero exit status on failure. `--no-wait` prints the UPID. Interrupting the CLI stops waiting; use `dct task stop 'UPID:...'` to request cancellation. `dct destroy 150 --confirm 150` removes the guest while retaining persistent data. `pct` does not manage DCTs.
+CLI creation leaves the DCT stopped unless `--start 1` is supplied. Commands wait for asynchronous tasks by default and return a nonzero exit status on failure. Interrupting the CLI stops waiting; use `dct task stop 'UPID:...'` to request cancellation. `dct destroy 150` removes the guest while retaining persistent data. `pct` does not manage DCTs.
+
+`dct` uses the same PVE command handler as `pct`, including `help`, positional guest IDs and boolean options such as `--onboot 1`. `list` shows the local node; `--cluster 1` shows the cluster. `status` prints `status: running` or `status: stopped`. Use `--output-format json` for scripts.
+
+The source for `create` can also be a Compose file or a Docker image:
+
+```bash
+dct create 150 compose.yaml --hostname website --net0 bridge=vmbr0,ip=192.0.2.150/24
+dct create 151 nginx:stable --hostname proxy --net0 bridge=vmbr0,ip=192.0.2.151/24 --ports 80:80
+dct clone 150 152 --hostname website-copy --net0 bridge=vmbr0,ip=192.0.2.152/24
+```
+
+Resource options apply per service instance. Omit `--service` for a single-service DCT. Multi-service DCTs require a service name when changing resources. Docker-specific runtime and networking restrictions still apply; LXC-only commands and options are not advertised by `dct help`.

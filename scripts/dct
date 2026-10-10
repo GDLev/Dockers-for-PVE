@@ -1,0 +1,7 @@
+#!/usr/bin/perl -T
+
+use strict;
+use warnings;
+use PVE::CLI::dct;
+
+PVE::CLI::dct->run_cli_handler();

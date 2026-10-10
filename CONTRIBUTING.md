@@ -8,6 +8,7 @@ Keep each change focused on one feature or fix. Include the relevant tests and s
 | --- | --- |
 | PVE API permissions and native hooks | `backend/PVE/API2/BetterDocker.pm` |
 | HTTP endpoints | `backend/PVE/API2/BetterDocker/`, grouped by feature |
+| Guest CLI | `backend/PVE/CLI/dct.pm`, `scripts/dct.py` |
 | Guest operations and command dispatch | `scripts/dctlib/projects.py` |
 | Deployments and permissions | `scripts/dctlib/deployment.py`, `policy.py` |
 | Networking, disks, settings and snapshots | Matching files in `scripts/dctlib/` |

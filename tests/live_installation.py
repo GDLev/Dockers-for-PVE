@@ -76,7 +76,7 @@ def main():
         print('PASS package removal retains workloads, firewall, pool and hook files',flush=True)
         remote('pve3','bash /root/betterdocker-stage4/start.sh install > /root/stage4-clean-install.log 2>&1')
         remote('pve3','dpkg -i /root/betterdocker-stage4.deb > /root/stage4-reinstall.log 2>&1 && dpkg-trigger --no-await /usr/share/perl5/PVE/API2/Nodes.pm && dpkg --triggers-only proxmox-betterdockers > /root/stage4-trigger.log 2>&1')
-        remote('pve3','python3 /usr/local/lib/betterdocker/patch.py status && dct status '+str(fixture['vmid'])+' > /root/stage4-cli-status.json')
+        remote('pve3','python3 /usr/local/lib/betterdocker/patch.py status && dct status '+str(fixture['vmid'])+' --output-format json > /root/stage4-cli-status.json')
         assert containers('pve3')==state['containers']['pve3']
         assert api('get',base+'/config')['hookscript']=='local:snippets/'+Path(hook).name
         assert any(i.get('vmid')==fixture['vmid'] for i in api('get','/pools',poolid=fixture['pool'])[0]['members'])
