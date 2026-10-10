@@ -28,7 +28,14 @@ my $root = { description => 'Guest privileges and deployment safety are checked 
 sub output {
     my ($args) = @_;
     my $text = '';
-    PVE::Tools::run_command([$helper, @$args], outfunc => sub { $text .= "$_[0]\n"; });
+    my $reason = '';
+    my %options = (outfunc => sub { $text .= "$_[0]\n"; });
+    $options{errfunc} = sub { $reason .= "$_[0]\n"; } if $args->[0] eq 'preview';
+    eval { PVE::Tools::run_command([$helper, @$args], %options); };
+    if (my $error = $@) {
+        die substr($1, 0, 2000) . "\n" if $args->[0] eq 'preview' && $reason =~ /BetterDocker: ([\s\S]+)/;
+        die $error;
+    }
     return $text;
 }
 
@@ -664,7 +671,9 @@ register_docker_method({
         my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
         chmod 0600, $path;
         print $fh $param->{deployment}; close $fh;
-        eval { PVE::Tools::run_command([$helper, 'validate', $path]); };
+        # Parse Compose and enforce deployment policy before reserving a guest ID.
+        # A rejected form stays open instead of creating a doomed task.
+        eval { output(['preview', $path]); };
         if (my $err = $@) { unlink $path; die $err; }
         my $rpcenv = PVE::RPCEnvironment::get();
         my $identifier = output(['new-id']); chomp $identifier;

@@ -50,6 +50,8 @@ const context = { window: null, console, gettext: value => value,
         override: (klass, override) => overrides.set(klass, override), htmlEncode: value => value },
 };
 context.window = context;
+context.Proxmox.Utils.IP4_match = { test: require('node:net').isIPv4 };
+context.Proxmox.Utils.IP6_match = { test: require('node:net').isIPv6 };
 for (const language of ['en', 'pl']) {
     vm.runInNewContext(fs.readFileSync('frontend/locales/' + language + '.js', 'utf8'), context);
 }
@@ -67,7 +69,9 @@ assert(!JSON.stringify(wizard.items).includes('pveLxc'));
 const network = wizard.items[2];
 assert.equal(network.column1.find(field => field.name === 'bridge').fieldLabel, 'Bridge');
 assert(network.column1.find(field => field.name === 'hwaddr'));
-assert(network.column1.find(field => field.name === 'mtu'));
+assert(network.advancedColumn1.find(field => field.name === 'mtu'));
+assert(!network.column1.some(field => field.name === 'mtu'));
+assert.equal(network.column2.find(field => field.name === 'address').vtype, 'IPCIDRAddress');
 const ipv4 = network.column2.find(field => field.xtype === 'radiogroup');
 assert.equal(ipv4.items.find(item => item.inputValue === 'dhcp').checked, true);
 assert.equal(network.column2.find(field => field.name === 'address').disabled, true);
@@ -116,7 +120,7 @@ context.TextEncoder = TextEncoder;
 context.location = { protocol: 'https:', host: 'pve.example:8006' };
 context.setInterval = () => 1;
 context.clearInterval = () => {};
-context.Proxmox.Utils = { format_boolean: value => value ? 'Yes' : 'No', API2Request: options => { consoleRequest = options; } };
+context.Proxmox.Utils = { ...context.Proxmox.Utils, format_boolean: value => value ? 'Yes' : 'No', API2Request: options => { consoleRequest = options; } };
 context.Terminal = class {
     constructor() { this.cols = 80; this.rows = 24; }
     loadAddon() {} open() {} focus() {} write() {}
@@ -373,7 +377,12 @@ for (const [operation, label] of Object.entries({ create: 'Create', start: 'Star
 }
 assert(!context.taskDescriptions.betterdocker('', 'a'.repeat(32)).includes('a'.repeat(32)));
 assert(!context.taskDescriptions.betterdockerconsole('', 'a'.repeat(32)).includes('a'.repeat(32)));
-assert.equal(wizard.items[0].column1.find(item => item.name === 'vmid').emptyText, 'Next available guest ID');
+const guestID = wizard.items[0].column1.find(item => item.name === 'vmid');
+assert.equal(guestID.xtype, 'pveGuestIDSelector');
+assert.equal(guestID.guestType, 'docker');
+assert.equal(guestID.loadNextFreeID, true);
+assert.equal(guestID.validateExists, false);
+assert.equal(guestID.allowBlank, false);
 console.log('Readable DCT task descriptions and numeric ID wizard passed');
 
 configPanel.pveSelNode.data.status = 'running';
@@ -541,8 +550,8 @@ assert(!fs.readFileSync("frontend/betterdocker.js", "utf8").includes("background
 assert(!fs.readFileSync("frontend/betterdocker.css", "utf8").includes("bd-code"));
 console.log("Compose fields have no decorative line-number background");
 
-assert.equal(definitions['PVE.betterdocker.CreateWizard'].width, 760);
-assert.equal(definitions['PVE.betterdocker.CreateWizard'].height, 570);
+assert.equal(definitions['PVE.betterdocker.CreateWizard'].width, 720);
+assert.equal(definitions['PVE.betterdocker.CreateWizard'].height, 540);
 assert.equal(definitions['PVE.betterdocker.DeploymentEdit'].width, 600);
 assert(wizard.items[0].column1 && wizard.items[0].column2);
 assert.equal(wizard.items[1].advancedItems[0].name, 'environment');
@@ -658,8 +667,8 @@ console.log('Measured usage without capacities, service-scoped log filters and d
 (async () => {
     const alerts = [];
     context.Ext.Msg.alert = (title, message) => alerts.push({ title, message });
-    const importButton = wizard.items[1].items[0].items[1].items[0];
-    assert.equal(importButton.xclass, 'Ext.form.field.FileButton', 'imports use a button without a text-field layout');
+    const importButton = wizard.items[1].items[0].items[1];
+    assert.equal(importButton.xclass, 'PVE.betterdocker.FileButton', 'imports use the native file button layout');
     const importHandler = importButton.listeners.change;
     let resets = 0, writes = 0;
     const upload = { fileInputEl: { dom: { files: [{ size: 10, text: async () => { throw new Error('read failed'); } }] } },
@@ -673,7 +682,25 @@ console.log('Measured usage without capacities, service-scoped log filters and d
     await importHandler.call(upload);
     assert.equal(resets, 2);
     assert.equal(writes, 1);
-    console.log('Failed file import preserves content and permits retry');
+    upload.fileInputEl.dom.files = [];
+    await importHandler.call(upload);
+    assert.equal(writes, 1, 'cancelled file selection retains content');
+    upload.fileInputEl.dom.files = [{ size: 240001 }];
+    await importHandler.call(upload);
+    assert.equal(writes, 1, 'oversized files retain content');
+    assert.equal(resets, 3);
+    let resolveOld;
+    upload.fileInputEl.dom.files = [{ size: 10, text: () => new Promise(resolve => { resolveOld = resolve; }) }];
+    const oldRead = importHandler.call(upload);
+    upload.fileInputEl.dom.files = [{ size: 10, text: async () => 'newest' }];
+    let currentText;
+    upload.up = () => ({ down: () => ({ setValue(value) { writes++; currentText = value; } }) });
+    await importHandler.call(upload);
+    resolveOld('obsolete');
+    await oldRead;
+    assert.equal(currentText, 'newest', 'late reads cannot replace the latest selected file');
+    assert.equal(resets, 4, 'late reads cannot clear a newer file input');
+    console.log('File import failure, cancellation, size rejection, retry and out-of-order reads passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 
 // Cached month/year selections must never request unavailable history.
@@ -860,6 +887,16 @@ const digestEditor = { digest: editorDigest, vmid: 105, projectId: 'e'.repeat(32
     callParent, down() { return null; }, formPanel: { getForm() { return { isValid: () => true }; } },
     getValues() { return { mode: 'compose', compose: 'services: {app: {image: busybox}}' }; } };
 definitions['PVE.betterdocker.DeploymentEdit'].initComponent.call(digestEditor);
+for (const image of [fields.find(item => item.itemId === 'imageFields').items[0],
+    digestEditor.items[0].items.find(item => item.itemId === 'imageFields').items[0]]) {
+    assert.equal(image.allowBlank, false);
+    assert.equal(image.maxLength, 255);
+    assert(image.regex.test('registry.example.test:5000/app/image:stable'));
+    assert(image.regex.test('busybox@sha256:' + 'a'.repeat(64)));
+    for (const value of ['', 'bad image', '../image', 'a'.repeat(256)]) {
+        assert.equal(image.regex.test(value), false);
+    }
+}
 digestEditor.digest = '2'.repeat(64);
 digestEditor.submit();
 assert.equal(digestRequests.at(-1).method, 'PUT');
@@ -903,9 +940,25 @@ for (const [group, key] of [['resources', 'Memory'], ['dns', 'DNS servers'], ['o
     grid.listeners.itemdblclick(null, { get: () => key });
     const editor = capturedEditors.at(-1);
     assert(editor);
+    if (group === 'dns') {
+        assert.equal(editor.items[0].items.map(item => item.name).join(','), 'dns_search,dns');
+        const [domains, servers] = editor.items[0].items;
+        assert.equal(servers.validator('1.1.1.1; 2001:db8::1,8.8.8.8'), true);
+        assert.equal(servers.validator('999.999.1.1'), 'Invalid DNS server list');
+        assert.equal(servers.validator(''), true);
+        assert.equal(domains.validator('example.test; internal.test'), true);
+        assert.equal(domains.validator('bad/domain'), 'Invalid DNS search domain list');
+        editor.formPanel.getForm = () => ({ isValid: () => true,
+            getValues: () => ({ dns: '1.1.1.1; 2001:db8::1,8.8.8.8', dns_search: 'example.test internal.test' }) });
+    }
     loadDigest('2'.repeat(64));
     editor.submit.call(editor);
     assert.equal(digestRequests.at(-1).params.digest, editorDigest, group + ' must not use refreshed version');
+    if (group === 'dns') {
+        assert.deepEqual(JSON.parse(digestRequests.at(-1).params.settings), {
+            dns: ['1.1.1.1', '2001:db8::1', '8.8.8.8'], dns_search: ['example.test', 'internal.test'],
+        });
+    }
     if (key !== 'Project data disk') {
         const before = capturedEditors.length;
         digestRequests.at(-1).success({ result: { data: 'UPID:pve:1:2:3:settings:100:root@pam:' } });
@@ -999,7 +1052,11 @@ const beforeDeniedEdit = capturedEditors.length;
 resourceRows.listeners.itemdblclick(null, { get: () => 'Memory' });
 assert.equal(capturedEditors.length, beforeDeniedEdit, 'CPU privilege must not open a memory editor');
 resourceRows.listeners.itemdblclick(null, { get: () => 'CPU limit' });
-assert.equal(capturedEditors.at(-1).items[0].items.map(item => item.name).join(','), 'cpus,cpuunits');
+const cpuInput = capturedEditors.at(-1).items[0];
+assert.equal(cpuInput.column1.map(item => item.name).join(','), 'cpus');
+assert.equal(cpuInput.advancedColumn2.map(item => item.name).join(','), 'cpuunits');
+assert.equal(capturedEditors.at(-1).fieldDefaults.labelWidth, 120);
+assert.equal(capturedEditors.at(-1).width, undefined, 'native two-column sizing owns CPU width');
 const notesView = { canEdit: false, callParent() { throw new Error('read-only Notes editor opened'); } };
 assert.doesNotThrow(() => definitions['PVE.betterdocker.Notes'].run_editor.call(notesView));
 context.Proxmox.UserName = 'root@pam';
@@ -1467,3 +1524,68 @@ definitions['PVE.betterdocker.Migrate'].initComponent.call(titledMigrate);
 assert.equal(titledMigrate.title, 'Migrate DCT 120 (actions)');
 assert.equal(titledMigrate.submitText, 'Migrate');
 console.log('Clone and migration titles retain VMID, guest name and template context');
+
+// The native wizard owns navigation and Advanced state. Confirm must remain
+// usable after a failed create, without an extra validation step or request.
+const savedWizardRequest = context.Proxmox.Utils.API2Request, savedWizardCreate = context.Ext.create;
+const savedWizardAlert = context.Ext.Msg.alert;
+const formRequests = [], formViewers = [], formAlerts = [], wizardLabels = {};
+context.Proxmox.Utils.API2Request = options => formRequests.push(options);
+context.Ext.create = (name, options) => { formViewers.push({ name, options }); return {}; };
+context.Ext.Msg.alert = (title, message) => formAlerts.push({ title, message });
+let wizardValid = true, wizardClosed = 0, reviewValues;
+const formValues = { nodename: 'pve', vmid: 122, name: 'forms-test', mode: 'compose', bridge: 'vmbr0',
+    ipv4mode: 'dhcp', firewall: '0', mtu: 1400, start: '0', pool: 'test',
+    compose: 'services: {app: {image: busybox, environment: {TOKEN: secret-value}}}', environment: 'TOKEN=secret-value' };
+const formWizard = { callParent, getValues: () => ({ ...formValues }), close() { wizardClosed++; },
+    down(id) { return id === 'form' ? { getForm: () => ({ isValid: () => wizardValid }) } :
+        id === '#help' ? { setHandler() {} } : { setText(text) { wizardLabels[id] = text; } }; } };
+definitions['PVE.betterdocker.CreateWizard'].initComponent.call(formWizard);
+assert.equal(wizardLabels['#submit'], 'Finish');
+const confirmCard = formWizard.items.at(-1);
+assert.equal(confirmCard.tbar, undefined, 'confirmation has no Validate Compose toolbar');
+assert.equal(confirmCard.validator, undefined, 'native field validity controls navigation');
+const cardScope = { up: () => formWizard, down: () => ({ getStore: () => ({ loadData(values) { reviewValues = values; } }) }) };
+confirmCard.listeners.show.call(cardScope);
+assert.equal(formRequests.length, 0, 'opening Confirm makes no preflight request or loading dialog');
+assert(!JSON.stringify(reviewValues).includes('secret-value'));
+assert.equal(reviewValues.find(row => row.key === 'DCT ID').value, 122);
+assert.equal(reviewValues.find(row => row.key === 'Firewall').value, 'No');
+assert.equal(reviewValues.find(row => row.key === 'MTU').value, 1400);
+wizardValid = false;
+confirmCard.onSubmit.call(cardScope);
+assert.equal(formRequests.length, 0);
+wizardValid = true;
+confirmCard.onSubmit.call(cardScope);
+confirmCard.onSubmit.call(cardScope);
+assert.equal(formRequests.length, 1, 'double Finish does not allocate twice');
+assert.equal(formRequests[0].method, 'POST');
+assert.equal(formRequests[0].params.start, 0);
+assert.equal(formRequests[0].params.pool, 'test');
+assert.equal(JSON.parse(formRequests[0].params.deployment).environment, formValues.environment);
+formRequests[0].failure({ htmlStatus: 'Invalid Compose' });
+formRequests[0].callback();
+assert.equal(formAlerts.length, 1);
+assert.equal(wizardClosed, 0, 'create error retains the wizard');
+assert.equal(formWizard.getValues().compose, formValues.compose);
+formValues.start = '1';
+confirmCard.onSubmit.call(cardScope);
+assert.equal(formRequests.length, 2, 'failed create permits retry');
+assert.equal(formRequests[1].params.start, 1);
+formRequests[1].success({ result: { data: 'UPID:pve:1:2:3:betterdockercreate:122:root@pam:' } });
+formRequests[1].callback();
+assert.equal(wizardClosed, 1);
+assert.equal(formViewers.length, 1);
+assert.equal(formViewers[0].name, 'Proxmox.window.TaskViewer');
+context.Proxmox.Utils.API2Request = savedWizardRequest;
+context.Ext.create = savedWizardCreate;
+context.Ext.Msg.alert = savedWizardAlert;
+console.log('Native-sized wizard, safe review, direct Finish, start checkbox, duplicate guard and API-error retry passed');
+
+const fileLabels = [];
+const accessibleFile = { text: 'Wczytaj YAML', callParent,
+    fileInputEl: { dom: { setAttribute(name, value) { fileLabels.push([name, value]); } } } };
+definitions['PVE.betterdocker.FileButton'].afterRender.call(accessibleFile);
+definitions['PVE.betterdocker.FileButton'].createFileInput.call(accessibleFile);
+assert.deepEqual(fileLabels, [['aria-label', 'Wczytaj YAML'], ['aria-label', 'Wczytaj YAML']]);
+console.log('Localized file-picker names survive native input recreation');

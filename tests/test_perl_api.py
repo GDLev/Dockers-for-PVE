@@ -8,6 +8,74 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PerlAPITests(unittest.TestCase):
+    def test_preview_error_returns_worker_reason_without_command_noise(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        function = source[source.index('sub output {'):source.index('\nsub check_digest {')]
+        code = r'''
+my $helper = '/helper';
+package PVE::Tools;
+sub run_command {
+    my ($command, %options) = @_;
+    $options{errfunc}->('BetterDocker: Invalid Compose configuration (line 1). Check YAML, .env and referenced files.');
+    die 'command /helper preview /run/private-input failed';
+}
+package main;
+FUNCTION
+eval { output(['preview', '/run/private-input']); };
+die 'Worker reason lost' unless $@ =~ /^Invalid Compose configuration \(line 1\)/;
+die 'Command or temporary path exposed' if $@ =~ m{/helper|/run/private-input};
+print 'PASS';
+'''.replace('FUNCTION', function)
+        result = subprocess.run(['perl', '-e', code], check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout, 'PASS')
+
+    def test_create_rejects_compose_before_reserving_id_and_cleans_input(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        start = source.index('    code => sub {', source.index("name => 'create',"))
+        end = source.index('\n    },\n});', start)
+        body = source[start:end].removeprefix('    code => sub {')
+        # Keep the production handler, with only the host's temporary directory replaced.
+        body = body.replace("DIR => '/run'", 'DIR => $tmpdir')
+        with tempfile.TemporaryDirectory() as folder:
+            code = r'''
+use JSON::PP qw(decode_json encode_json);
+use File::Temp qw(tempfile);
+my $tmpdir = $ARGV[0];
+my $helper = '/helper';
+our ($reject, $reservations, $forks, @inputs);
+sub output {
+    my ($args) = @_;
+    return 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' if $args->[0] eq 'new-id';
+    die 'Unexpected worker call' unless $args->[0] eq 'preview';
+    push @inputs, $args->[1];
+    open my $fh, '<', $args->[1] or die $!;
+    my $value = decode_json(do { local $/; <$fh> });
+    die 'Invalid Compose' if $reject;
+    return '[]';
+}
+sub worker_id { $_[0] }
+sub reserve_guest_id { $reservations++; return 122; }
+package PVE::RPCEnvironment;
+sub get { bless {}, __PACKAGE__ }
+sub get_user { 'root@pam' }
+sub fork_worker { $main::forks++; return 'UPID:test'; }
+package main;
+my $create = sub { BODY };
+$reject = 1;
+eval { $create->({node=>'pve', deployment=>'{}', start=>0}); };
+die 'Wrong form error' unless $@ =~ /Invalid Compose/;
+die 'Reserved ID for invalid form' if $reservations || $forks;
+die 'Rejected input retained' if -e $inputs[-1];
+$reject = 0;
+my $task = $create->({node=>'pve', deployment=>'{}', start=>0});
+die 'Retry failed' unless $task eq 'UPID:test' && $reservations == 1 && $forks == 1;
+die 'Worker input removed early' unless -e $inputs[-1];
+unlink $inputs[-1];
+print 'PASS';
+'''.replace('BODY', body)
+            result = subprocess.run(['perl', '-e', code, folder], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, 'PASS')
+
     def test_host_api_has_no_lxc_schema_and_resources_do_not_expose_secrets(self):
         with tempfile.TemporaryDirectory() as folder:
             base = Path(folder)

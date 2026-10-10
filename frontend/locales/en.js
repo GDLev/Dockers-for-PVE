@@ -4,6 +4,10 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Invalid Docker image": "Invalid Docker image",
+            "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.": "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.",
+            "Invalid DNS server list": "Invalid DNS server list",
+            "Invalid DNS search domain list": "Invalid DNS search domain list",
             "DCT migration requires a static IPv4 address.": "DCT migration requires a static IPv4 address.",
             "DCT migration with snapshot history is not supported.": "DCT migration with snapshot history is not supported.",
             "Apply or revert pending network changes before migrating the DCT.": "Apply or revert pending network changes before migrating the DCT.",
@@ -43,7 +47,6 @@
             "Project": "Project",
             "Service": "Service",
             "Same as bridge": "Same as bridge",
-            "Next available guest ID": "Next available guest ID",
             "Container disk (MiB)": "Container disk (MiB)",
             "Container disk limit": "Container disk limit",
             "Project data disk": "Project data disk",
@@ -56,7 +59,6 @@
             "Docker help": "Docker help",
             "Deploy from": "Deploy from",
             "Deployment": "Deployment",
-            "Deploy": "Deploy",
             "Project name": "Project name",
             "DCT ID": "DCT ID",
             "Compose YAML": "Compose YAML",
@@ -64,8 +66,6 @@
             "Load YAML": "Load YAML",
             "Load .env": "Load .env",
             "Lines": "Lines",
-            "instances": "instances",
-            "Validate Compose": "Validate Compose",
             "Edit deployment": "Edit deployment",
             "Partially running": "Partially running",
             "Deploying": "Deploying",
@@ -100,7 +100,6 @@
             "File is too large": "File is too large",
             "Waiting for DHCP": "Waiting for DHCP",
             "Auto-generated": "Auto-generated",
-            "Assigned by DHCP": "Assigned by DHCP",
             "Read from Compose YAML": "Read from Compose YAML",
             "MTU": "MTU",
             "Gateway (IPv4)": "Gateway (IPv4)",

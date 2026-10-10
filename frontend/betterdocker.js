@@ -112,22 +112,22 @@
         const url = URL.createObjectURL(new Blob([value], { type: 'text/plain;charset=utf-8' }));
         link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
     };
-    const importFile = (label, name, maximum) => ({ xclass: 'Ext.form.field.FileButton', text: translate(label),
+    const importFile = (label, name, maximum) => ({ xclass: 'PVE.betterdocker.FileButton', text: translate(label),
+        margin: '0 0 5 0', accept: name === 'compose' ? '.yaml,.yml,text/plain' : '.env,text/plain',
         listeners: { change: async function () {
             const file = this.fileInputEl.dom.files[0];
             if (!file) { return; }
+            const revision = this.dockerFileRevision = (this.dockerFileRevision || 0) + 1;
             if (file.size > maximum) { Ext.Msg.alert(translate('Error'), translate('File is too large')); this.reset(true); return; }
             try {
                 const content = await file.text();
-                if (!this.destroyed) { this.up('window').down('[name=' + name + ']').setValue(content); }
+                if (!this.destroyed && this.dockerFileRevision === revision) { this.up('window').down('[name=' + name + ']').setValue(content); }
             } catch (_) {
-                if (!this.destroyed) { Ext.Msg.alert(translate('Error'), translate('Could not read file')); }
+                if (!this.destroyed && this.dockerFileRevision === revision) { Ext.Msg.alert(translate('Error'), translate('Could not read file')); }
             } finally {
-                if (!this.destroyed) { this.reset(true); }
+                if (!this.destroyed && this.dockerFileRevision === revision) { this.reset(true); }
             }
         } } });
-    const importRow = (label, name, maximum) => ({ xtype: 'container', layout: 'hbox', margin: '0 0 5 0',
-        items: [importFile(label, name, maximum)] });
     const statusText = value => translate(({ running: 'Running', stopped: 'Stopped', partial: 'Partially running',
         creating: 'Deploying', error: 'Deployment failed', 'network-error': 'Network error', unknown: 'Unknown' })[value] || value);
     const trackTask = (response, target) => {
@@ -179,8 +179,13 @@
     };
 
     const field = (name, label, value, extra) => Object.assign({
-        xtype: 'textfield', name, fieldLabel: translate(label), value, labelWidth: 100, anchor: '100%',
+        xtype: 'textfield', name, fieldLabel: translate(label), value, anchor: '100%',
     }, extra || {});
+    const imageField = (value, extra) => field('image', 'Image', value, Object.assign({
+        allowBlank: false, maxLength: 255, emptyText: 'nginx:stable',
+        regex: /^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}$/,
+        regexText: translate('Invalid Docker image'),
+    }, extra || {}));
     const request = options => {
         const callback = options.callback;
         return Proxmox.Utils.API2Request(Object.assign({
@@ -259,7 +264,7 @@
     PVE.Utils.volume_is_dct_backup = data => /(?:^|:)backup\/(?:vzdump-docker-|host\/dct-[1-9][0-9]{2,8}\/)/.test(data?.volid || '');
 
     Ext.define('PVE.betterdocker.Migrate', {
-        extend: 'Proxmox.window.Edit', width: 600, isCreate: true, autoLoad: false,
+        extend: 'Proxmox.window.Edit', isCreate: true, autoLoad: false,
         method: 'POST', showTaskViewer: true, onlineHelp: 'chapter_pvecm',
         initComponent: function () {
             const me = this;
@@ -283,7 +288,7 @@
 
     Ext.define('PVE.betterdocker.StateRestore', {
         extend: 'Proxmox.window.Edit', alias: 'widget.pveBetterDockerStateRestore',
-        width: 600, isCreate: true, autoLoad: false,
+        isCreate: true, autoLoad: false,
         onlineHelp: 'chapter_vzdump', method: 'POST',
         initComponent: function () {
             const me = this, clone = Boolean(me.projectId);
@@ -545,6 +550,18 @@
         });
     }
 
+    Ext.define('PVE.betterdocker.FileButton', {
+        extend: 'Ext.form.field.FileButton',
+        afterRender: function () {
+            this.callParent();
+            this.fileInputEl.dom.setAttribute('aria-label', this.text);
+        },
+        createFileInput: function () {
+            this.callParent(arguments);
+            this.fileInputEl.dom.setAttribute('aria-label', this.text);
+        },
+    });
+
     Ext.define('PVE.betterdocker.CodeArea', {
         extend: 'Ext.form.field.TextArea', alias: 'widget.pveBetterDockerCodeArea', fieldCls: 'bd-source',
         initComponent: function () {
@@ -572,7 +589,7 @@
     });
 
     Ext.define('PVE.betterdocker.NetworkEdit', {
-        extend: 'Proxmox.window.Edit', subject: translate('Network Device'), width: 600, showTaskViewer: false,
+        extend: 'Proxmox.window.Edit', subject: translate('Network Device'), showTaskViewer: false,
         initComponent: function () {
             const me = this;
             me.items = [{ xtype: 'inputpanel',
@@ -619,7 +636,7 @@
     });
 
     Ext.define('PVE.betterdocker.CreateWizard', {
-        extend: 'PVE.window.Wizard', subject: 'Docker', title: translate('Create DCT'), width: 760, height: 570, resizable: false, constrain: true,
+        extend: 'PVE.window.Wizard', subject: 'Docker', title: translate('Create DCT'), width: 720, height: 540, resizable: false, constrain: true,
         initComponent: function () {
             const me = this;
             const defaults = me.deployment || {};
@@ -634,10 +651,12 @@
                             const bridge = wizard && wizard.down('[name=bridge]');
                             if (bridge) { bridge.setNodename(value); }
                         } } }),
-                    field('vmid', 'DCT ID', defaults.vmid || me.vmid || '', { xtype: 'numberfield',
-                        minValue: 100, maxValue: 999999999, allowDecimals: false, readOnly: Boolean(me.projectId),
-                        emptyText: translate('Next available guest ID') }),
-                    field('name', 'Project name', defaults.name || '', { allowBlank: false, readOnly: Boolean(me.projectId) }),
+                    field('vmid', 'DCT ID', defaults.vmid || me.vmid || '', { xtype: 'pveGuestIDSelector',
+                        guestType: 'docker', loadNextFreeID: !defaults.vmid && !me.vmid && !me.projectId,
+                        validateExists: me.projectId ? undefined : false, allowBlank: false, readOnly: Boolean(me.projectId) }),
+                    field('name', 'Project name', defaults.name || '', { allowBlank: false, readOnly: Boolean(me.projectId),
+                        maxLength: 63, regex: /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/,
+                        regexText: translate('Use letters, numbers, dots, underscores or hyphens; start with a letter or number.') }),
                 ],
                 column2: [
                     { xtype: 'pvePoolSelector', name: 'pool', fieldLabel: translate('Resource Pool'), allowBlank: true, hidden: Boolean(me.projectId), disabled: Boolean(me.projectId) },
@@ -650,19 +669,19 @@
                 xtype: 'inputpanel', title: translate('Deployment'), onlineHelp: 'chapter_system_administration', scrollable: true,
                 items: [
                     { xtype: 'container', itemId: 'composeFields', layout: 'anchor', items: [
-                        field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false,
+                        field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false, maxLength: 240000,
                             emptyText: 'services:\n  web:\n    image: nginx:stable' }),
-                        importRow('Load YAML', 'compose', 240000),
+                        importFile('Load YAML', 'compose', 240000),
                     ] },
                     { xtype: 'container', itemId: 'imageFields', hidden: true, layout: 'anchor', items: [
-                        field('image', 'Image', defaults.image || '', { disabled: true, allowBlank: false, emptyText: 'nginx:stable' }),
+                        imageField(defaults.image || '', { disabled: true }),
                         field('ports', 'Published ports', defaults.ports || '', { xtype: 'textarea', disabled: true, height: 110,
                             emptyText: '8080:80\n5353:53/udp' }),
                     ] },
                 ],
                 advancedItems: [
-                    field('environment', '.env', defaults.environment || '', { xtype: 'textarea', height: 65, fieldCls: 'bd-source' }),
-                    importRow('Load .env', 'environment', 16000),
+                    field('environment', '.env', defaults.environment || '', { xtype: 'pveBetterDockerCodeArea', height: 65, maxLength: 16000 }),
+                    importFile('Load .env', 'environment', 16000),
                 ],
             }, {
                 xtype: 'inputpanel', title: translate('Network'), onlineHelp: 'chapter_system_administration',
@@ -672,9 +691,7 @@
                     { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'),
                         checked: Boolean(defaults.firewall), uncheckedValue: 0, readOnly: Boolean(me.projectId) },
                     field('hwaddr', 'MAC address', defaults.hwaddr || '', { readOnly: Boolean(me.projectId),
-                        emptyText: 'auto', validator: value => !value || /^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(value) || 'Invalid MAC address' }),
-                    field('mtu', 'MTU', defaults.mtu || '', { xtype: 'numberfield', readOnly: Boolean(me.projectId),
-                        minValue: 576, maxValue: 9216, allowDecimals: false, emptyText: translate('Same as bridge') }),
+                        emptyText: 'auto', vtype: 'MacAddress' }),
                 ],
                 column2: [
                     { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 2,
@@ -684,66 +701,54 @@
                             { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: translate('DHCP'),
                                 checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp', readOnly: Boolean(me.projectId) },
                         ], listeners: { change: updateNetwork, afterrender: updateNetwork } },
-                    field('address', 'IPv4/CIDR', defaults.cidr || defaults.address || '', { allowBlank: false,
+                    field('address', 'IPv4/CIDR', defaults.cidr || defaults.address || '', { allowBlank: false, vtype: 'IPCIDRAddress',
                         disabled: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp',
                         readOnly: Boolean(me.projectId), emptyText: '192.0.2.50/24' }),
                     { xtype: 'displayfield', fieldLabel: translate('Gateway (IPv4)'), value: translate('Inherited from host routing') },
                 ],
+                advancedColumn1: [field('mtu', 'MTU', defaults.mtu || '', { xtype: 'numberfield', readOnly: Boolean(me.projectId),
+                    minValue: 576, maxValue: 9216, allowDecimals: false, emptyText: translate('Same as bridge') })],
             }, {
                 title: translate('Confirm'), onlineHelp: 'chapter_system_administration', layout: 'fit',
                 dockedItems: [{ xtype: 'proxmoxcheckbox', name: 'start', dock: 'bottom', margin: '5 0 0 0',
                     boxLabel: gettext('Start after created'), uncheckedValue: 0, hidden: Boolean(me.projectId), disabled: Boolean(me.projectId) }],
-                validator: function () { const wizard = this.up('window'); return wizard.validatedDeployment === JSON.stringify(deployment(wizard.getValues())); }, tbar: [{ text: translate('Validate Compose'), handler: function () { this.up('window').validateDeployment(); } }], items: [{ xtype: 'grid', itemId: 'reviewGrid',
-                    store: { fields: ['key', 'value'], data: [] },
-                    columns: [{ text: translate('Name'), dataIndex: 'key', width: 170,
-                        renderer: value => Ext.htmlEncode(value.startsWith('Service: ') ? translate('Service') + ': ' + value.slice(9) : translate(value)) },
-                        { text: translate('Value'), dataIndex: 'value', flex: 1, renderer: value => Ext.htmlEncode(translate(value)) }],
+                items: [{ xtype: 'grid', itemId: 'reviewGrid',
+                    store: { fields: ['key', 'value'], data: [], sorters: [{ property: 'key', direction: 'ASC' }] },
+                    columns: [{ text: translate('Name'), dataIndex: 'key', width: 150, renderer: Ext.htmlEncode },
+                        { text: translate('Value'), dataIndex: 'value', flex: 1, renderer: Ext.htmlEncode }],
                 }],
                 listeners: { show: function () {
                     const values = this.up('window').getValues();
-                    const data = [{ key: 'Node', value: values.nodename }, { key: 'DCT ID', value: values.vmid || 'Next available guest ID' }, { key: 'Project', value: values.name },
-                        { key: 'Deployment', value: values.mode === 'compose' ? 'Docker Compose' : values.image },
-                        { key: 'Bridge', value: values.bridge }, { key: 'IPv4', value: values.ipv4mode === 'dhcp' ? 'Assigned by DHCP' : values.address },
-                        { key: 'MAC address', value: values.hwaddr || 'Auto-generated' },
-                        { key: 'Published ports', value: values.mode === 'compose' ? translate('Read from Compose YAML') : values.ports || translate('None') }];
-                    this.down('grid').getStore().loadData(data);
-                    this.up('window').validateDeployment();
+                    const data = [
+                        ['Node', values.nodename], ['DCT ID', values.vmid], ['Project name', values.name],
+                        ['Deploy from', values.mode === 'compose' ? 'Docker Compose' : 'Docker image'],
+                        ['Bridge', values.bridge], ['IPv4', values.ipv4mode === 'dhcp' ? 'DHCP' : values.address],
+                        ['MAC address', values.hwaddr || 'Auto-generated'],
+                        ['MTU', values.mtu || translate('Same as bridge')],
+                        ['Firewall', Proxmox.Utils.format_boolean(Number(values.firewall) === 1)],
+                    ];
+                    if (values.pool) { data.push(['Resource Pool', values.pool]); }
+                    if (values.mode === 'image') { data.push(['Image', values.image], ['Published ports', values.ports || translate('None')]); }
+                    else { data.push(['Published ports', translate('Read from Compose YAML')]); }
+                    // Compose and .env may contain secrets; keep them out of the review grid.
+                    this.down('grid').getStore().loadData(data.map(([key, value]) => ({ key: translate(key), value })));
                 } },
                 onSubmit: function () {
                     const wizard = this.up('window');
+                    if (wizard.dockerSubmitting || !wizard.down('form').getForm().isValid()) { return; }
                     const values = wizard.getValues();
-                    if (wizard.validatedDeployment !== JSON.stringify(deployment(values))) {
-                        wizard.validateDeployment(); return;
-                    }
+                    wizard.dockerSubmitting = true;
+                    // The create endpoint validates before allocating a VMID or starting its task.
                     request({ url: '/nodes/' + encodeURIComponent(values.nodename) + '/docker' + (wizard.projectId ? '/' + wizard.projectId : ''),
                         method: wizard.projectId ? 'PUT' : 'POST',
-                        params: Object.assign({ deployment: JSON.stringify(deployment(values)) }, !wizard.projectId ? { start: values.start || 0, ...(values.pool ? { pool: values.pool } : {}) } : {}), waitMsgTarget: wizard,
+                        params: Object.assign({ deployment: JSON.stringify(deployment(values)) }, !wizard.projectId ? { start: Number(values.start) === 1 ? 1 : 0, ...(values.pool ? { pool: values.pool } : {}) } : {}), waitMsgTarget: wizard,
                         success: response => { task(response); wizard.close(); } });
                 },
             }];
-            me.validateDeployment = () => {
-                const values = me.getValues();
-                const payload = JSON.stringify(deployment(values));
-                me.validatedDeployment = null;
-                const submit = me.down('#submit'); if (submit) { submit.setDisabled(true); }
-                request({ url: '/nodes/' + encodeURIComponent(values.nodename) + '/docker', method: 'PUT',
-                    params: Object.assign({ deployment: payload }, me.projectId ? { id: me.projectId } : values.pool ? { pool: values.pool } : {}), waitMsgTarget: me,
-                    success: response => {
-                        if (me.destroyed || JSON.stringify(deployment(me.getValues())) !== payload) { return; }
-                        me.validatedDeployment = payload;
-                        const review = me.down('#reviewGrid').getStore();
-                        const submit = me.down('#submit'); if (submit) { submit.setDisabled(false); }
-                        review.remove(review.getRange().filter(record => record.get('key').startsWith('Service: ')));
-                        response.result.data.forEach(service => review.add({ key: 'Service: ' + service.service,
-                            value: [service.image, service.replicas + ' ' + translate('instances'),
-                                service.ports.map(port => port.published + ':' + port.target + '/' + port.protocol).join(', '),
-                                service.mounts.map(mount => mount.target).join(', ')].filter(Boolean).join(' · ') }));
-                    } });
-            };
             me.callParent();
             const helpButton = me.down('#help');
             if (helpButton) { helpButton.setHandler(help); }
-            [['next', 'Next'], ['back', 'Back'], ['submit', me.projectId ? 'Apply' : 'Deploy']].forEach(([id, text]) => {
+            [['next', 'Next'], ['back', 'Back'], ['submit', me.projectId ? 'Apply' : 'Finish']].forEach(([id, text]) => {
                 const button = me.down('#' + id);
                 if (button) { button.setText(translate(text)); }
             });
@@ -1139,13 +1144,13 @@
                 field('mode', 'Deploy from', defaults.mode, { xtype: 'combobox', editable: false, queryMode: 'local',
                     store: [['compose', 'Docker Compose'], ['image', 'Docker image']], listeners: { change: updateMode, afterrender: updateMode } }),
                 { xtype: 'container', itemId: 'composeFields', layout: 'anchor', items: [
-                    field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false }),
-                    importRow('Load YAML', 'compose', 240000)] },
-                { xtype: 'container', itemId: 'imageFields', layout: 'anchor', items: [field('image', 'Image', defaults.image || ''),
+                    field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false, maxLength: 240000 }),
+                    importFile('Load YAML', 'compose', 240000)] },
+                { xtype: 'container', itemId: 'imageFields', layout: 'anchor', items: [imageField(defaults.image || ''),
                     field('ports', 'Published ports', defaults.ports || '', { xtype: 'textarea', height: 120 })] },
             ], advancedItems: [
-                field('environment', '.env', defaults.environment || '', { xtype: 'textarea', height: 65, fieldCls: 'bd-source' }),
-                importRow('Load .env', 'environment', 16000),
+                field('environment', '.env', defaults.environment || '', { xtype: 'pveBetterDockerCodeArea', height: 65, maxLength: 16000 }),
+                importFile('Load .env', 'environment', 16000),
             ] }];
             me.submit = () => {
                 if (!me.formPanel.getForm().isValid()) { return; }
@@ -1502,7 +1507,7 @@
                 return openEditor(me, 'data-disk', () => {
                     const existing = current.storage?.limit_mib || 0, digest = current.digest;
                     const win = Ext.create('Proxmox.window.Edit', {
-                        title: translate('Edit data disk'), url: url + '/storage-limit', method: 'PUT', width: 400,
+                        title: translate('Edit data disk'), url: url + '/storage-limit', method: 'PUT', fieldDefaults: { labelWidth: 120 },
                         onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
                         showTaskViewer: true,
                         items: [{ xtype: 'inputpanel', items: [
@@ -1533,7 +1538,7 @@
                     if (selectedKey === 'Hookscript') {
                         const digest = current.digest;
                         const win = Ext.create('Proxmox.window.Edit', {
-                            subject: gettext('Hookscript'), url: url + '/config', method: 'PUT', width: 500,
+                            subject: gettext('Hookscript'), url: url + '/config', method: 'PUT',
                             items: [{ xtype: 'inputpanel', items: [
                                 { xtype: 'pveStorageSelector', name: 'storage', nodename: info.node,
                                     storageContent: 'snippets', fieldLabel: gettext('Storage'), submitValue: false,
@@ -1564,7 +1569,7 @@
                         const name = selectedKey === 'Protection' ? 'protection' : 'onboot';
                         const digest = current.digest;
                         const win = Ext.create('Proxmox.window.Edit', {
-                            subject: gettext(selectedKey), url: url + '/config', method: 'PUT', width: 400,
+                            subject: gettext(selectedKey), url: url + '/config', method: 'PUT',
                             items: [{ xtype: 'proxmoxcheckbox', name, uncheckedValue: 0, defaultValue: 0,
                                 fieldLabel: gettext('Enabled'), value: Boolean(current[name]) }],
                             submit: function () {
@@ -1580,12 +1585,21 @@
                     const numeric = (name, label, maximum, extra) => field(name, label, values[name] || 0,
                         Object.assign({ xtype: 'numberfield', minValue: 0, maxValue: maximum, allowDecimals: false, allowBlank: false }, extra));
                     let fields = group === 'resources' ? [
-                        numeric('memory', 'Memory (MiB)', 1048576), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1 }),
-                        numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3 }),
+                        numeric('memory', 'Memory (MiB)', 1048576, { step: 32 }), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1, step: 32 }),
+                        numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3, step: 1 }),
                         numeric('disk', 'Container disk (MiB)', 1048576, { disabled: !current.storage?.rootfs?.supported }),
                         numeric('cpuunits', 'CPU units', 262144), numeric('pids', 'PID limit', 4194304),
                     ] : group === 'dns' ? [
-                        field('dns', 'DNS servers', values.dns.join(', ')), field('dns_search', 'Search domains', values.dns_search.join(', ')),
+                        field('dns_search', 'DNS domain', values.dns_search.join(' '), { emptyText: translate('Docker default'),
+                            validator: value => {
+                                const domains = value.split(/[ ,;]+/).filter(Boolean);
+                                return domains.length <= 8 && domains.every(domain => /^[a-zA-Z0-9_.-]{1,253}$/.test(domain)) || translate('Invalid DNS search domain list');
+                            } }),
+                        field('dns', 'DNS servers', values.dns.join(' '), { emptyText: translate('Docker default'),
+                            validator: value => {
+                                const servers = value.split(/[ ,;]+/).filter(Boolean);
+                                return servers.length <= 8 && servers.every(server => Proxmox.Utils.IP4_match.test(server) || Proxmox.Utils.IP6_match.test(server)) || translate('Invalid DNS server list');
+                            } }),
                     ] : [field('restart', 'Restart policy', values.restart, { xtype: 'combobox', editable: false, queryMode: 'local',
                         store: [['no', translate('No')], ['always', translate('Always')], ['unless-stopped', translate('Unless stopped')], ['on-failure', translate('On failure')]] })];
                     if (group === 'resources' && selectedKey) {
@@ -1595,10 +1609,14 @@
                     }
                     const fieldScope = { memory: 'memory', swap: 'memory', cpus: 'cpu', cpuunits: 'cpu', pids: 'options', disk: 'disk', dns: 'network', dns_search: 'network', restart: 'options' };
                     fields = fields.filter(item => !item.name || can(fieldScope[item.name]));
-                    const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate({ resources: 'Resources', dns: 'DNS', options: 'Options' }[group]) + ' - ' + active.name,
-                        url: url + '/settings', method: 'PUT', width: 400, showReset: true,
+                    const cpu = group === 'resources' && fields.some(item => item.name === 'cpus');
+                    const input = cpu ? { xtype: 'inputpanel', column1: fields.filter(item => item.name !== 'cpuunits'), column2: [],
+                        advancedColumn2: fields.filter(item => item.name === 'cpuunits') } : { xtype: 'inputpanel', items: fields };
+                    const subject = group === 'resources' ? selectedKey === 'Memory' || selectedKey === 'Swap' ? 'Memory' : cpu ? 'CPU' : selectedKey : { dns: 'DNS', options: 'Options' }[group];
+                    const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate(subject) + ' - ' + active.name,
+                        url: url + '/settings', method: 'PUT', showReset: true, fieldDefaults: { labelWidth: group === 'resources' ? 120 : 100 },
                         onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
-                        items: [{ xtype: 'inputpanel', items: fields }],
+                        items: [input],
                         submit: function () {
                             const form = this.formPanel.getForm();
                             if (!form.isValid()) { return; }
@@ -1606,7 +1624,7 @@
                             const settings = {};
                             Object.keys(changed).forEach(key => { settings[key] = group === 'resources' ? Number(changed[key]) : changed[key]; });
                             if (group === 'dns') {
-                                ['dns', 'dns_search'].forEach(key => { settings[key] = changed[key].split(',').map(v => v.trim()).filter(Boolean); });
+                                ['dns', 'dns_search'].forEach(key => { settings[key] = changed[key].split(/[ ,;]+/).filter(Boolean); });
                             }
                             request({ url: url + '/settings', method: 'PUT', waitMsgTarget: win,
                                 params: { service: active.name, settings: JSON.stringify(settings), digest },
