@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 import transfer
 from live_firewall import remote
 from live_pools_hooks import api, task

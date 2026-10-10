@@ -2,7 +2,7 @@
 """dhclient hook: configure only the managed project NIC; never host routing or DNS."""
 import os
 import sys
-from provision import dhcp_event
+from dctlib.projects import dhcp_event
 
 if __name__ == '__main__':
     try:

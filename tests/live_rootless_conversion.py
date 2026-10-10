@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 import uuid
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from live_firewall import remote
 from live_pools_hooks import api, task
 
@@ -80,7 +80,7 @@ m.guest_state.restore_state=stop
             assert info()['name'] == state['name']
             power('force-stop'); task(api('delete', base()))
         identifier = state['id']
-        remote(NODE, ['python3', '-c', 'import sys,json,shutil;sys.path.insert(0,"/usr/local/lib/betterdocker");import provision as w;p=w.ROOT/' + repr(identifier) + ';assert json.loads((p/"request.json").read_text())["name"]==' + repr(state['name']) + ';shutil.rmtree(p)'], check=True)
+        remote(NODE, ['python3', '-c', 'import sys,json,shutil;sys.path.insert(0,"/usr/local/lib/betterdocker");from dctlib import projects as w;p=w.ROOT/' + repr(identifier) + ';assert json.loads((p/"request.json").read_text())["name"]==' + repr(state['name']) + ';shutil.rmtree(p)'], check=True)
         volumes = remote(NODE, ['docker', 'volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=bd-' + identifier], check=True).stdout.split()
         if volumes:
             remote(NODE, ['docker', 'volume', 'rm', *volumes], check=True)

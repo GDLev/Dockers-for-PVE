@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from live_pools_hooks import api, task
 from live_firewall import remote
 from live_permissions import http
@@ -95,7 +95,7 @@ for subnet in api('get', '/cluster/sdn/vnets/' + vnet + '/subnets'):
     api('delete', '/cluster/sdn/vnets/' + vnet + '/subnets/' + subnet['subnet'])
 api('set', '/cluster/sdn/zones/' + zone, ipam='pve')
 apply()
-code = 'import sys;sys.path.insert(0,"/usr/local/lib/betterdocker");import provision;provision.check_sdn_bridge("fwvnet")'
+code = 'import sys;sys.path.insert(0,"/usr/local/lib/betterdocker");from dctlib import projects as provision;provision.check_sdn_bridge("fwvnet")'
 result = remote(node, ['python3', '-c', code])
 assert result.returncode and 'IPAM' in result.stderr, result.stderr
 print('PASS unsupported automatic IPAM rejected explicitly', flush=True)

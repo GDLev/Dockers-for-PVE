@@ -13,7 +13,7 @@ import sys
 from urllib.parse import quote
 
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from transfer import ssh_command
 import live_pools_hooks as live
 from live_permissions import http

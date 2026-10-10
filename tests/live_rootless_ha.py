@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 import time
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from live_pools_hooks import api, wait_for
 from live_firewall import remote
 

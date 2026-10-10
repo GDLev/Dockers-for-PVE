@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 import tempfile
 
-import provision as worker
+from dctlib import projects as worker
 import guest_state as state
 import replica
 import transfer

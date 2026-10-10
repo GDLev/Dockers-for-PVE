@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 import transfer
 from live_pools_hooks import api, task, wait_for
 
@@ -70,7 +70,7 @@ def main():
                 power(info, 'force-stop'); task(api('delete', base(info)))
                 if info.get('replication'):
                     remote(info['node'], ['/usr/local/lib/betterdocker/provision.py', 'purge-retained-storage', info['id']], check=True)
-                script = ('import sys,json,shutil;sys.path.insert(0,"/usr/local/lib/betterdocker");import provision as w;'
+                script = ('import sys,json,shutil;sys.path.insert(0,"/usr/local/lib/betterdocker");from dctlib import projects as w;'
                           'p=w.ROOT/' + repr(info['id']) + ';\nif p.exists():\n'
                           ' assert json.loads((p/"request.json").read_text())["name"].startswith(' + repr(state['prefix']) + ')\n'
                           ' if w.storage_config(' + repr(info['id']) + ').get("volid"): w.purge_retained_storage(' + repr(info['id']) + ')\n'

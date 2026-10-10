@@ -1,4 +1,6 @@
 import importlib.util
+import importlib
+import sys
 import json
 from pathlib import Path
 import subprocess
@@ -16,7 +18,8 @@ def module(name):
     return mod
 
 
-worker = module('provision')
+sys.path.insert(0, str(ROOT / 'scripts'))
+worker = importlib.import_module('dctlib.projects')
 patcher = module('patch')
 BASE = {'name': 'web', 'mode': 'compose', 'compose': 'services:\n  web:\n    image: nginx',
         'address': '192.0.2.50', 'bridge': 'vmbr0'}

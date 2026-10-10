@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from live_acceptance import api, task
 
 TLS = ssl._create_unverified_context()
@@ -150,7 +150,7 @@ def console_acceptance(args):
             if any(r['id'] == identifier for r in worker.summaries()):
                 task(api('create', base + '/action', action='force-stop'))
                 task(api('delete', base))
-            cleanup = "import sys,shutil;sys.path.insert(0,'/usr/local/lib/betterdocker');import provision as w;shutil.rmtree(w.ROOT / " + repr(identifier) + ",ignore_errors=True);w.release_id(" + repr(identifier) + ")"
+            cleanup = "import sys,shutil;sys.path.insert(0,'/usr/local/lib/betterdocker');from dctlib import projects as w;shutil.rmtree(w.ROOT / " + repr(identifier) + ",ignore_errors=True);w.release_id(" + repr(identifier) + ")"
             subprocess.run(transfer.ssh_command(args.target) + [shlex.join(['python3', '-c', cleanup])], check=True)
         if registered_user:
             api('delete', '/access/users/' + user)

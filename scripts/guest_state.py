@@ -17,7 +17,7 @@ import time
 import uuid
 from urllib.parse import quote
 
-import provision as worker
+from dctlib import projects as worker
 
 CONFIG_FILES = ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json',
                 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt')

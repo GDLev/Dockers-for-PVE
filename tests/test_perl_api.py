@@ -2,9 +2,17 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def route_source(name):
+    source = (ROOT / 'backend/PVE/API2/BetterDocker' / (name + '.pm')).read_text()
+    start = source.index('    PVE::API2::BetterDocker::register_docker_method(')
+    end = source.rindex('\n}\n')
+    return textwrap.dedent(source[start:end]).replace('PVE::API2::BetterDocker::', '')
 
 
 class PerlAPITests(unittest.TestCase):
@@ -30,7 +38,7 @@ print 'PASS';
         self.assertEqual(result.stdout, 'PASS')
 
     def test_create_rejects_compose_before_reserving_id_and_cleans_input(self):
-        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        source = route_source('Deployment')
         start = source.index('    code => sub {', source.index("name => 'create',"))
         end = source.index('\n    },\n});', start)
         body = source[start:end].removeprefix('    code => sub {')
@@ -77,7 +85,7 @@ print 'PASS';
             self.assertEqual(result.stdout, 'PASS')
 
     def test_settings_rejects_ungranted_changes_before_creating_a_task(self):
-        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        source = route_source('Settings')
         start = source.index('    code => sub {', source.index("name => 'settings',"))
         end = source.index('\n    },\n});', start)
         body = source[start:end].removeprefix('    code => sub {').replace("DIR => '/run'", 'DIR => $tmpdir')
@@ -460,7 +468,7 @@ die 'native permission check bypassed' unless $@ =~ /native permission denied/;
 ''' , '101', 'a' * 32], check=True)
 
     def test_network_checkbox_serializes_as_number(self):
-        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        source = route_source('Network')
         start = source.index('my %values = map {', source.index("name => 'set_network'"))
         end = source.index('my ($fh, $path)', start)
         fragment = source[start:end]

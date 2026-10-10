@@ -11,7 +11,7 @@ import subprocess
 import sys
 import uuid
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from live_pools_hooks import api, task, wait_for
 from live_firewall import remote
 
@@ -57,7 +57,7 @@ def run(cleanup=False):
             power(current, 'force-stop'); task(api('delete', base(current)))
             remote(current['node'], ['/usr/local/lib/betterdocker/provision.py', 'purge-retained-storage', identifier], check=True)
             for node in state.get('pools', []):
-                script = ('import sys,json,shutil; sys.path.insert(0,"/usr/local/lib/betterdocker"); import provision as w; '
+                script = ('import sys,json,shutil; sys.path.insert(0,"/usr/local/lib/betterdocker"); from dctlib import projects as w; '
                           'p=w.ROOT/' + repr(identifier) + ';\nif p.exists():\n'
                           ' assert json.loads((p/"request.json").read_text())["name"] == ' + repr(state['name']) + '\n'
                           ' w.storage_unmount(' + repr(identifier) + ')\n'

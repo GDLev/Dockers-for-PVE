@@ -13,7 +13,7 @@ import uuid
 
 import guest_state
 import host
-import provision as worker
+from dctlib import projects as worker
 import runtime
 import runtime_install
 import transfer

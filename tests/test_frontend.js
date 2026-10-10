@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const frontendSource = require('node:child_process').execFileSync('python3', ['scripts/build_frontend.py'], { encoding: 'utf8' });
 const definitions = {};
 const overrides = new Map();
 function callParent() {
@@ -55,7 +56,7 @@ context.Proxmox.Utils.IP6_match = { test: require('node:net').isIPv6 };
 for (const language of ['en', 'pl']) {
     vm.runInNewContext(fs.readFileSync('frontend/locales/' + language + '.js', 'utf8'), context);
 }
-vm.runInNewContext(fs.readFileSync('frontend/betterdocker.js', 'utf8'), context);
+vm.runInNewContext(frontendSource, context);
 const wizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(wizard);
 assert(wizard.initialized);
@@ -536,7 +537,7 @@ console.log("Node diagnostics registers a native navigation item and lazy card")
 
 context.Proxmox.Utils.override_task_descriptions = descriptions => { context.taskDescriptions = descriptions; };
 context.gettext = value => ({ Summary: 'Podsumowanie', Network: 'Sieć' })[value] || value;
-vm.runInNewContext(fs.readFileSync('frontend/betterdocker.js', 'utf8'), context);
+vm.runInNewContext(frontendSource, context);
 const polishWizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(polishWizard);
 assert.deepEqual(Array.from(polishWizard.items, item => item.title), ['Główne', 'Wdrożenie', 'Sieć', 'Potwierdź']);
@@ -546,7 +547,7 @@ assert.equal(polishPanel.title, "DCT 103 (web) na węźle 'pve'");
 assert.equal(context.taskDescriptions.betterdockersettings('betterdockersettings', '103'), 'DCT 103 - Edytuj zasoby / opcje');
 console.log('Polish wizard, node heading and settings task description passed');
 
-assert(!fs.readFileSync("frontend/betterdocker.js", "utf8").includes("background-image"));
+assert(!frontendSource.includes("background-image"));
 assert(!fs.readFileSync("frontend/betterdocker.css", "utf8").includes("bd-code"));
 console.log("Compose fields have no decorative line-number background");
 
@@ -581,7 +582,7 @@ console.log('Native snapshot submission, immutable names and view-only access pa
 const locales = context.PVE.betterdockerLocales;
 assert.deepEqual(Object.keys(locales.en.messages).sort(), Object.keys(locales.pl.messages).sort());
 for (const key of Object.keys(locales.en.messages)) {
-    assert(fs.readFileSync('frontend/betterdocker.js', 'utf8').includes(key), `Unused translation: ${key}`);
+    assert(frontendSource.includes(key), `Unused translation: ${key}`);
 }
 context.gettext = value => ({ Summary: 'Podsumowanie', Deployment: 'Native deployment' })[value] || value;
 const nativeTranslationWizard = { callParent, down: () => null, query: () => [] };

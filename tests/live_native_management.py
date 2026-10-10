@@ -11,7 +11,7 @@ import time
 import uuid
 import urllib.parse
 sys.path.insert(0,'/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from transfer import ssh_command
 from live_pools_hooks import api, task, wait_for
 from live_permissions import http

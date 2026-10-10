@@ -72,7 +72,7 @@ def published_ports(info):
     if not ids:
         return []
     if runtime.load().rootless:
-        import provision as worker
+        from dctlib import projects as worker
         import host
         config = json.loads((worker.ROOT / info['id'] / 'compose.runtime.json').read_text())
         result = []
@@ -297,7 +297,7 @@ def apply_rules(rules, table=TABLE, cache='applied.nft'):
 
 
 def reconcile():
-    import provision as worker
+    from dctlib import projects as worker
     rootless = runtime.load().rootless
     if rootless:
         import host

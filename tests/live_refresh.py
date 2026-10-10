@@ -9,7 +9,7 @@ import shutil
 import sys
 
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 import live_pools_hooks as live
 
 STATE = Path('/root/ux-refresh-fixture.json')

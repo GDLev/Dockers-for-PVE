@@ -13,7 +13,7 @@ import sys
 import tempfile
 import uuid
 
-import provision as worker
+from dctlib import projects as worker
 import guest_state as state
 
 TRANSFERS = worker.ROOT.parent / 'transfers'

@@ -11,7 +11,7 @@ import time
 import uuid
 
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 import runtime
 import guest_state
 import live_pools_hooks as live

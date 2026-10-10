@@ -118,6 +118,7 @@ case "$ACTION" in
             /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg \
             /usr/share/pve-manager/js/betterdocker-locales/en.js /usr/share/pve-manager/js/betterdocker-locales/pl.js \
             /usr/share/perl5/PVE/BetterDocker/Backup.pm /usr/share/perl5/PVE/BetterDocker/Firewall.pm /usr/share/perl5/PVE/BetterDocker/Replication.pm /usr/share/perl5/PVE/VZDump/Docker.pm /usr/share/perl5/PVE/HA/Resources/Docker.pm
+        rm -rf /usr/share/perl5/PVE/API2/BetterDocker
         finish_services
         echo 'UI integration removed. Docker projects, volumes, network/lease and firewall maintenance are retained.'
         exit 0 ;;
@@ -197,6 +198,12 @@ TARGETS=(
     /etc/betterdocker/runtime.json
     /usr/local/lib/betterdocker/rootless-engine.sh
 )
+for source in "$PROJECT_DIR"/scripts/dctlib/*.py; do
+    TARGETS+=("/usr/local/lib/betterdocker/dctlib/$(basename "$source")")
+done
+for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
+    TARGETS+=("/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")")
+done
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
         cp -a "${TARGETS[$index]}" "$BACKUP_DIR/addon-$index"
@@ -243,9 +250,15 @@ rollback() {
 cache_and_mark
 trap rollback ERR
 stage integration
-install -d -m 0755 /usr/local/lib/betterdocker
+install -d -m 0755 /usr/local/lib/betterdocker /usr/local/lib/betterdocker/dctlib
 install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
-install -d -m 0755 /usr/share/perl5/PVE/BetterDocker /usr/share/perl5/PVE/VZDump
+install -d -m 0755 /usr/share/perl5/PVE/BetterDocker /usr/share/perl5/PVE/VZDump /usr/share/perl5/PVE/API2/BetterDocker
+for source in "$PROJECT_DIR"/scripts/dctlib/*.py; do
+    install -m 0644 "$source" "/usr/local/lib/betterdocker/dctlib/$(basename "$source")"
+done
+for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
+    install -m 0644 "$source" "/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")"
+done
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
 install -m 0755 "$PROJECT_DIR/scripts/dct.py" "${TARGETS[37]}"
 install -m 0755 "$PROJECT_DIR/scripts/runtime.py" "${TARGETS[38]}"
@@ -273,7 +286,7 @@ install -m 0755 "$PROJECT_DIR/scripts/storage.pl" "${TARGETS[20]}"
 install -m 0755 "$PROJECT_DIR/scripts/provision.py" "${TARGETS[0]}"
 install -m 0755 "$PROJECT_DIR/scripts/docker-install.sh" "${TARGETS[1]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/API2/BetterDocker.pm" "${TARGETS[2]}"
-install -m 0644 "$PROJECT_DIR/frontend/betterdocker.js" "${TARGETS[3]}"
+python3 "$PROJECT_DIR/scripts/build_frontend.py" --output "${TARGETS[3]}"
 install -m 0644 "$PROJECT_DIR/frontend/betterdocker.css" "${TARGETS[4]}"
 install -m 0644 "$PROJECT_DIR/frontend/docker.svg" "${TARGETS[5]}"
 install -m 0644 "$PROJECT_DIR/systemd/betterdocker-addresses.service" "${TARGETS[6]}"
@@ -306,7 +319,7 @@ python3 /usr/local/lib/betterdocker/runtime_install.py initialize --runtime="$RU
 python3 - <<'PY'
 import sys
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 with worker.locked():
     for info in worker.summaries():
         if info['node'] == worker.current_node():

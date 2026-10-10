@@ -16,7 +16,7 @@ import time
 import uuid
 
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 import transfer
 
 

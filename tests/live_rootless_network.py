@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from live_firewall import remote
 from live_pools_hooks import api, task, wait_for
 
@@ -51,7 +51,7 @@ def main():
             base = '/nodes/' + node + '/docker/' + identifier
             task(api('create', base + '/action', action='force-stop'))
             task(api('delete', base))
-            remote(node, ['python3', '-c', 'import sys,json,shutil;sys.path.insert(0,"/usr/local/lib/betterdocker");import provision as w;p=w.ROOT/' + repr(identifier) + ';assert json.loads((p/"request.json").read_text())["name"]==' + repr(name) + ';shutil.rmtree(p)'], check=True)
+            remote(node, ['python3', '-c', 'import sys,json,shutil;sys.path.insert(0,"/usr/local/lib/betterdocker");from dctlib import projects as w;p=w.ROOT/' + repr(identifier) + ';assert json.loads((p/"request.json").read_text())["name"]==' + repr(name) + ';shutil.rmtree(p)'], check=True)
             assert remote(node, ['ip', 'link', 'show', 'bd' + identifier[:12]]).returncode != 0
             print('PASS DHCP client and owned endpoint removed', flush=True)
 

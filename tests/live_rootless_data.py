@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 import uuid
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 from live_pools_hooks import api, task
 from live_firewall import remote
 
@@ -50,7 +50,7 @@ def run(cleanup=False):
                 power(current, 'force-stop')
             task(api('delete', base(current)))
             for node in ('pve1', 'pve2', 'pve3'):
-                script = 'import json,shutil; from pathlib import Path; import provision as w; p=w.ROOT/' + repr(identifier) + ';\nif p.exists():\n assert json.loads((p/"request.json").read_text())["name"].startswith(' + repr(state['name']) + ');\n if w.storage_config(' + repr(identifier) + ').get("volid"): w.purge_retained_storage(' + repr(identifier) + ');\n shutil.rmtree(p)\n'
+                script = 'import json,shutil; from pathlib import Path; from dctlib import projects as w; p=w.ROOT/' + repr(identifier) + ';\nif p.exists():\n assert json.loads((p/"request.json").read_text())["name"].startswith(' + repr(state['name']) + ');\n if w.storage_config(' + repr(identifier) + ').get("volid"): w.purge_retained_storage(' + repr(identifier) + ');\n shutil.rmtree(p)\n'
                 remote(node, ['python3', '-c', 'import sys; sys.path.insert(0,"/usr/local/lib/betterdocker");\n' + script], check=True)
                 volumes = remote(node, ['docker', 'volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=bd-' + identifier], check=True).stdout.split()
                 if volumes:

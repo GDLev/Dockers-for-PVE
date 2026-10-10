@@ -15,7 +15,7 @@ import time
 import uuid
 
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 import live_pools_hooks as live
 from live_permissions import http
 
@@ -196,7 +196,7 @@ def run(args):
     print('PASS running/stopped saves, stale digest rejection and pending revert', flush=True)
     # A real worker operation lock, held by a disposable child process. No PVE
     # implementation is mocked or patched to make a conflict happen.
-    code = "import sys;sys.path.insert(0,'/usr/local/lib/betterdocker');import provision as w\nwith w.operation(sys.argv[1],'settings'):\n print('READY',flush=True)\n sys.stdin.readline()\n"
+    code = "import sys;sys.path.insert(0,'/usr/local/lib/betterdocker');from dctlib import projects as w\nwith w.operation(sys.argv[1],'settings'):\n print('READY',flush=True)\n sys.stdin.readline()\n"
     child = subprocess.Popen([sys.executable, '-c', code, running['id']], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         assert child.stdout.readline().strip() == 'READY'

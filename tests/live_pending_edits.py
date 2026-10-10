@@ -14,7 +14,7 @@ import time
 from unittest.mock import patch
 
 sys.path.insert(0, '/usr/local/lib/betterdocker')
-import provision as worker
+from dctlib import projects as worker
 import live_pools_hooks as live
 from live_permissions import http
 NODE = worker.current_node()

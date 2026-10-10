@@ -10,7 +10,7 @@ import tempfile
 import uuid
 import transfer
 
-import provision as worker
+from dctlib import projects as worker
 import guest_state as state
 
 
