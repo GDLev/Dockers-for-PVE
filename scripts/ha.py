@@ -72,11 +72,17 @@ def checkpoint(current, target):
 def check_recovery(identifier, target):
     if target != worker.current_node():
         raise ValueError('Recovery checkpoint check was sent to the wrong node')
+    worker.node_runtime.assert_compatible({'mode': info(identifier).get('runtime_mode', 'rootful'), 'count': 65536})
     checkpoint(info(identifier), target)
+
+
+def check_target(target):
+    transfer.check_runtime(target)
 
 
 def recover_guest(identifier, node):
     current = info(identifier)
+    worker.node_runtime.assert_compatible({'mode': current.get('runtime_mode', 'rootful'), 'count': 65536})
     recovery = current.get('ha_recovery')
     if not recovery:
         return
@@ -156,7 +162,7 @@ def main():
     if os.geteuid():
         raise SystemExit('Root required')
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('enroll', 'release', 'check_recovery', 'power', 'running', 'recover_guest'))
+    parser.add_argument('action', choices=('enroll', 'release', 'check_recovery', 'check_target', 'power', 'running', 'recover_guest'))
     parser.add_argument('values', nargs='+')
     args = parser.parse_args()
     globals()[args.action](*args.values)

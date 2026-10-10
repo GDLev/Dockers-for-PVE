@@ -1,4 +1,5 @@
 import tempfile
+import subprocess
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -10,6 +11,20 @@ firewall = module('firewall')
 
 
 class FirewallTests(unittest.TestCase):
+    def test_boot_cache_lock_is_available_while_waiting_for_daemon(self):
+        with tempfile.TemporaryDirectory() as folder:
+            def wait_for_daemon():
+                code = 'import sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);import firewall;firewall.STATE=Path(sys.argv[2]);\nwith firewall.lock(): print("cache lock available")'
+                result = subprocess.run([sys.executable, '-c', code, str(Path(firewall.__file__).parent), folder],
+                                        capture_output=True, text=True, check=True, timeout=2)
+                self.assertIn('cache lock available', result.stdout)
+            with patch.object(firewall, 'STATE', Path(folder)), \
+                    patch.object(firewall.runtime, 'load', return_value=SimpleNamespace(rootless=True)), \
+                    patch.dict(sys.modules, provision=SimpleNamespace(METADATA=Path(folder) / 'unavailable'),
+                               host=SimpleNamespace(ready=wait_for_daemon)):
+                with self.assertRaisesRegex(ValueError, 'configuration is unavailable'):
+                    firewall.reconcile()
+
     def test_ipset_exclusions_and_more_specific_inclusions(self):
         entries = ['create test hash:net family inet', 'add test 10.0.0.0/24',
                    'add test 10.0.0.0/25 nomatch', 'add test 10.0.0.7/32']
@@ -92,3 +107,15 @@ class FirewallTests(unittest.TestCase):
         for option in ('ipfilter', 'macfilter', 'ndp', 'ips', 'dhcp'):
             with self.subTest(option=option), self.assertRaisesRegex(ValueError, 'not supported'):
                 firewall.check_options({option: 1})
+
+    def test_rootless_forwarding_restore_keeps_guest_filter_and_cache(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(firewall, 'STATE', Path(folder)), \
+                patch.object(firewall.subprocess, 'run') as run, patch.object(firewall, 'command') as command:
+            run.return_value.returncode = 0
+            guest = Path(folder) / 'applied.nft'
+            guest.write_text('guest filtering')
+            firewall.apply_rules('rootless forwarding', table='betterdocker_rootless', cache='rootless.nft')
+            self.assertEqual(guest.read_text(), 'guest filtering')
+            self.assertEqual((Path(folder) / 'rootless.nft').read_text(), 'rootless forwarding')
+            for call in command.call_args_list:
+                self.assertEqual(call.kwargs['input'], 'delete table inet betterdocker_rootless\nrootless forwarding')

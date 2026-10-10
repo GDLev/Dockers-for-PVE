@@ -39,6 +39,10 @@ def remote(node, *args):
     return worker.capture(ssh_command(node) + [shlex.join([HELPER, *map(str, args)])])
 
 
+def check_runtime(target):
+    worker.node_runtime.assert_compatible(json.loads(remote(target, 'runtime')))
+
+
 @contextlib.contextmanager
 def private_metadata(folder, info):
     """An incoming stopped guest is not published before ownership is committed."""
@@ -73,6 +77,7 @@ def receive(token):
 def prepare(token, identifier, source, storage):
     folder = directory(token)
     current = state.read(GLOBAL_METADATA / (worker.project_id(identifier)+'.json'))
+    worker.node_runtime.assert_compatible({'mode': current.get('runtime_mode', 'rootful'), 'count': 65536})
     if current['node'] != source or current.get('migration') != token:
         raise ValueError('DCT migration ownership changed')
     if current.get('ipv4mode', 'static') != 'static':
@@ -274,6 +279,7 @@ def migrate(identifier, node, target, storage, digest=None):
             worker.assert_configuration_digest(identifier, node, digest)
             if worker.load_pending_network(worker.ROOT / identifier):
                 raise ValueError('Apply or revert pending network changes before migrating the DCT')
+            check_runtime(target)
             worker.recover_guest_hook(info)
             worker.require_stopped(worker.container_records(identifier))
             if info.get('replication') and target not in info['replication'].get('targets', {}):
@@ -335,10 +341,12 @@ def main():
     if os.geteuid():
         raise SystemExit('Root required')
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('receive','prepare','abort','finish','migrate','recover'))
+    parser.add_argument('action', choices=('receive','prepare','abort','finish','migrate','recover','runtime','check-runtime'))
     parser.add_argument('values', nargs='*')
     args = parser.parse_args()
-    if args.action == 'receive': receive(*args.values)
+    if args.action == 'runtime': print(json.dumps(worker.node_runtime.load().identity()))
+    elif args.action == 'check-runtime': check_runtime(*args.values)
+    elif args.action == 'receive': receive(*args.values)
     elif args.action == 'prepare': prepare(*args.values)
     elif args.action == 'abort': abort(*args.values)
     elif args.action == 'recover': recover(*args.values)

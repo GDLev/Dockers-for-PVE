@@ -17,6 +17,7 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | Method | Route | Purpose |
 | --- | --- | --- |
 | GET | `/nodes/<node>/docker` | List visible DCTs on a node. |
+| GET | `/nodes/<node>/docker?diagnostics=1` | Administrator diagnostics, including the node's `runtime` and `runtime_health`. Returns an array with one diagnostic object. |
 | POST | `/nodes/<node>/docker` | Create a DCT; send `deployment` as a JSON-encoded string and optional `pool` and `start`. Omitted `start` keeps the legacy API default of starting immediately. |
 | GET | `G/management` | Status, services, capabilities and configuration digest. |
 | GET / PUT | `G/config` | Notes, tags, protection, startup and hook configuration. |
@@ -76,6 +77,8 @@ curl --fail --silent --show-error \
 ```
 
 Use native PVE routes for pools, backup jobs, storage, replication, HA and tasks. DCT HA resource IDs use `docker:<vmid>`. The installed PVE API schema describes each route's accepted parameters. Deployment source and environment variables require configuration privileges; audit access does not expose them.
+
+Runtime mode is selected when installing on each node. Diagnostics are read-only; there is no mode-changing API. Migration, replication and HA require matching runtime modes. Backups can be restored in either mode when the deployment meets the destination's restrictions. Rootless rejects external bind mounts and writable-layer quotas. It does not fall back to the rootful socket when an operation fails.
 
 ## Local CLI
 

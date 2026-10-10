@@ -4,7 +4,8 @@
 set -Eeuo pipefail
 
 main() {
-    local action="${1:-install}"
+    local action=install
+    if [[ ${1:-} != --* && $# -gt 0 ]]; then action=$1; shift; fi
     local project_dir
     [[ $EUID -eq 0 ]] || { echo 'Run as root on a Proxmox VE host.' >&2; return 1; }
     case "$action" in
@@ -33,7 +34,7 @@ main() {
         return 1
     }
     # Package managers must not consume the incoming installation script.
-    bash "$project_dir/start.sh" "$action" </dev/null
+    bash "$project_dir/start.sh" "$action" "$@" </dev/null
 }
 
 main "$@"

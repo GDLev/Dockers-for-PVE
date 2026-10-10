@@ -19,6 +19,8 @@ from live_pools_hooks import api, task, wait_for
 
 
 def remote(node, args, **kwargs):
+    if args[0] == 'docker':
+        args = ['/usr/local/lib/betterdocker/runtime.py', 'docker', *args[1:]]
     command = args if node == worker.current_node() else transfer.ssh_command(node) + [shlex.join(args)]
     return subprocess.run(command, text=True, capture_output=True, **kwargs)
 
@@ -28,6 +30,7 @@ def main():
     parser.add_argument('--manifest', default='/root/dct-firewall-acceptance.json')
     parser.add_argument('--cleanup', action='store_true')
     parser.add_argument('--from-reload', action='store_true')
+    parser.add_argument('--backup-storage', default='pbs1')
     parser.add_argument('--phase', choices=['basic', 'extended', 'lifecycle'], default='basic')
     args = parser.parse_args()
     path = Path(args.manifest)
@@ -67,6 +70,12 @@ def main():
                 power(info, 'force-stop'); task(api('delete', base(info)))
                 if info.get('replication'):
                     remote(info['node'], ['/usr/local/lib/betterdocker/provision.py', 'purge-retained-storage', info['id']], check=True)
+                script = ('import sys,json,shutil;sys.path.insert(0,"/usr/local/lib/betterdocker");import provision as w;'
+                          'p=w.ROOT/' + repr(info['id']) + ';\nif p.exists():\n'
+                          ' assert json.loads((p/"request.json").read_text())["name"].startswith(' + repr(state['prefix']) + ')\n'
+                          ' if w.storage_config(' + repr(info['id']) + ').get("volid"): w.purge_retained_storage(' + repr(info['id']) + ')\n'
+                          ' shutil.rmtree(p)\n w.release_id(' + repr(info['id']) + ')\n')
+                remote(info['node'], ['python3', '-c', script], check=True)
 
                 assert not Path(f'/etc/pve/firewall/{info["vmid"]}.fw').exists()
         if state.get('user'): api('delete', '/access/users/' + state['user'])
@@ -80,6 +89,8 @@ def main():
         missing = [k for k in ('enable', 'policy_in', 'policy_out') if k not in original]
         if missing: values['delete'] = ','.join(missing)
         api('set', '/cluster/firewall/options', **values)
+        if state.get('archive'):
+            api('delete', '/nodes/' + worker.current_node() + '/storage/' + state.get('backup_storage', 'pbs1') + '/content/' + state['archive'])
         path.unlink(); print('PASS cleanup', flush=True); return
     if args.phase != 'basic':
         guests = [next(i for i in worker.summaries() if i['id'] == identifier) for identifier in state['guests'][:2]]
@@ -199,8 +210,9 @@ def main():
             power(clone, 'start'); probe(clone, True)
             rules(clone, []); probe(clone, False); rules(clone, [allow]); probe(clone, True)
             print('PASS clone firewall ownership and enforced policy', flush=True)
-            task(api('create', '/nodes/' + a['node'] + '/vzdump', vmid=a['vmid'], storage='pbs1', mode='stop'))
-            backups = api('get', '/nodes/' + a['node'] + '/storage/pbs1/content', content='backup', vmid=a['vmid'])
+            state['backup_storage'] = args.backup_storage; save()
+            task(api('create', '/nodes/' + a['node'] + '/vzdump', vmid=a['vmid'], storage=args.backup_storage, mode='stop'))
+            backups = api('get', '/nodes/' + a['node'] + '/storage/' + args.backup_storage + '/content', content='backup', vmid=a['vmid'])
             archive = max(backups, key=lambda i: i.get('ctime', 0))['volid']
             state['archive'] = archive; save()
             name = state['prefix'] + '-restore'

@@ -4,6 +4,8 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Runtime mode": "Runtime mode",
+            "Runtime service": "Runtime service",
             "Invalid Docker image": "Invalid Docker image",
             "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.": "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.",
             "Invalid DNS server list": "Invalid DNS server list",

@@ -5,6 +5,8 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "Runtime mode": "Tryb uruchomienia",
+            "Runtime service": "Usługa runtime",
             "Invalid Docker image": "Nieprawidłowy obraz Dockera",
             "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.": "Użyj liter, cyfr, kropek, podkreśleń lub łączników; zacznij od litery lub cyfry.",
             "Invalid DNS server list": "Nieprawidłowa lista serwerów DNS",

@@ -81,6 +81,8 @@ sub check_running {
 }
 sub migrate {
     my ($class, $haenv, $id, $target, $online) = @_;
+    my $source = $class->config($id);
+    helper($source, 'check_target', $target);
     $class->shutdown($haenv, $id) if $class->check_running($haenv, $id);
     my $info = $class->config($id);
     require PVE::API2::BetterDocker;

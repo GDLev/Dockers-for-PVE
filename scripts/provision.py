@@ -11,11 +11,13 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+import runtime as node_runtime
 
 ROOT = Path('/var/lib/betterdocker/projects')
 METADATA = Path('/etc/pve/betterdocker')
@@ -82,7 +84,8 @@ def run(args, **kwargs):
         if key in os.environ:
             kwargs['env'][key] = os.environ[key]
     kwargs.setdefault('check', True)
-    return subprocess.run(args, text=True, **kwargs)
+    kwargs.setdefault('text', True)
+    return node_runtime.run(args, delegated=not trusted_management(), **kwargs)
 
 
 def capture(args):
@@ -420,7 +423,10 @@ def validate_delegated_containers(containers, identifier):
 def validate_delegated_networks(networks):
     for network in networks:
         ipam = network.get('IPAM') or {}
-        if network.get('Driver') != 'bridge' or network.get('Options') or ipam.get('Driver', 'default') != 'default' or ipam.get('Options'):
+        options = network.get('Options') or {}
+        if node_runtime.load().rootless and options == {'com.docker.network.bridge.gateway_mode_ipv4': 'nat-unprotected'}:
+            options = {}
+        if network.get('Driver') != 'bridge' or options or ipam.get('Driver', 'default') != 'default' or ipam.get('Options'):
             raise ValueError('Custom saved networks require administrator access')
 
 
@@ -468,6 +474,11 @@ def prepare(data, identifier, directory, project_directory=None):
         location = ' (' + ', '.join(locations) + ')' if locations else ''
         raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
     config = bind_ports(config, data['address'], identifier)
+    if node_runtime.load().rootless:
+        for service in config['services'].values():
+            for mount in service.get('volumes', []):
+                if mount.get('type') == 'bind':
+                    safe_bind(mount.get('source', ''), identifier)
     if not trusted_management():
         validate_delegated_config(config, identifier)
     apply_settings(config, load_settings(project_directory))
@@ -729,6 +740,8 @@ def notes(identifier, node, description=None):
 
 def rootfs_quota_support():
     """Do not advertise Docker size quotas on an unsupported backing filesystem."""
+    if node_runtime.load().rootless:
+        return {'supported': False, 'reason': 'Writable-layer quotas are not supported by the rootless runtime'}
     cache = ROOT.parent / 'rootfs-quota.json'
     if cache.exists() and time.time() - cache.stat().st_mtime < 60:
         return json.loads(cache.read_text())
@@ -787,9 +800,10 @@ def storage_unit(identifier, settings):
         raise ValueError('Invalid storage mount unit')
     options = 'nodev,nosuid' if image.is_block_device() else 'loop,nodev,nosuid'
     (Path('/etc/systemd/system') / unit).write_text(
-        '[Unit]\nDescription=BetterDocker data disk\nBefore=docker.service\nAfter=betterdocker-addresses.service\n'
+        '[Unit]\nDescription=BetterDocker data disk\nDefaultDependencies=no\nConflicts=umount.target\nBefore=umount.target '
+        + node_runtime.load().system_unit + '\nAfter=betterdocker-addresses.service\n'
         '\n[Mount]\nWhat=' + str(image) + '\nWhere=' + str(point) + '\nType=ext4\nOptions=' + options +
-        '\n\n[Install]\nRequiredBy=docker.service\n')
+        '\n\n[Install]\nRequiredBy=docker.service\n'.replace('docker.service', node_runtime.load().system_unit))
     run(['systemctl', 'daemon-reload'], capture_output=True)
     run(['systemctl', 'enable', unit], capture_output=True)
 
@@ -814,7 +828,7 @@ def recover_storage_transaction(identifier):
             raise ValueError('Interrupted allocation: inspect allocated-volume.json before retrying')
         return
     state = json.loads(journal.read_text())
-    daemon_active = run(['systemctl', 'is-active', 'docker.service'], check=False, capture_output=True).returncode == 0
+    daemon_active = node_runtime.service('is-active', runner=run).returncode == 0
     if daemon_active:
         require_stopped(container_records(identifier))
     if state['operation'] == 'grow':
@@ -944,11 +958,17 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
             run(['mkfs.ext4', '-q', '-m', '0', str(device)])
             options = 'nodev,nosuid' if device.is_block_device() else 'loop,nodev,nosuid'
             run(['mount', '-o', options, str(device), str(staging)])
+            node_runtime.empty_data_root(staging)
             mapping = {}
             for index, (key, source) in enumerate(sources.items()):
                 target = staging / ('data-' + str(index))
-                target.mkdir()
-                if source.exists():
+                if node_runtime.load().rootless and source.exists():
+                    node_runtime.copy_data(source, target)
+                elif node_runtime.load().rootless:
+                    node_runtime.data_directory(target)
+                else:
+                    target.mkdir()
+                if source.exists() and not node_runtime.load().rootless:
                     run(['cp', '-a', '--', str(source) + '/.', str(target)], timeout=86400)
                 mapping[key] = str(folder / 'storage-data' / target.name)
             run(['umount', str(staging)])
@@ -999,10 +1019,12 @@ def storage_mount(identifier):
         backing = device if image.is_block_device() else capture(['losetup', '-n', '-O', 'BACK-FILE', device]).strip()
         if Path(backing).resolve() != image.resolve():
             raise ValueError('Project storage mount is occupied by another filesystem')
+        node_runtime.empty_data_root(mountpoint)
         return
     mountpoint.mkdir(mode=0o700, exist_ok=True)
     options = 'nodev,nosuid' if image.is_block_device() else 'loop,nodev,nosuid'
     run(['mount', '-o', options, str(image), str(mountpoint)])
+    node_runtime.empty_data_root(mountpoint)
 
 
 def apply_storage(config, identifier):
@@ -1141,10 +1163,16 @@ def project_storage_limit(identifier, node, size_mib, digest=None, storage=''):
             point.mkdir(mode=0o700)
             run(['mount', '-o', 'loop,nodev,nosuid', str(image), str(point)])
             mounted = True
+            node_runtime.empty_data_root(point)
             for index, (key, path) in enumerate(sources.items()):
                 target = point / ('data-' + str(index))
-                target.mkdir()
-                if path.exists():
+                if node_runtime.load().rootless and path.exists():
+                    node_runtime.copy_data(path, target)
+                elif node_runtime.load().rootless:
+                    node_runtime.data_directory(target)
+                else:
+                    target.mkdir()
+                if path.exists() and not node_runtime.load().rootless:
                     run(['cp', '-a', '--', str(path) + '/.', str(target)], timeout=1800)
                 mapping[key] = str(target)
             write_json(folder / 'storage.json', {'size_mib': size_mib, 'mapping': mapping})
@@ -1154,7 +1182,7 @@ def project_storage_limit(identifier, node, size_mib, digest=None, storage=''):
             if not re.fullmatch(r'[a-zA-Z0-9_.\\-]+\.mount', unit):
                 raise ValueError('Invalid storage mount unit')
             unit_path = Path('/etc/systemd/system') / unit
-            unit_path.write_text('[Unit]\nDescription=BetterDocker project data disk\nBefore=docker.service\n\n[Mount]\nWhat=' + str(image) + '\nWhere=' + str(point) + '\nType=ext4\nOptions=loop,nodev,nosuid\n\n[Install]\nRequiredBy=docker.service\n')
+            unit_path.write_text('[Unit]\nDescription=BetterDocker project data disk\nBefore=' + node_runtime.load().system_unit + '\n\n[Mount]\nWhat=' + str(image) + '\nWhere=' + str(point) + '\nType=ext4\nOptions=loop,nodev,nosuid\n\n[Install]\nRequiredBy=docker.service\n'.replace('docker.service', node_runtime.load().system_unit))
             run(['systemctl', 'daemon-reload'])
             run(['systemctl', 'enable', unit])
         except Exception:
@@ -1364,6 +1392,9 @@ def service_settings(identifier, node, service, values, digest=None):
         rows = pending_settings(identifier, node, service)
         effective = {row['key']: row.get('pending', row['value']) for row in rows}
         proposed = validate_settings(dict(effective, **values))
+        candidate = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
+        apply_settings(candidate, {service: proposed})
+        node_runtime.check_resources(candidate)
         if 'disk' not in values and not proposed.get('disk'):
             proposed.pop('disk', None)
         authorize_config_keys(key for key in proposed if proposed[key] != effective.get(key))
@@ -1809,13 +1840,26 @@ def firewall_check(identifier, node):
 
 
 def prepare_firewall(info):
-    if not info.get('firewall'):
+    rootless = node_runtime.load().rootless
+    if not info.get('firewall') and not rootless:
         return
-    firewall_check(info['id'], info['node'])
+    if info.get('firewall'):
+        firewall_check(info['id'], info['node'])
     directory = ROOT / info['id']
     if not (directory / 'snapshot-restored.json').exists():
         run(compose_base(directory, info['id']) + ['up', '--no-start', '--no-recreate'], timeout=1800)
     run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+
+
+def finish_network_start(info):
+    if not info.get('firewall') and not node_runtime.load().rootless:
+        return
+    try:
+        run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+    except Exception:
+        # Never leave a newly started guest with incomplete requested filtering.
+        run(compose_base(ROOT / info['id'], info['id']) + ['stop'], timeout=1800)
+        raise
 
 
 def load_pending_network(directory):
@@ -1851,7 +1895,7 @@ def recover_network_transaction(identifier, node):
     if current['node'] != node or current['id'] != identifier:
         raise ValueError('Project belongs to another node')
     # Address restoration runs before Docker at boot. An inactive daemon has no running containers.
-    daemon = run(['systemctl', 'is-active', 'docker.service'], capture_output=True, check=False)
+    daemon = node_runtime.service('is-active', runner=run)
     if daemon.returncode == 0:
         require_stopped(container_records(identifier))
     remove_network(current)
@@ -2054,6 +2098,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
                 'ipv4mode': data.get('ipv4mode', 'static'), 'cidr': data.get('cidr', ''),
                 'interface': 'bd' + identifier[:12], 'mtu': data.get('mtu', 0), 'firewall': data.get('firewall', 0),
                 'hwaddr': data.get('hwaddr') or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2))}
+        info['runtime_mode'] = node_runtime.load().mode
         if hookscript:
             info['hookscript'] = hookscript
         write_json(METADATA / (identifier + '.json'), info)
@@ -2066,8 +2111,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
                 expect_guest_hook(info, 'post-start')
                 prepare_firewall(info)
                 run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
-                if info.get('firewall'):
-                    run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+                finish_network_start(info)
                 guest_hook(info, 'post-start')
             else:
                 run(compose_base(directory, identifier) + ['up', '--no-start'], timeout=1800)
@@ -2211,7 +2255,7 @@ def daemon_resume(node):
             # PVE's startall owns boot ordering. Policies are restored by project Start.
             path.unlink()
             return
-        if any(info.get('firewall') for info in summaries() if info['node'] == node):
+        if node_runtime.load().rootless or any(info.get('firewall') for info in summaries() if info['node'] == node):
             run([str(Path(__file__).with_name('firewall.py')), 'apply'])
         owned = {item['id'] for info in summaries() if info['node'] == node
                  for item in container_records(info['id'])}
@@ -2226,6 +2270,14 @@ def daemon_resume(node):
             if policy == 'on-failure' and row['policy'].get('MaximumRetryCount'):
                 policy += ':' + str(row['policy']['MaximumRetryCount'])
             run(['docker', 'update', '--restart=' + policy, row['id']], capture_output=True)
+        if node_runtime.load().rootless:
+            try:
+                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+            except Exception:
+                for row in state['containers']:
+                    if row['id'] in owned and row['state'] in ('running', 'restarting', 'paused'):
+                        run(['docker', 'stop', row['id']], capture_output=True)
+                raise
         for project in {row['project'] for row in state['containers']}:
             (ROOT.parent / 'restart-paused' / (project + '.json')).unlink(missing_ok=True)
         path.unlink()
@@ -2582,8 +2634,7 @@ def action(identifier, node, operation, timeout=60):
                     run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
                 else:
                     run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
-            if info.get('firewall'):
-                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+            finish_network_start(info)
             guest_hook(info, 'post-start')
         elif operation == 'stop' and not was_running:
             run(compose_base(directory, identifier) + ['stop'], timeout=1800)
@@ -2673,7 +2724,8 @@ def restore(node):
             if info['node'] == node and info.get('id'):
                 recover_storage_transaction(info['id'])
         for path in ROOT.glob('*/storage.json'):
-            if (METADATA / (path.parent.name + '.json')).exists():
+            metadata = METADATA / (path.parent.name + '.json')
+            if metadata.exists() and json.loads(metadata.read_text())['node'] == node:
                 storage_mount(path.parent.name)
         for info in summaries():
             if info['node'] == node:
@@ -2850,8 +2902,7 @@ def service_action(identifier, node, service, verb, timeout=60):
                     run(compose_base(directory, identifier) + command + [service], timeout=1800)
         clear_network_resume(identifier, service)
         if verb in ('start', 'restart', 'reboot'):
-            if info.get('firewall'):
-                run([str(Path(__file__).with_name('firewall.py')), 'apply'])
+            finish_network_start(info)
             restore_restart_policy(identifier, service)
         refresh(node)
 
@@ -2934,7 +2985,9 @@ def diagnostics(node):
     markers = ['/usr/share/pve-manager/index.html.tpl', '/usr/share/perl5/PVE/API2/Nodes.pm',
                '/usr/share/perl5/PVE/API2/Cluster.pm', '/usr/share/perl5/PVE/Cluster.pm']
     integration = all(Path(p).is_file() for p in targets) and all(Path(p).is_file() and 'BEGIN BETTERDOCKER' in Path(p).read_text() for p in markers)
-    return {'addon': '19', 'pve': probe(['pveversion']), 'engine': probe(['docker', '--version']),
+    selected = node_runtime.load()
+    return {'addon': '19', 'runtime': selected.mode, 'runtime_health': node_runtime.service('is-active', runner=run).stdout.strip(),
+            'pve': probe(['pveversion']), 'engine': probe(['docker', '--version']),
             'compose': probe(['docker', 'compose', 'version', '--short']),
             'timer': probe(['systemctl', 'is-active', 'betterdocker-refresh.timer']),
             'addresses': probe(['systemctl', 'is-active', 'betterdocker-addresses.service']),
@@ -3131,6 +3184,7 @@ def snapshot_mounts(identifier, containers, allow_missing=False):
                     raise ValueError('A writable volume is shared with another project')
                 if source.resolve() != Path(volume['Mountpoint']).resolve():
                     raise ValueError('Volume mount does not match Docker metadata')
+                node_runtime.check_volume_path(source, mount['Name'])
             else:
                 raise ValueError('Unsupported writable snapshot mount')
             if not source.is_dir() and not (allow_missing and not source.exists()):
@@ -3171,7 +3225,7 @@ def snapshot_check(identifier, name):
     if folder.is_symlink() or not folder.is_dir():
         raise ValueError('Snapshot does not exist')
     manifest = json.loads((folder / 'manifest.json').read_text())
-    if manifest.get('version') != 1 or manifest.get('id') != identifier or manifest.get('name') != name:
+    if manifest.get('version') not in (1, 2) or manifest.get('id') != identifier or manifest.get('name') != name:
         raise ValueError('Invalid snapshot manifest')
     if snapshot_digest(folder) != json.loads((folder / 'checksums.json').read_text()):
         raise ValueError('Snapshot integrity check failed; nothing was restored')
@@ -3316,7 +3370,8 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
         data.mkdir(mode=0o700)
         for index, entry in enumerate(mounts):
             entry['copy'] = 'data/' + str(index)
-            run(['cp', '-a', '--reflink=auto', '--', entry['source'], str(temporary / entry['copy'])], timeout=86400)
+            node_runtime.copy_data(entry['source'], temporary / entry['copy'], runner=run)
+            node_runtime.remap_tree(temporary / entry['copy'], node_runtime.load(), node_runtime.Runtime())
         for index, container in enumerate(containers):
             tag = 'betterdocker-snapshot/' + identifier + ':' + uuid.uuid4().hex
             tags.append(tag)
@@ -3334,7 +3389,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
         write_json(temporary / 'networks.json', networks)
         write_json(temporary / 'containers.json', containers)
         size = sum(path.stat().st_size for path in temporary.rglob('*') if path.is_file() and not path.is_symlink())
-        write_json(temporary / 'manifest.json', {'version': 1, 'id': identifier, 'name': name,
+        write_json(temporary / 'manifest.json', {'version': 2 if node_runtime.load().rootless else 1, 'runtime': node_runtime.load().identity(), 'id': identifier, 'name': name,
                    'created': int(time.time()), 'description': description, 'recovery': recovery,
                    'mounts': mounts, 'size': size, 'native_storage': native})
         write_json(temporary / 'checksums.json', snapshot_digest(temporary))
@@ -3358,23 +3413,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
 
 def docker_engine(method, path, body):
     """Only the local Docker socket is used; never log Config/Env or daemon responses."""
-    import http.client
-    import socket
-    class Connection(http.client.HTTPConnection):
-        def connect(self):
-            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.settimeout(1800)
-            self.sock.connect('/var/run/docker.sock')
-    connection = Connection('localhost', timeout=1800)
-    try:
-        connection.request(method, path, body=json.dumps(body), headers={'Content-Type': 'application/json'})
-        response = connection.getresponse()
-        payload = response.read()
-        if response.status not in (200, 201, 204):
-            raise ValueError('Docker snapshot restore failed (HTTP ' + str(response.status) + '); see Task History')
-        return json.loads(payload) if payload else {}
-    finally:
-        connection.close()
+    return node_runtime.request(method, path, body)
 
 
 def snapshot_apply(identifier, node, name, check_only=False):
@@ -3476,7 +3515,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
         unit = capture(['systemd-escape', '--path', '--suffix=mount', str(project / 'storage-data')]).strip()
         if not before_storage:
             unit_path = Path('/etc/systemd/system') / unit
-            unit_path.write_text('[Unit]\nDescription=BetterDocker data disk\nBefore=docker.service\n\n[Mount]\nWhat=' + str(project / 'storage.ext4') + '\nWhere=' + str(project / 'storage-data') + '\nType=ext4\nOptions=loop,nodev,nosuid\n\n[Install]\nRequiredBy=docker.service\n')
+            unit_path.write_text('[Unit]\nDescription=BetterDocker data disk\nBefore=' + node_runtime.load().system_unit + '\n\n[Mount]\nWhat=' + str(project / 'storage.ext4') + '\nWhere=' + str(project / 'storage-data') + '\nType=ext4\nOptions=loop,nodev,nosuid\n\n[Install]\nRequiredBy=docker.service\n'.replace('docker.service', node_runtime.load().system_unit))
             run(['systemctl', 'daemon-reload'], capture_output=True)
             run(['systemctl', 'enable', unit], capture_output=True)
             (project / 'storage-data').mkdir(mode=0o700, exist_ok=True)
@@ -3484,13 +3523,14 @@ def snapshot_apply(identifier, node, name, check_only=False):
         storage_mount(identifier)
     for entry in manifest['mounts']:
         target = Path(entry['source'])
-        target.mkdir(parents=True, exist_ok=True)
-        for child in target.iterdir():
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-        run(['cp', '-a', '--', str(folder / entry['copy']) + '/.', str(target)], timeout=86400)
+        node_runtime.data_directory(target)
+        with node_runtime.anchored(target if node_runtime.load().rootless else target.resolve()) as fd:
+            for name in os.listdir(fd):
+                if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                    shutil.rmtree(name, dir_fd=fd)
+                else:
+                    os.unlink(name, dir_fd=fd)
+        node_runtime.restore_data(folder / entry['copy'], target, runner=run)
     for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt'):
         source, target = configs / filename, project / filename
         if source.exists():
@@ -3665,7 +3705,7 @@ def main():
     elif args.operation in ('console-check', 'console'):
         command = console_target(*values)
         if args.operation == 'console':
-            os.execvp(command[0], command)
+            node_runtime.exec_docker(command, delegated=not trusted_management())
     elif args.operation == 'detail':
         print(json.dumps(detail(*values)))
     elif args.operation == 'lifecycle':

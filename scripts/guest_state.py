@@ -74,6 +74,7 @@ def owned_mounts(identifier, containers):
                 users = set(worker.capture(['docker','ps','--no-trunc','-aq','--filter','volume='+mount['Name']]).split())
                 if users - owned or path.resolve() != Path(volume['Mountpoint']).resolve():
                     raise ValueError('A backup volume is shared or its ownership changed')
+                worker.node_runtime.check_volume_path(path, mount['Name'])
             else:
                 raise ValueError('Unsupported DCT backup mount type')
             if not path.is_dir() and not path.is_file():
@@ -214,7 +215,8 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
             (folder / 'data').mkdir(mode=0o700)
             for index, mount in enumerate(mounts):
                 mount['copy'] = 'data/' + str(index)
-                worker.run(['cp', '-a', '--reflink=auto', '--', mount['source'], str(folder / mount['copy'])], timeout=86400)
+                worker.node_runtime.copy_data(mount['source'], folder / mount['copy'], runner=worker.run)
+                worker.node_runtime.remap_tree(folder / mount['copy'], worker.node_runtime.load(), worker.node_runtime.Runtime())
             for container in containers:
                 tag = 'betterdocker-export/' + identifier + ':' + uuid.uuid4().hex
                 state['tags'].append(tag)
@@ -230,8 +232,12 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
             worker.run(['docker', 'image', 'save', '-o', str(folder / 'images.tar'), *state['tags']], timeout=86400)
             os.chmod(folder / 'images.tar', 0o600)
             write(folder / 'containers.json', containers)
+            if worker.node_runtime.load().rootless:
+                for network in networks:
+                    (network.get('Options') or {}).pop('com.docker.network.bridge.gateway_mode_ipv4', None)
             write(folder / 'networks.json', networks)
-            write(folder / 'manifest.json', {'version': 1, 'kind': 'dct-state', 'id': identifier,
+            selected = worker.node_runtime.load()
+            write(folder / 'manifest.json', {'version': 2 if selected.rootless else 1, 'runtime': selected.identity(), 'kind': 'dct-state', 'id': identifier,
                   'vmid': int(info['vmid']), 'name': info['name'], 'created': int(time.time()), 'mounts': mounts})
             write(folder / 'checksums.json', worker.snapshot_digest(folder))
         finally:
@@ -257,7 +263,7 @@ def check_state(folder):
         if (folder / name).is_symlink() or not (folder / name).is_file():
             raise ValueError('Invalid DCT backup manifest')
     manifest = read(folder / 'manifest.json')
-    if manifest.get('version') != 1 or manifest.get('kind') != 'dct-state':
+    if manifest.get('version') not in (1, 2) or manifest.get('kind') != 'dct-state':
         raise ValueError('Unsupported DCT backup format')
     worker.project_id(manifest.get('id', ''))
     if worker.snapshot_digest(folder) != read(folder / 'checksums.json'):
@@ -445,7 +451,9 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                     address=request['address'], cidr=request['cidr'], ipv4mode=request['ipv4mode'], mtu=request['mtu'],
                     hwaddr=request['hwaddr'] or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2)),
                     interface='bd' + identifier[:12], status='restoring', created=int(time.time()), template=bool(template))
+        info['runtime_mode'] = worker.node_runtime.load().mode
         project.mkdir(parents=True, mode=0o700)
+        worker.node_runtime.read_access(project)
         imports = worker.ROOT.parent / 'imports'
         imports.mkdir(parents=True, exist_ok=True, mode=0o700)
         journal = imports / (identifier + '.json')
@@ -488,11 +496,10 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                 if target.is_symlink() or any(parent.is_symlink() for parent in target.parents):
                     raise ValueError('DCT restore target crosses a symbolic link')
                 if mount.get('file'):
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    worker.run(['cp','-a','--',str(folder / mount['copy']),str(target)],timeout=86400)
+                    worker.node_runtime.data_directory(target.parent)
                 else:
-                    target.mkdir(parents=True, exist_ok=True)
-                    worker.run(['cp', '-a', '--', str(folder / mount['copy']) + '/.', str(target)], timeout=86400)
+                    worker.node_runtime.data_directory(target)
+                worker.node_runtime.restore_data(folder / mount['copy'], target, file=bool(mount.get('file')), runner=worker.run)
             for network in read(folder / 'networks.json'):
                 name = network_names[network['Name']]
                 body = {'Name':name, 'Driver':'bridge', 'Internal':network.get('Internal',False), 'Attachable':network.get('Attachable',False),
@@ -539,6 +546,10 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                     for binding in bindings or []:
                         binding['HostIp'] = info['address']
                 host['NetworkMode'] = network_names.get(host.get('NetworkMode'), host.get('NetworkMode'))
+                if manifest.get('runtime', {}).get('mode') == 'rootless' and not worker.node_runtime.load().rootless:
+                    service = body['Labels']['com.docker.compose.service']
+                    host['PortBindings'] = worker.node_runtime.port_bindings(runtime['services'][service].get('ports', []), info['address'])
+                    body['ExposedPorts'] = dict(body.get('ExposedPorts') or {}, **{key: {} for key in host['PortBindings']})
                 # A restored/clone guest remains stopped independently of daemon restarts.
                 host['RestartPolicy'] = {'Name':'no', 'MaximumRetryCount':0}
                 body['HostConfig'] = host
@@ -574,7 +585,7 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
     return info
 
 
-def cleanup_import(identifier):
+def cleanup_import(identifier, keep_reservation=False):
     journal = worker.ROOT.parent / 'imports' / (worker.project_id(identifier)+'.json')
     if not journal.exists():
         return
@@ -628,7 +639,8 @@ def cleanup_import(identifier):
         worker.run(['systemctl','daemon-reload'],capture_output=True)
         path.unlink()
     shutil.rmtree(worker.ROOT / identifier)
-    worker.release_id(identifier)
+    if not keep_reservation:
+        worker.release_id(identifier)
     (worker.ROOT.parent / 'restart-paused' / (identifier + '.json')).unlink(missing_ok=True)
     journal.unlink()
 

@@ -83,6 +83,7 @@ sub hook_core {
         my ($result, $error);
         eval {
             my $id = $plugin->identifier($job->{guest});
+            helper($plugin->{node}, 'check-runtime', $job->{target}) unless $job->{remove_job};
             helper($plugin->{node}, 'prepare', $id, $plugin->{node}, '--lock-fd', $fd) unless $job->{remove_job};
             my $record_sync = \&PVE::ReplicationState::record_sync_end;
             local *PVE::ReplicationState::record_sync_end = sub {

@@ -97,6 +97,15 @@ class NetworkEditTests(unittest.TestCase):
              patch.object(worker, 'remove_network'), patch.object(worker, 'ensure_address'):
             self.assertTrue(worker.recover_network_transaction(ID,'pve'))
 
+    def test_boot_does_not_mount_a_retained_disk_owned_by_another_node(self):
+        data = self.configure()
+        worker.write_json(self.directory / 'storage.json', {'volid': 'local-lvm:vm-150-disk-0'})
+        worker.write_json(self.metadata / (ID + '.json'), dict(data, id=ID, node='other', status='stopped'))
+        with patch.object(worker, 'storage_mount') as mount, patch.object(worker, 'recover_storage_transaction') as recover:
+            worker.restore('pve')
+            mount.assert_not_called()
+            recover.assert_not_called()
+
     def test_one_failed_dhcp_project_does_not_block_other_status_refresh(self):
         self.configure()
         peer = 'e'*32

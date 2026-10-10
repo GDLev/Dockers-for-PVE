@@ -2,7 +2,15 @@
 # Run on each Proxmox VE node: bash start.sh install | repair | uninstall | check
 set -Eeuo pipefail
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-ACTION=${1:-install}
+ACTION=install
+if [[ ${1:-} != --* && $# -gt 0 ]]; then ACTION=$1; shift; fi
+RUNTIME_ARGUMENTS=()
+for option in "$@"; do
+    case "$option" in
+        --runtime=rootful|--runtime=rootless) RUNTIME_ARGUMENTS+=("$option") ;;
+        *) echo "Unknown option: $option" >&2; exit 2 ;;
+    esac
+done
 [[ $EUID -eq 0 ]] || { echo 'Run as root on a Proxmox VE host.' >&2; exit 1; }
 for command in pveversion pvesh perl systemctl flock; do
     command -v "$command" >/dev/null || { echo "Missing: $command" >&2; exit 1; }
@@ -58,10 +66,14 @@ case "$ACTION" in
     install|repair) ;;
     *) echo 'Usage: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
 esac
+RUNTIME_MODE=$(python3 "$PROJECT_DIR/scripts/runtime_install.py" select --interactive "${RUNTIME_ARGUMENTS[@]}")
 if [[ "$ACTION" == install ]]; then
     echo 'Updating the package index and installing BetterDocker dependencies.'
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs nftables iptables
+    if [[ "$RUNTIME_MODE" == rootless ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y uidmap dbus-user-session
+    fi
 else
     for command in python3 curl arping dhclient nft iptables-translate; do
         command -v "$command" >/dev/null || { echo "Missing $command; run start.sh install." >&2; exit 1; }
@@ -71,6 +83,7 @@ fi
 python3 "$PROJECT_DIR/scripts/patch.py" check
 BACKUP_DIR="/var/backups/betterdocker/$(date +%Y%m%d-%H%M%S)-$$"
 install -d -m 0700 "$BACKUP_DIR"
+python3 "$PROJECT_DIR/scripts/runtime_install.py" snapshot-support --backup-dir="$BACKUP_DIR"
 cp -a /usr/share/perl5/PVE/API2/Nodes.pm "$BACKUP_DIR/Nodes.pm"
 cp -a /usr/share/pve-manager/index.html.tpl "$BACKUP_DIR/index.html.tpl"
 cp -a /usr/share/perl5/PVE/API2/Cluster.pm "$BACKUP_DIR/Cluster.pm"
@@ -120,6 +133,12 @@ TARGETS=(
     /etc/systemd/system/betterdocker-firewall-restore.service
     /etc/systemd/system/docker.service.d/betterdocker-firewall.conf
     /usr/sbin/dct
+    /usr/local/lib/betterdocker/runtime.py
+    /usr/local/lib/betterdocker/runtime_install.py
+    /usr/local/lib/betterdocker/host.py
+    /usr/local/lib/betterdocker/migrate-runtime.py
+    /etc/betterdocker/runtime.json
+    /usr/local/lib/betterdocker/rootless-engine.sh
 )
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -128,6 +147,13 @@ for index in "${!TARGETS[@]}"; do
 done
 rollback() {
     echo "Installation failed; restoring integration. Backups: $BACKUP_DIR" >&2
+    if [[ ! -e "$BACKUP_DIR/addon-42" && -e /etc/betterdocker/runtime.json ]]; then
+        if [[ $(python3 /usr/local/lib/betterdocker/runtime.py identity 2>/dev/null) == *'"rootless"'* ]]; then
+            python3 /usr/local/lib/betterdocker/runtime.py service stop || true
+            systemctl disable --now betterdocker-rootless.service || true
+            python3 /usr/local/lib/betterdocker/host.py remove || true
+        fi
+    fi
     cp -a "$BACKUP_DIR/Nodes.pm" /usr/share/perl5/PVE/API2/Nodes.pm
     cp -a "$BACKUP_DIR/index.html.tpl" /usr/share/pve-manager/index.html.tpl
     cp -a "$BACKUP_DIR/Cluster.pm" /usr/share/perl5/PVE/API2/Cluster.pm
@@ -145,6 +171,7 @@ rollback() {
             rm -f "${TARGETS[$index]}"
         fi
     done
+    python3 "$PROJECT_DIR/scripts/runtime_install.py" restore-support --backup-dir="$BACKUP_DIR" || true
     if [[ ! -e "$BACKUP_DIR/addon-34" ]]; then systemctl disable --now betterdocker-firewall.service || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-8" ]]; then systemctl disable --now betterdocker-refresh.timer || true; fi
     if [[ ! -e "$BACKUP_DIR/addon-13" ]]; then systemctl disable --now betterdocker-integration.timer || true; fi
@@ -162,6 +189,11 @@ install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
 install -d -m 0755 /usr/share/perl5/PVE/BetterDocker /usr/share/perl5/PVE/VZDump
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
 install -m 0755 "$PROJECT_DIR/scripts/dct.py" "${TARGETS[37]}"
+install -m 0755 "$PROJECT_DIR/scripts/runtime.py" "${TARGETS[38]}"
+install -m 0755 "$PROJECT_DIR/scripts/runtime_install.py" "${TARGETS[39]}"
+install -m 0755 "$PROJECT_DIR/scripts/host.py" "${TARGETS[40]}"
+install -m 0755 "$PROJECT_DIR/scripts/migrate-runtime.py" "${TARGETS[41]}"
+install -m 0755 "$PROJECT_DIR/scripts/rootless-engine.sh" "${TARGETS[43]}"
 install -m 0755 "$PROJECT_DIR/scripts/firewall.py" "${TARGETS[31]}"
 install -m 0755 "$PROJECT_DIR/scripts/firewall.pl" "${TARGETS[32]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/BetterDocker/Firewall.pm" "${TARGETS[33]}"
@@ -208,7 +240,20 @@ if [[ -f /etc/apparmor.d/usr.sbin.dhclient ]] && command -v apparmor_parser >/de
     fi
     apparmor_parser -r /etc/apparmor.d/usr.sbin.dhclient
 fi
-bash /usr/local/lib/betterdocker/docker-install.sh
+bash /usr/local/lib/betterdocker/docker-install.sh "$RUNTIME_MODE"
+python3 /usr/local/lib/betterdocker/runtime_install.py initialize --runtime="$RUNTIME_MODE"
+# Refresh existing mount definitions too; repair must fix their boot ordering.
+python3 - <<'PY'
+import sys
+sys.path.insert(0, '/usr/local/lib/betterdocker')
+import provision as worker
+with worker.locked():
+    for info in worker.summaries():
+        if info['node'] == worker.current_node():
+            storage = worker.storage_config(info['id'])
+            if storage:
+                worker.storage_unit(info['id'], storage)
+PY
 systemctl daemon-reload
 systemctl enable --now betterdocker-firewall.service
 systemctl start betterdocker-firewall-restore.service

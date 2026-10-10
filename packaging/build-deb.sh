@@ -15,7 +15,8 @@ Package: proxmox-betterdockers
 Version: 0.19.0
 Architecture: all
 Maintainer: BetterDockers contributors
-Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, e2fsprogs, util-linux, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2
+Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, e2fsprogs, util-linux, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2, uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
+Recommends: docker-ce-rootless-extras
 Description: Native Proxmox VE interface for host Docker Compose projects
 CONTROL
 cat > "$BUILD_DIR/DEBIAN/triggers" <<'TRIGGERS'
@@ -33,9 +34,30 @@ cat > "$BUILD_DIR/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
 set -eu
 case "$1" in
-    configure|triggered) bash /opt/betterdocker/start.sh repair ;;
+    configure)
+        export BETTERDOCKER_PACKAGE_CONFIGURE=1
+        if [ -e /etc/betterdocker/runtime.json ] || python3 /opt/betterdocker/scripts/runtime_install.py select >/dev/null 2>&1; then
+            bash /opt/betterdocker/start.sh repair
+        else
+            . /usr/share/debconf/confmodule
+            db_input medium proxmox-betterdockers/runtime || true
+            db_go
+            db_get proxmox-betterdockers/runtime
+            bash /opt/betterdocker/start.sh repair --runtime="$RET"
+        fi ;;
+    triggered) BETTERDOCKER_PACKAGE_CONFIGURE=1 bash /opt/betterdocker/start.sh repair ;;
 esac
 POSTINST
+cat > "$BUILD_DIR/DEBIAN/templates" <<'TEMPLATES'
+Template: proxmox-betterdockers/runtime
+Type: select
+Choices: rootful, rootless
+Default: rootless
+Description: Docker runtime for this node:
+ Choose once at installation. Updates and repair preserve this mode.
+ Rootless needs compatible Docker rootless binaries. Later conversion is an
+ explicit offline maintenance operation, not a GUI setting.
+TEMPLATES
 cat > "$BUILD_DIR/DEBIAN/prerm" <<'PRERM'
 #!/bin/sh
 set -eu

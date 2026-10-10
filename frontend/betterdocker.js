@@ -1126,6 +1126,7 @@
                     me.getStore().loadData([
                         { key: 'BetterDockers version', value: info.addon }, { key: 'Proxmox version', value: info.pve },
                         { key: 'Docker Engine', value: info.engine }, { key: 'Docker Compose', value: info.compose },
+                        { key: 'Runtime mode', value: info.runtime || 'rootful' }, { key: 'Runtime service', value: info.runtime_health || translate('Unavailable') },
                         { key: 'Integration', value: info.integration }, { key: 'Maintenance timer', value: info.timer },
                         { key: 'Network restoration', value: info.addresses }, { key: 'Update integration check', value: info.integration_check }, { key: 'Projects', value: info.projects },
                         { key: 'Docker storage', value: info.storage.path || translate('Unavailable') },

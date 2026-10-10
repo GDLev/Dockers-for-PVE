@@ -13,13 +13,14 @@ import shlex
 import subprocess
 import sys
 import time
+import runtime
 
 STATE = Path('/var/lib/betterdocker/firewall')
 TABLE = 'betterdocker'
 
 
 def command(args, **kwargs):
-    result = subprocess.run(args, text=True, capture_output=True, **kwargs)
+    result = runtime.run(args, text=True, capture_output=True, **kwargs)
     if result.returncode:
         raise ValueError(result.stderr.strip() or 'Command failed: ' + args[0])
     return result.stdout
@@ -70,6 +71,34 @@ def published_ports(info):
     ids = command(['docker', 'ps', '-q', '--filter', 'label=com.docker.compose.project=' + project]).split()
     if not ids:
         return []
+    if runtime.load().rootless:
+        import provision as worker
+        import host
+        config = json.loads((worker.ROOT / info['id'] / 'compose.runtime.json').read_text())
+        result = []
+        for container in json.loads(command(['docker', 'inspect', *ids])):
+            service = container['Config']['Labels']['com.docker.compose.service']
+            addresses = [n['IPAddress'] for n in container.get('NetworkSettings', {}).get('Networks', {}).values() if n.get('IPAddress')]
+            if not addresses:
+                continue
+            target = host.valid_address(addresses[0])
+            for port in config['services'][service].get('ports', []):
+                if port.get('host_ip') != info['address']:
+                    raise ValueError('Published port is not bound to the DCT endpoint')
+                protocol = port.get('protocol', 'tcp')
+                if protocol not in ('tcp', 'udp'):
+                    raise ValueError('Rootless published ports support TCP and UDP')
+                def expand(value):
+                    fields = str(value).split('-')
+                    start, end = int(fields[0]), int(fields[-1])
+                    if len(fields) > 2 or not 1 <= start <= end <= 65535:
+                        raise ValueError('Invalid published port range')
+                    return list(range(start, end + 1))
+                published, targets = expand(port['published']), expand(port['target'])
+                if len(published) != len(targets):
+                    raise ValueError('Rootless port ranges must have equal lengths')
+                result.extend((protocol, public, target, internal) for public, internal in zip(published, targets))
+        return sorted(result)
     result = []
     for container in json.loads(command(['docker', 'inspect', *ids])):
         addresses = [n['IPAddress'] for name, n in container['NetworkSettings']['Networks'].items()
@@ -77,6 +106,9 @@ def published_ports(info):
         if not addresses:
             continue
         target = str(ipaddress.IPv4Address(addresses[0]))
+        if runtime.load().rootless:
+            import host
+            target = host.valid_address(target)
         for port, mappings in (container['NetworkSettings'].get('Ports') or {}).items():
             target_port, protocol = port.split('/')
             if protocol not in ('tcp', 'udp', 'sctp'):
@@ -148,7 +180,7 @@ def translate(line, names, original=False):
     return expression
 
 
-def render(infos, config, bridges, bindings=None):
+def render(infos, config, bridges, bindings=None, routed=None, inner=False):
     lines = ['table inet ' + TABLE + ' {']
     policies = {g['vmid']: g for g in config['guests']}
     lograte = config.get('log_ratelimit', {})
@@ -195,6 +227,10 @@ def render(infos, config, bridges, bindings=None):
     for hook, direction, priority in [('input', 'out', -10), ('forward', 'out', -10),
                                       ('input', 'in', 0), ('forward', 'in', 0), ('output', 'in', 0)]:
         lines.append(f'chain {hook}_{direction} {{ type filter hook {hook} priority {priority}; policy accept;')
+        if inner and hook == 'forward' and direction == 'in':
+            # Host policy already checked traffic arriving through the owned uplink.
+            lines.append('iifname "bd-uplink" meta nfproto ipv6 drop')
+            lines.append('iifname "bd-uplink" return')
         if hook == 'forward':
             for info in protected:
                 owned = bridges.get(info['id'], [])
@@ -204,6 +240,13 @@ def render(infos, config, bridges, bindings=None):
         for info in protected:
             chain = 'd' + str(info['vmid']) + direction
             address = str(ipaddress.IPv4Address(info['address'])) if info.get('address') else None
+            if routed and hook == 'forward':
+                addresses = routed.get(info['id'], [])
+                if direction == 'in' and address:
+                    lines.append(f'ct original ip daddr {address} jump {chain}nat')
+                if addresses:
+                    expression = '{ ' + ', '.join(addresses) + ' }'
+                    lines.append(f'ip {"saddr" if direction == "out" else "daddr"} {expression} jump {chain}')
             if hook == 'output' and direction == 'in' and address:
                 # OUTPUT DNAT can reroute after this hook; match the original
                 # endpoint even when oifname still describes the local route.
@@ -243,25 +286,35 @@ def lock():
         yield
 
 
-def apply_rules(rules):
-    exists = subprocess.run(['nft', 'list', 'table', 'inet', TABLE], capture_output=True).returncode == 0
-    transaction = ('delete table inet ' + TABLE + '\n' if exists else '') + rules
+def apply_rules(rules, table=TABLE, cache='applied.nft'):
+    exists = subprocess.run(['nft', 'list', 'table', 'inet', table], capture_output=True).returncode == 0
+    transaction = ('delete table inet ' + table + '\n' if exists else '') + rules
     command(['nft', '--check', '-f', '-'], input=transaction)
-    save(STATE / 'pending.nft', rules)
+    pending = STATE / ('pending-' + cache)
+    save(pending, rules)
     command(['nft', '-f', '-'], input=transaction)
-    os.replace(STATE / 'pending.nft', STATE / 'applied.nft')
+    os.replace(pending, STATE / cache)
 
 
 def reconcile():
     import provision as worker
+    rootless = runtime.load().rootless
+    if rootless:
+        import host
+        # Cached rules must be able to restore while the daemon is starting.
+        # Do not hold the firewall writer lock while waiting for its namespace.
+        host.ready()
     with lock():
         if not worker.METADATA.is_dir():
             raise ValueError('DCT cluster configuration is unavailable; retaining firewall rules')
         metadata = [json.loads(path.read_text()) for path in worker.METADATA.glob('*.json')]
         infos = [i for i in metadata if i['node'] == worker.current_node() and i.get('vmid')]
         config = native_config(infos)
-        bridges = {i['id']: networks(i) for i in infos if i.get('firewall')}
-        bindings = {i['id']: published_ports(i) for i in infos if i.get('firewall')}
+        bridges = {i['id']: networks(i) for i in infos if i.get('firewall') or rootless}
+        bindings = {i['id']: published_ports(i) for i in infos if i.get('firewall') or rootless}
+        if rootless:
+            reconcile_rootless(infos, config, bridges, bindings)
+            return
         rules = render(infos, config, bridges, bindings)
         previous = STATE / 'applied.nft'
         if not previous.exists() or previous.read_text() != rules or subprocess.run(
@@ -270,6 +323,56 @@ def reconcile():
         active = [i['vmid'] for i in infos if config['cluster_enabled'] and i.get('firewall') and
                   next(g for g in config['guests'] if g['vmid'] == i['vmid'])['options'].get('enable')]
         save(STATE / 'status.json', json.dumps({'updated': time.time(), 'error': None, 'active': active}))
+
+
+def reconcile_rootless(infos, config, bridges, bindings):
+    import host
+    routed = {}
+    for info in infos:
+        ids = command(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=bd-' + info['id']]).split()
+        values = json.loads(command(['docker', 'inspect', *ids])) if ids else []
+        routed[info['id']] = sorted({host.valid_address(n['IPAddress']) for c in values
+                                   for n in c.get('NetworkSettings', {}).get('Networks', {}).values() if n.get('IPAddress')})
+    rules = render(infos, config, {}, bindings, routed=routed)
+    inner = render(infos, config, bridges, inner=True)
+    with host.namespace() as (_, _, prefix, descriptors):
+        exists = subprocess.run(prefix + ['nft', 'list', 'table', 'inet', TABLE], pass_fds=descriptors, capture_output=True).returncode == 0
+        transaction = ('delete table inet ' + TABLE + '\n' if exists else '') + inner
+        command(prefix + ['nft', '--check', '-f', '-'], pass_fds=descriptors, input=transaction)
+        command(prefix + ['nft', '-f', '-'], pass_fds=descriptors, input=transaction)
+    apply_rules(rules)
+    lines = ['table inet betterdocker_rootless {',
+             'chain guard { type filter hook forward priority -20; policy accept;',
+             'iifname "bd-rootless" meta nfproto ipv6 drop',
+             'oifname "bd-rootless" meta nfproto ipv6 drop',
+             'iifname "bd-rootless" ip saddr != { 10.240.0.0/16, 169.254.240.2 } drop',
+             'oifname "bd-rootless" ct state established,related accept',
+             'oifname "bd-rootless" ct status dnat accept']
+    for entries in bindings.values():
+        for protocol, _, target, port in entries:
+            lines.append(f'oifname "bd-rootless" ip daddr {target} {protocol} dport {port} accept')
+    lines.extend(['oifname "bd-rootless" ip daddr 10.240.0.0/16 drop', '}',
+             'chain outbound { type nat hook postrouting priority 101; policy accept;',
+             # A published cross-DCT connection must return through host conntrack.
+             # Otherwise the inner bridges return directly with the untranslated IP.
+             'iifname "bd-rootless" oifname "bd-rootless" ct status dnat masquerade',
+             'ip saddr { 10.240.0.0/16, 169.254.240.2 } oifname != "bd-rootless" masquerade', '}'])
+    for hook in ('prerouting', 'output'):
+        lines.append(f'chain published_{hook} {{ type nat hook {hook} priority -102; policy accept;')
+        for info in infos:
+            address = str(ipaddress.IPv4Address(info['address'])) if info.get('address') else None
+            for protocol, port, target, target_port in bindings.get(info['id'], []):
+                lines.append(f'ip daddr {address} {protocol} dport {port} dnat ip to {target}:{target_port}')
+        lines.append('}')
+    lines.append('}')
+    exists = subprocess.run(['nft', 'list', 'table', 'inet', 'betterdocker_rootless'], capture_output=True).returncode == 0
+    transaction = ('delete table inet betterdocker_rootless\n' if exists else '') + '\n'.join(lines) + '\n'
+    command(['nft', '--check', '-f', '-'], input=transaction)
+    command(['nft', '-f', '-'], input=transaction)
+    save(STATE / 'rootless.nft', '\n'.join(lines) + '\n')
+    active = [i['vmid'] for i in infos if config['cluster_enabled'] and i.get('firewall') and
+              next(g for g in config['guests'] if g['vmid'] == i['vmid'])['options'].get('enable')]
+    save(STATE / 'status.json', json.dumps({'updated': time.time(), 'error': None, 'active': active, 'runtime': 'rootless'}))
 
 
 def main():
@@ -281,6 +384,9 @@ def main():
             saved = STATE / 'applied.nft'
             if saved.exists():
                 apply_rules(saved.read_text())
+            saved = STATE / 'rootless.nft'
+            if runtime.load().rootless and saved.exists():
+                apply_rules(saved.read_text(), table='betterdocker_rootless', cache='rootless.nft')
         return
     while True:
         try:

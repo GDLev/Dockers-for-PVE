@@ -132,7 +132,10 @@ class DeploymentSecurityTests(unittest.TestCase):
              patch.object(worker.subprocess, 'run') as run, patch.object(worker, 'ROOT', self.root / 'projects'):
             worker.run(['docker', 'info'])
             environment = run.call_args.kwargs['env']
-            self.assertEqual(environment['DOCKER_CONFIG'], str(self.root / 'delegated-client'))
+            self.assertEqual(environment['DOCKER_CONFIG'], '/var/lib/betterdocker/delegated-client')
+            self.assertNotIn('BETTERDOCKER_TASK_USER', environment)
+            worker.run(['python3', 'host-helper.py'])
+            environment = run.call_args.kwargs['env']
             self.assertEqual(environment['BETTERDOCKER_TASK_USER'], 'owner@pve!token')
             self.assertEqual(environment['BETTERDOCKER_TRUSTED'], '0')
 

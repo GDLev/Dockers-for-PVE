@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import uuid
+import transfer
 
 import provision as worker
 import guest_state as state
@@ -180,11 +181,13 @@ def main():
     if os.geteuid():
         raise SystemExit('Root required')
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('ensure', 'prepare', 'publish', 'cleanup', 'export'))
+    parser.add_argument('action', choices=('ensure', 'prepare', 'publish', 'cleanup', 'export', 'check-runtime'))
     parser.add_argument('values', nargs='+')
     parser.add_argument('--lock-fd', type=int)
     args = parser.parse_args()
-    if args.action == 'export':
+    if args.action == 'check-runtime':
+        transfer.check_runtime(*args.values)
+    elif args.action == 'export':
         export(*args.values)
     else:
         result = globals()[args.action](*args.values, lock_fd=args.lock_fd)

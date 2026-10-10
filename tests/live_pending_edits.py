@@ -17,6 +17,7 @@ sys.path.insert(0, '/usr/local/lib/betterdocker')
 import provision as worker
 import live_pools_hooks as live
 from live_permissions import http
+NODE = worker.current_node()
 
 STATE = Path('/root/ux-pending-edits-fixture.json')
 
@@ -76,10 +77,10 @@ def run():
     name = 'ux-pending-edits-check'
     deployment = {'name':name, 'mode':'compose', 'bridge':'vmbr0', 'ipv4mode':'static', 'cidr':'192.0.2.216/20',
         'compose': 'services:\n  app:\n    image: busybox:1.37\n    command: sh -c "mkdir -p /www; echo pending-edits > /www/index.html; httpd -p 8080 -h /www; trap \'exit 0\' TERM; while sleep 1; do :; done"\n    ports:\n      - "18080:8080"\n  sidecar:\n    image: busybox:1.37\n    command: sh -c "trap \'exit 0\' TERM; while sleep 1; do :; done"\n'}
-    live.task(live.api('create', '/nodes/pve1/docker', deployment=json.dumps(deployment), start=1))
+    live.task(live.api('create', '/nodes/' + NODE + '/docker', deployment=json.dumps(deployment), start=1))
     row = next(row for row in live.api('get', '/cluster/resources', type='vm') if row.get('name') == name)
     identifier = row['id'].split('/')[-1]
-    base = '/nodes/pve1/docker/' + identifier
+    base = '/nodes/' + NODE + '/docker/' + identifier
     state = {'id':identifier, 'base':base, 'vmid':row['vmid'], 'name':name}
     STATE.write_text(json.dumps(state))
     directory = worker.ROOT / identifier
@@ -108,10 +109,7 @@ def run():
     headers = {'Authorization':'PVEAPIToken=' + token['full-tokenid'] + '=' + token['value']}
     pending = http('GET', base + '/network', headers=headers)
     live.task(http('PUT', base + '/network', {'mtu':1400, 'digest':pending['digest']}, headers))
-    rejected = http('PUT', base + '/settings', {'service':'app', 'settings':json.dumps({'cpus':0.5}), 'digest':configuration(base)['digest']}, headers)
-    task_result(rejected, expected=None)
-    log = live.api('get', '/nodes/pve1/tasks/' + rejected + '/log')
-    assert any('Permission denied' in row.get('t', '') for row in log), log
+    http('PUT', base + '/settings', {'service':'app', 'settings':json.dumps({'cpus':0.5}), 'digest':configuration(base)['digest']}, headers, expected=403)
     assert live.api('get', base + '/management')['services'][0]['settings']['cpus'] == 0
     live.task(http('PUT', base + '/network', {'revert':1, 'digest':configuration(base)['digest']}, headers))
     print('PASS guest-scoped network edit/Revert and CPU rejection', flush=True)
@@ -126,13 +124,13 @@ def run():
     original = (directory / 'request.json').read_text()
     with worker.locked(), patch.object(worker, 'rebind_runtime', side_effect=ValueError('Injected interrupted runtime write')):
         try:
-            worker.apply_pending_network(identifier, 'pve1')
+            worker.apply_pending_network(identifier, NODE)
         except ValueError as error:
             assert 'Injected' in str(error), error
         else:
             raise AssertionError('Expected injected failure')
     assert (directory / 'request.json').read_text() == original
-    assert worker.detail(identifier, 'pve1')['address'] == '192.0.2.216'
+    assert worker.detail(identifier, NODE)['address'] == '192.0.2.216'
     assert worker.load_pending_network(directory) == {'cidr':'192.0.2.217/20', 'mtu':1400}
     assert not (directory / 'network-transaction.json').exists()
     assert all(row['state'] not in ('running','paused','restarting') for row in worker.container_records(identifier))

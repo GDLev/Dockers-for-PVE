@@ -21,6 +21,33 @@ The installer adds the required dependencies, including Docker and Compose when 
 
 Run the same command to update the extension. In a cluster, install it on every node.
 
+The first installation asks for **rootful** or **rootless** Docker. Rootless is the default for fresh installations. For an unattended installation, choose explicitly:
+
+```bash
+curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash -s -- install --runtime=rootless
+```
+
+Rootless runs Docker under the dedicated `betterdocker` account. PVE still manages host networking, storage and guest permissions as root. Both modes use the same web interface. Updates and repair preserve the saved choice; existing installations stay rootful. A DEB installation uses the package configuration choice.
+
+Rootless needs cgroup v2, delegated CPU/memory/PID controllers, compatible Docker rootless binaries and unused `10.240.0.0/16` and `169.254.240.0/30` network ranges. The installer rejects incompatible setups. Rootless uses PVE-managed forwarding for published ports, including 80 and 443. Tested versions and results are recorded in [todo.md](todo.md).
+
+Rootless containers use user namespaces and Docker's seccomp filtering. The Docker AppArmor profile is unavailable in this mode on the tested PVE kernels; containers use `apparmor=unconfined`. The extension does not disable host AppArmor.
+
+## Changing runtime mode
+
+Conversion is an offline maintenance operation for stopped DCTs with static addresses, owned local mounts, no snapshot history, no HA registration and no replication state disk. The destination runtime must be empty. Unrelated Docker workloads block conversion. Back up the node first.
+
+```bash
+# Dry run: list guests and blockers without changing the node.
+/usr/local/lib/betterdocker/migrate-runtime.py --runtime=rootless
+# Convert only after resolving all blockers.
+/usr/local/lib/betterdocker/migrate-runtime.py --runtime=rootless --apply
+```
+
+Use `--runtime=rootful` for the other direction. The script retains the original runtime data and a journal under `/var/lib/betterdocker/runtime-migrations/<journal>/`. It prints the journal ID. After interruption, repeat with `--runtime=<target> --resume=<journal> --apply`. To return to the original data, stop the converted guests and run `--rollback=<journal> --apply`. Rollback discards changes made in the converted runtime. Keep the retained data until verification finishes; remove it manually only after a separate backup.
+
+For a controlled rootless Docker restart, run `/usr/local/lib/betterdocker/runtime.py service restart` as root. This preserves the running guest set and rebuilds host forwarding.
+
 ## Uninstallation
 
 Run these commands as **root**. They download the project files needed by the uninstaller:
@@ -56,6 +83,9 @@ These paths are on the Proxmox node after installation.
 | `/etc/systemd/system/betterdocker-*` | Network, firewall and integration services and timers. |
 | `/etc/apparmor.d/local/betterdocker-dhclient` | DHCP rules included by the distribution dhclient profile. Retained with network maintenance on uninstall. |
 | `/var/backups/betterdocker/` | Files backed up by the installer. |
+| `/etc/betterdocker/runtime.json` | Root-owned, node-local runtime mode, account, socket and UID/GID mapping. Retained on uninstall. |
+| `/var/lib/betterdocker/runtime/.config/` | Rootless daemon and user service configuration. Retained on uninstall. |
+| `/etc/systemd/system/user@<uid>.service.d/betterdocker.conf` | Rootless cgroup delegation and startup dependencies. Retained on uninstall. |
 
 The installer also updates `/usr/share/pve-manager/index.html.tpl`, `/usr/share/perl5/PVE/API2/Nodes.pm`, `/usr/share/perl5/PVE/API2/Cluster.pm`, `/usr/share/perl5/PVE/Cluster.pm` and `/usr/share/perl5/PVE/VZDump.pm` to register the extension and protect DCT IDs from unsupported native operations. Backup, replication and HA integration also adds marked sections to their native PVE modules and `pvemanagerlib.js`. Repair and uninstall update these sections without restoring old package files.
 
@@ -85,19 +115,23 @@ The installer also updates `/usr/share/pve-manager/index.html.tpl`, `/usr/share/
 
 Without a managed data disk, application data stays in the bind-mount directories specified in Compose or in Docker volumes. Docker manages container layers, images and volumes in its configured storage location, usually `/var/lib/docker/`. External bind mounts can be elsewhere on the node.
 
+In rootless mode, Docker data lives in `/var/lib/betterdocker/runtime/docker/`, the socket is `/run/user/<uid>/docker.sock`, and the daemon runs as a systemd user service with lingering. Those files, the account, its subordinate-ID ranges and host maintenance remain after uninstall. Backups store container-visible owners so restores can use a different subordinate-ID range. Do not manually renumber the account or its ranges.
+
+Permanent removal is a separate maintenance operation. Remove the DCTs and purge their retained managed disks with `/usr/local/lib/betterdocker/provision.py purge-retained-storage <project-id>` before uninstalling. Stop the rootless user Docker service, disable its host service and lingering, then run `/usr/local/lib/betterdocker/host.py remove` before deleting the runtime configuration. Remove the dedicated runtime directory, owned rootless units, user delegation, account and its subordinate-ID entries last. Keep shared networking and firewall helpers while any retained workloads still use them.
+
 ## Limitations
 
-- **Delegation:** guest permissions are supported, with the additional restrictions below. Privileged deployments and host resources remain administrator-only. Docker still runs as root on the node; API checks do not replace runtime isolation.
+- **Delegation:** guest permissions are supported, with the additional restrictions below. Privileged deployments and host resources remain administrator-only. Rootful Docker has host root privileges. Rootless Docker shares one unprivileged runtime account across DCTs on a node; it does not provide a separate account or daemon for each guest. Rootless DCTs accept only project-owned bind mounts. API checks do not replace runtime isolation.
 - **Resource pools:** DCTs use native PVE pools and inherit their guest permissions. Choose a pool when creating, cloning or restoring a DCT; use the pool's Members screen to add, move or remove existing guests. Migration keeps membership. Clones and restored guests join only the pool selected for the new guest.
 - **Hook scripts:** root can select an executable script from snippet storage in Options. Scripts receive the numeric guest ID and `pre-start`, `post-start`, `pre-stop` or `post-stop`, as in LXC. A failed `pre-start` blocks startup; other failures produce task warnings. The snippet must exist on the destination before migration or restore. Hooks cover PVE-controlled guest operations, including boot and HA. Docker-internal restarts and individual service actions do not invoke guest hooks. If a hook is killed, inspect Task History and set or remove the hookscript to acknowledge it before retrying; its external side effects cannot be undone automatically.
 - **Backup and restore:** native vzdump, backup jobs and PBS support DCTs, including Backup All. Restore creates a stopped DCT with a new guest ID and endpoint. Backups include deployment files, settings, images, writable layers and owned application data. External mounts, shared volumes, non-local volume drivers, custom Docker IPAM and fixed internal Docker addresses are unsupported. All service instances must exist before backup or cloning. Snapshots stay on the node and are not backups.
-- **Clones and migration:** full clones have independent IDs, addresses and data. Templates must be stopped and support full clones only. Migration requires a stopped DCT, a static IPv4 endpoint and no snapshot history. Install the extension on both nodes. A replicated DCT needs a successful complete checkpoint on its destination; replication jobs reverse direction after the move.
+- **Clones and migration:** full clones have independent IDs, addresses and data. Templates must be stopped and support full clones only. Migration requires a stopped DCT, a static IPv4 endpoint and no snapshot history. Install the extension on both nodes and use the same runtime mode for migration, replication and HA. Automatic cross-mode transfers are rejected; use the offline conversion script instead. A replicated DCT needs a successful complete checkpoint on its destination; replication jobs reverse direction after the move.
 - **Replication:** native PVE jobs and ZFS transport copy an additional disk containing deployment files, images, writable layers and owned data. Setup requires a managed ZFS data disk. Capturing state briefly pauses services and needs extra space. Snapshot history is not included. Remove HA management, replication jobs and their state disk before deleting a DCT.
 - **HA:** the native PVE manager controls power and fencing. Install the extension on every cluster node. Recovery requires a successful complete replica and quorum after a node fails. Restrict HA placement to nodes with complete replicas using native node-affinity rules. Changes made after the replica can be lost. Relocation stops and transfers the DCT; it is not live migration. Automatic recovery passed a software-watchdog failure test on the test cluster. Production reliability and hardware watchdogs have not been verified.
 - **Bulk operations:** native node and datacenter start, shutdown and migration include DCTs. Ordinary DCT migration requires a stopped guest; running guests are reported as ineligible. HA-managed DCTs use relocation with downtime. Suspend remains VM-only.
 - **Networking:** one IPv4 endpoint per DCT, used for published ports. Changes made while running are queued until the next full DCT start or reboot and can be reverted. Stopped DCTs apply changes immediately. Apply or revert pending network changes before migration. Restored DCTs allow firewall changes; endpoint changes require redeployment. Changes recreate containers; volumes are retained, but writable container layers are replaced. Routing and outbound traffic use the host network. DHCP needs a reachable server and a network that allows an additional MAC address. Available Linux bridges and SDN VNets can be selected using native SDN permissions. The bridge must have a connected IPv4 subnet on the node. SDN zones using automatic IPAM or SDN DHCP allocation are unsupported and rejected. Multiple interfaces, IPv6, VLAN tags and bandwidth limits are unsupported. This endpoint does not provide LXC-style network isolation.
 - **Compose:** use existing images and explicit published ports. `build`, profiles and `network_mode` are unsupported. Only YAML and `.env` can be imported; other referenced files must already exist on the host.
-- **Resource limits:** CPU and memory limits apply per service instance. Supported resource limits and restart policies can be changed while running. Settings that cannot be changed while running remain pending until Start or Reboot. Revert discards pending changes. Deployment edits, data disk changes and Restore Compose require stopping the affected service or DCT. Writable-layer disk limits require `overlay2` on XFS with project quotas.
+- **Resource limits:** CPU and memory limits apply per service instance. Supported resource limits and restart policies can be changed while running. Settings that cannot be changed while running remain pending until Start or Reboot. Revert discards pending changes. Deployment edits, data disk changes and Restore Compose require stopping the affected service or DCT. Writable-layer disk limits require rootful `overlay2` on XFS with project quotas. Rootless rejects writable-layer quotas; managed data disks still limit application data by filesystem capacity.
 - **Data disk:** managed disks appear under Docker Volumes in the storage view. Supports local directory, LVM-thin and ZFS storage with `rootdir` content. Use named volumes before moving application data to a managed disk. Create, grow and move require stopped services; shrinking is unsupported. The initial data migration recreates containers to change their mounts, replacing their writable layers. Grow and move preserve existing containers. Remove snapshots before growing or moving. Moving retains the previous disk. Deleting a DCT retains its disks and reserves its guest ID. After removing its snapshots and DCT, root can permanently free those disks with `/usr/local/lib/betterdocker/provision.py purge-retained-storage <project-id>`. Thin disks do not reserve physical space. A mount failure can prevent Docker from starting on the node.
 - **Snapshots:** LVM-thin and ZFS data disks use PVE storage snapshots; other data uses copies. Docker writable layers are saved separately in both cases. Capturing data briefly freezes services and requires additional space. RAM, Docker logs, external writable paths and shared volumes are unsupported. Rollback restores the captured network configuration and leaves the DCT stopped. Network edits after rollback still require redeployment; a later DHCP address change may require restoring again. After an interrupted rollback, retry that snapshot before starting the DCT.
 - **Startup:** Options controls Start at boot and start/shutdown order. Node Start All/Stop All includes DCTs. Order applies to stopped guests; already running services are skipped. Controlled Docker restarts preserve which instances were running. For guests outside HA, Docker restart policies can run before PVE ordering after an abrupt power loss or daemon crash. HA-managed DCTs use the native HA manager instead of Docker restart policies or Start All ordering.

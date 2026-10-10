@@ -141,6 +141,11 @@ def console_acceptance(args):
         task(http('DELETE', base, headers=cookie))
         print('PASS remote console, destination termproxy, delegated template and removal', flush=True)
     finally:
+        if identifier is None:
+            retained = next((r for r in worker.summaries() if r['name'] == name), None)
+            if retained:
+                identifier = retained['id']
+                base = f'/nodes/{args.target}/docker/{identifier}'
         if identifier:
             if any(r['id'] == identifier for r in worker.summaries()):
                 task(api('create', base + '/action', action='force-stop'))
