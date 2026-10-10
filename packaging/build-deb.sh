@@ -8,7 +8,7 @@ BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$BUILD_DIR"' EXIT
 chmod 0755 "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/DEBIAN" "$BUILD_DIR/opt/betterdocker" "$OUTPUT_DIR"
-cp -a "$SOURCE_DIR/frontend" "$SOURCE_DIR/backend" "$SOURCE_DIR/scripts" "$SOURCE_DIR/systemd" "$SOURCE_DIR/start.sh" "$BUILD_DIR/opt/betterdocker/"
+cp -a "$SOURCE_DIR/frontend" "$SOURCE_DIR/backend" "$SOURCE_DIR/scripts" "$SOURCE_DIR/systemd" "$SOURCE_DIR/start.sh" "$SOURCE_DIR/install.sh" "$BUILD_DIR/opt/betterdocker/"
 find "$BUILD_DIR/opt/betterdocker" -type d -name __pycache__ -prune -exec rm -rf {} +
 cat > "$BUILD_DIR/DEBIAN/control" <<'CONTROL'
 Package: proxmox-betterdockers

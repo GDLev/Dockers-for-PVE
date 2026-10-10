@@ -1,13 +1,40 @@
 #!/usr/bin/env bash
-# Run on each Proxmox VE node: bash start.sh install | repair | uninstall | check
+# No arguments open the terminal installer. Explicit actions retain the package worker interface.
 set -Eeuo pipefail
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ $# -eq 0 ]]; then
+    exec python3 "$PROJECT_DIR/scripts/installer.py"
+fi
+for option in "$@"; do
+    case "$option" in
+        finish|--nodes|--nodes=*|--lang|--lang=*|--runtime|--yes|--no-restart|--interactive|--help|-h)
+            exec python3 "$PROJECT_DIR/scripts/installer.py" "$@" ;;
+    esac
+done
 ACTION=install
+DEFER_RESTART=0
+OPERATION=
+stage() {
+    if [[ ${BETTERDOCKER_INSTALL_PROGRESS:-0} == 1 ]]; then
+        printf '[betterdocker-stage] %s\n' "$1"
+    fi
+}
+cache_and_mark() {
+    python3 "$PROJECT_DIR/scripts/installer.py" --cache-source "$PROJECT_DIR"
+    python3 "$PROJECT_DIR/scripts/installer.py" --mark-restart "$ACTION"
+}
+finish_services() {
+    if [[ $DEFER_RESTART == 0 ]]; then
+        python3 "$PROJECT_DIR/scripts/installer.py" --finish-restart
+    fi
+}
 if [[ ${1:-} != --* && $# -gt 0 ]]; then ACTION=$1; shift; fi
 RUNTIME_ARGUMENTS=()
 for option in "$@"; do
     case "$option" in
         --runtime=rootful|--runtime=rootless) RUNTIME_ARGUMENTS+=("$option") ;;
+        --defer-restart) DEFER_RESTART=1 ;;
+        --operation=install|--operation=repair|--operation=uninstall|--operation=check) OPERATION=${option#--operation=} ;;
         *) echo "Unknown option: $option" >&2; exit 2 ;;
     esac
 done
@@ -18,17 +45,10 @@ done
 exec 9>/run/lock/betterdocker-install.lock
 flock -n 9 || { echo 'Another BetterDocker installer is running.' >&2; exit 1; }
 VERSION=$(pveversion)
-[[ "$ACTION" == uninstall || "$VERSION" =~ pve-manager/9\.(1|2)\. ]] || {
+[[ "$ACTION" == uninstall || "$ACTION" == finish-restart || ${OPERATION:-} == uninstall || "$VERSION" =~ pve-manager/9\.(1|2)\. ]] || {
     echo "Unsupported version: $VERSION. Supported PVE releases: 9.1 and 9.2." >&2; exit 1;
 }
-case "$ACTION" in
-    check)
-        command -v python3 >/dev/null || { echo 'Python 3 is missing. Run installation first.' >&2; exit 1; }
-        python3 "$PROJECT_DIR/scripts/patch.py" check
-        echo 'Proxmox file structure is compatible. Runtime testing requires installation.'
-        exit 0 ;;
-    uninstall)
-        command -v python3 >/dev/null || { echo 'Python 3 is required for uninstall.' >&2; exit 1; }
+check_uninstall() {
         # The native parser skips unknown resource types when the provider is
         # not loaded. Check the on-disk sections before removing that provider.
         perl -e '
@@ -47,6 +67,44 @@ case "$ACTION" in
                     if -f "/etc/pve/betterdocker/ids/$job->{guest}.json";
             }
         '
+}
+check_repair_dependencies() {
+    for command in python3 curl arping dhclient nft iptables-translate; do
+        command -v "$command" >/dev/null || { echo "Missing $command; run start.sh install." >&2; return 1; }
+    done
+    python3 -c 'import yaml' >/dev/null 2>&1 || { echo 'Missing python3-yaml; run start.sh install.' >&2; return 1; }
+}
+case "$ACTION" in
+    finish-restart)
+        stage restart
+        python3 "$PROJECT_DIR/scripts/installer.py" --finish-restart
+        exit 0 ;;
+    preflight)
+        case "$OPERATION" in
+            uninstall) check_uninstall ;;
+            install|repair)
+                PREFLIGHT_MODE=$(python3 "$PROJECT_DIR/scripts/runtime_install.py" select "${RUNTIME_ARGUMENTS[@]}")
+                if [[ "$OPERATION" == repair ]]; then
+                    check_repair_dependencies
+                    command -v docker >/dev/null || { echo 'Docker is missing; choose Install / Update.' >&2; exit 1; }
+                    docker compose version >/dev/null
+                    python3 "$PROJECT_DIR/scripts/runtime_install.py" preflight --runtime="$PREFLIGHT_MODE"
+                fi
+                python3 "$PROJECT_DIR/scripts/patch.py" check ;;
+            check) python3 "$PROJECT_DIR/scripts/patch.py" check ;;
+            *) echo 'Preflight requires --operation=install|repair|uninstall|check.' >&2; exit 2 ;;
+        esac
+        exit 0 ;;
+    check)
+        command -v python3 >/dev/null || { echo 'Python 3 is missing. Run installation first.' >&2; exit 1; }
+        python3 "$PROJECT_DIR/scripts/patch.py" check
+        echo 'Proxmox file structure is compatible. Runtime testing requires installation.'
+        exit 0 ;;
+    uninstall)
+        command -v python3 >/dev/null || { echo 'Python 3 is required for uninstall.' >&2; exit 1; }
+        check_uninstall
+        cache_and_mark
+        stage remove
         systemctl disable --now betterdocker-integration.timer 2>/dev/null || true
         if [[ -f /etc/systemd/system/betterdocker-lifecycle.service ]]; then
             systemctl disable --now betterdocker-lifecycle.service
@@ -56,18 +114,19 @@ case "$ACTION" in
         fi
         python3 "$PROJECT_DIR/scripts/patch.py" remove
         perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
-        systemctl restart pvedaemon pveproxy pvescheduler pve-ha-crm pve-ha-lrm
         rm -f /usr/sbin/dct /usr/share/perl5/PVE/API2/BetterDocker.pm /usr/share/pve-manager/js/betterdocker.js \
             /usr/share/pve-manager/css/betterdocker.css /usr/share/pve-manager/images/betterdocker.svg \
             /usr/share/pve-manager/js/betterdocker-locales/en.js /usr/share/pve-manager/js/betterdocker-locales/pl.js \
             /usr/share/perl5/PVE/BetterDocker/Backup.pm /usr/share/perl5/PVE/BetterDocker/Firewall.pm /usr/share/perl5/PVE/BetterDocker/Replication.pm /usr/share/perl5/PVE/VZDump/Docker.pm /usr/share/perl5/PVE/HA/Resources/Docker.pm
+        finish_services
         echo 'UI integration removed. Docker projects, volumes, network/lease and firewall maintenance are retained.'
         exit 0 ;;
     install|repair) ;;
     *) echo 'Usage: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
 esac
-RUNTIME_MODE=$(python3 "$PROJECT_DIR/scripts/runtime_install.py" select --interactive "${RUNTIME_ARGUMENTS[@]}")
+RUNTIME_MODE=$(python3 "$PROJECT_DIR/scripts/runtime_install.py" select "${RUNTIME_ARGUMENTS[@]}")
 if [[ "$ACTION" == install ]]; then
+    stage dependencies
     echo 'Updating the package index and installing BetterDocker dependencies.'
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs nftables iptables
@@ -75,12 +134,10 @@ if [[ "$ACTION" == install ]]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y uidmap dbus-user-session
     fi
 else
-    for command in python3 curl arping dhclient nft iptables-translate; do
-        command -v "$command" >/dev/null || { echo "Missing $command; run start.sh install." >&2; exit 1; }
-    done
-    python3 -c 'import yaml' >/dev/null 2>&1 || { echo 'Missing python3-yaml; run start.sh install.' >&2; exit 1; }
+    check_repair_dependencies
 fi
 python3 "$PROJECT_DIR/scripts/patch.py" check
+stage backup
 BACKUP_DIR="/var/backups/betterdocker/$(date +%Y%m%d-%H%M%S)-$$"
 install -d -m 0700 "$BACKUP_DIR"
 python3 "$PROJECT_DIR/scripts/runtime_install.py" snapshot-support --backup-dir="$BACKUP_DIR"
@@ -181,9 +238,11 @@ rollback() {
         apparmor_parser -r /etc/apparmor.d/usr.sbin.dhclient || true
     fi
     systemctl daemon-reload || true
-    systemctl restart pvedaemon pveproxy pvescheduler pve-ha-crm pve-ha-lrm || true
+    finish_services || true
 }
+cache_and_mark
 trap rollback ERR
+stage integration
 install -d -m 0755 /usr/local/lib/betterdocker
 install -d -m 0755 /usr/share/pve-manager/js/betterdocker-locales
 install -d -m 0755 /usr/share/perl5/PVE/BetterDocker /usr/share/perl5/PVE/VZDump
@@ -240,6 +299,7 @@ if [[ -f /etc/apparmor.d/usr.sbin.dhclient ]] && command -v apparmor_parser >/de
     fi
     apparmor_parser -r /etc/apparmor.d/usr.sbin.dhclient
 fi
+stage runtime
 bash /usr/local/lib/betterdocker/docker-install.sh "$RUNTIME_MODE"
 python3 /usr/local/lib/betterdocker/runtime_install.py initialize --runtime="$RUNTIME_MODE"
 # Refresh existing mount definitions too; repair must fix their boot ordering.
@@ -254,6 +314,7 @@ with worker.locked():
             if storage:
                 worker.storage_unit(info['id'], storage)
 PY
+stage services
 systemctl daemon-reload
 systemctl enable --now betterdocker-firewall.service
 systemctl start betterdocker-firewall-restore.service
@@ -262,11 +323,15 @@ systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
-systemctl restart pvedaemon pveproxy pvescheduler pve-ha-crm pve-ha-lrm
+finish_services
 systemctl is-active --quiet pvedaemon pveproxy
 NODE=$(hostname -s)
 pvesh usage "/nodes/$NODE/docker" --verbose >/dev/null
 pvesh get /cluster/resources --output-format json >/dev/null
 trap - ERR
-echo 'BetterDocker installed. Refresh with Ctrl+Shift+R and sign in as root@pam.'
+if [[ $DEFER_RESTART == 1 ]]; then
+    echo 'BetterDocker installed. Panel/API reload is pending.'
+else
+    echo 'BetterDocker installed. Refresh with Ctrl+Shift+R and sign in as root@pam.'
+fi
 echo "File backups: $BACKUP_DIR"

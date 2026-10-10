@@ -17,15 +17,17 @@ Run as **root** on a Proxmox VE 9.1 or 9.2 node with internet access. Other vers
 curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash
 ```
 
-The installer adds the required dependencies, including Docker and Compose when needed, and restarts the PVE web services. Refresh the interface with **Ctrl+Shift+R**, then click **Create DCT**.
+The terminal installer lets you choose **Install / Update**, **Repair** or **Uninstall**, select one or more cluster nodes and choose rootful or rootless for new installations. Use the arrow keys, Space to select nodes and Enter to continue. It uses PVE's existing SSH trust to reach other nodes.
 
-Run the same command to update the extension. In a cluster, install it on every node.
+After applying changes, it shows a result and log path for each node. Press **Enter** at the final prompt to reload the PVE panel and API services. Then refresh the browser with **Ctrl+Shift+R** and click **Create DCT**. If you cancel that prompt, use the printed `finish` command later.
 
-The first installation asks for **rootful** or **rootless** Docker. Rootless is the default for fresh installations. For an unattended installation, choose explicitly:
+Run the same command to update or repair. Existing nodes keep their saved runtime mode. Rootless is the default for fresh installations. For an unattended installation, choose explicitly:
 
 ```bash
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash -s -- install --runtime=rootless
+curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash -s -- install --runtime=rootless --yes
 ```
+
+Add `--nodes=pve1,pve2` to target specific cluster nodes, `--no-restart` to defer service reload, or `--lang=pl` for Polish. Without a terminal, specify an operation; no menu is opened. Running `bash start.sh` from a downloaded checkout opens the same installer. DEB configuration and PVE update triggers keep their package workflow and reload services automatically.
 
 Rootless runs Docker under the dedicated `betterdocker` account. PVE still manages host networking, storage and guest permissions as root. Both modes use the same web interface. Updates and repair preserve the saved choice; existing installations stay rootful. A DEB installation uses the package configuration choice.
 
@@ -50,17 +52,13 @@ For a controlled rootless Docker restart, run `/usr/local/lib/betterdocker/runti
 
 ## Uninstallation
 
-Run these commands as **root**. They download the project files needed by the uninstaller:
+Run the installation command again as **root** and choose **Uninstall**. For unattended removal:
 
 ```bash
-betterdocker_dir=$(mktemp -d)
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/archive/HEAD/Proxmox-BetterDockers-HEAD.tar.gz \
-  -o "$betterdocker_dir/source.tar.gz" &&
-tar -xzf "$betterdocker_dir/source.tar.gz" --strip-components=1 -C "$betterdocker_dir" &&
-bash "$betterdocker_dir/start.sh" uninstall
+curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash -s -- uninstall --yes
 ```
 
-Remove DCT HA resources and replication jobs before uninstalling. Uninstallation removes the CLI and web/API integration and restarts the PVE web services. **Docker, existing workloads, their data, network and firewall maintenance services remain on the node.** The uninstaller restores the restart policies declared for the services. Removing a DCT through the interface also retains its persistent data; permanent data cleanup is a separate manual step.
+Remove DCT HA resources and replication jobs before uninstalling. Uninstallation removes the CLI and web/API integration. Interactive runs wait for Enter before reloading PVE services. **Docker, existing workloads, their data, network and firewall maintenance services remain on the node.** The uninstaller restores the restart policies declared for the services. Removing a DCT through the interface also retains its persistent data; permanent data cleanup is a separate manual step.
 
 ## CLI and API
 
@@ -83,6 +81,7 @@ These paths are on the Proxmox node after installation.
 | `/etc/systemd/system/betterdocker-*` | Network, firewall and integration services and timers. |
 | `/etc/apparmor.d/local/betterdocker-dhclient` | DHCP rules included by the distribution dhclient profile. Retained with network maintenance on uninstall. |
 | `/var/backups/betterdocker/` | Files backed up by the installer. |
+| `/var/lib/betterdocker/installer/` | Private installation logs, cached installer source and pending panel reload state. Retained for recovery after uninstall. |
 | `/etc/betterdocker/runtime.json` | Root-owned, node-local runtime mode, account, socket and UID/GID mapping. Retained on uninstall. |
 | `/var/lib/betterdocker/runtime/.config/` | Rootless daemon and user service configuration. Retained on uninstall. |
 | `/etc/systemd/system/user@<uid>.service.d/betterdocker.conf` | Rootless cgroup delegation and startup dependencies. Retained on uninstall. |

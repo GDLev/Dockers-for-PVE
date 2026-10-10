@@ -329,7 +329,7 @@ WantedBy=multi-user.target
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('select', 'initialize', 'snapshot-support', 'restore-support'))
+    parser.add_argument('action', choices=('select', 'preflight', 'initialize', 'snapshot-support', 'restore-support'))
     parser.add_argument('--backup-dir')
     parser.add_argument('--runtime', choices=('rootful', 'rootless'))
     parser.add_argument('--interactive', action='store_true')
@@ -345,7 +345,10 @@ def main():
     else:
         if not args.runtime:
             raise ValueError('Runtime mode required')
-        initialize(args.runtime)
+        if args.action == 'preflight':
+            preflight(args.runtime)
+        else:
+            initialize(args.runtime)
 
 
 if __name__ == '__main__':
