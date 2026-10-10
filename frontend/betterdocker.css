@@ -12,6 +12,11 @@
 }
 .x-menu-item-icon.bd-docker-icon,
 .x-treelist-item-icon.bd-docker-icon { position: absolute; }
+.x-treelist-item-icon.bd-docker-icon {
+    top: 0;
+    bottom: 0;
+    height: auto;
+}
 /* ExtJS gives these icons different box heights. Centre within each box. */
 .x-btn-icon-el.bd-docker-icon::before,
 .x-menu-item-icon.bd-docker-icon::before,
