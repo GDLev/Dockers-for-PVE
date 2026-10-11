@@ -52,6 +52,9 @@ def check_sdn_bridge(bridge):
 
 
 def network_preflight(data):
+    if 'interfaces' in data:
+        from .endpoint_network import preflight
+        return preflight(data)
     worker.check_sdn_bridge(data['bridge'])
     if not worker.trusted_management():
         actor = os.environ.get('BETTERDOCKER_TASK_USER')
@@ -69,6 +72,9 @@ def network_preflight(data):
 
 
 def ensure_link(info):
+    if info.get('net'):
+        from .endpoint_network import ensure_link as ensure
+        return ensure(info)
     interface = info['interface']
     links = json.loads(worker.capture(['ip', '-j', '-d', 'link', 'show']))
     existing = next((link for link in links if link['ifname'] == interface), None)
@@ -103,7 +109,8 @@ def add_address(interface, address):
 def dhcp_paths(info):
     directory = worker.ROOT / worker.project_id(info['id'])
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return directory / 'dhcp-address.json', Path('/run') / ('betterdocker-dhcp-' + info['id'] + '.pid')
+    suffix = '-' + info['net'] if info.get('net') else ''
+    return directory / ('dhcp-address' + suffix + '.json'), Path('/run') / ('betterdocker-dhcp-' + info['id'] + suffix + '.pid')
 
 
 def lease(info):
@@ -120,24 +127,53 @@ def lease(info):
 def dhcp_command(info):
     directory = worker.ROOT / info['id']
     _, pid = worker.dhcp_paths(info)
-    config = directory / 'dhclient.conf'
+    suffix = '-' + info['net'] if info.get('net') else ''
+    config = directory / ('dhclient' + suffix + '.conf')
     config.write_text('timeout 60;\nretry 10;\n' +
                       'send host-name "' + info['name'] + '";\n' +
                       'send dhcp-client-identifier 1:' + info['hwaddr'] + ';\n' +
                       'request subnet-mask, dhcp-lease-time;\n')
-    return ['dhclient', '-4', '-pf', str(pid), '-lf', str(directory / 'dhclient.leases'),
+    return ['dhclient', '-4', '-pf', str(pid), '-lf', str(directory / ('dhclient' + suffix + '.leases')),
             '-cf', str(config), '-sf', '/usr/local/lib/betterdocker/dhcp-hook.py']
 
 
 def start_dhcp(info):
     # A dedicated systemd unit survives pvedaemon restarts and oneshot refresh jobs.
-    worker.run(['systemctl', 'start', 'betterdocker-dhcp@' + worker.project_id(info['id']) + '.service'])
+    worker.run(['systemctl', 'start', 'betterdocker-dhcp@' + worker.project_id(info['id']) + ('-' + info['net'] if info.get('net') else '') + '.service'])
+
+
+def dhcp_info(identifier):
+    """Read an incoming migration's private config until ownership is committed."""
+    info = json.loads((worker.METADATA / (identifier + '.json')).read_text())
+    token = info.get('migration')
+    if info['node'] != worker.current_node() and token:
+        token = worker.project_id(token)
+        path = worker.ROOT.parent / 'transfers' / token / 'metadata' / (identifier + '.json')
+        # Transfer directories and their metadata are root-owned, private files.
+        with node_runtime.anchored(path.parent) as fd:
+            import stat
+            descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            with os.fdopen(descriptor) as handle:
+                owner = os.fstat(handle.fileno())
+                if not stat.S_ISREG(owner.st_mode) or owner.st_uid != 0 or owner.st_mode & 0o022:
+                    raise ValueError('Invalid incoming DHCP configuration')
+                incoming = json.load(handle)
+        if incoming.get('id') != identifier or incoming.get('vmid') != info['vmid'] or incoming.get('node') != worker.current_node():
+            raise ValueError('Incoming DHCP ownership differs from migration')
+        info = incoming
+    return info
 
 
 def dhcp_client(identifier, release=False):
+    identifier, _, net = identifier.partition('-')
     identifier = worker.project_id(identifier)
-    info = json.loads((worker.METADATA / (identifier + '.json')).read_text())
-    if info['node'] != worker.current_node() or info.get('ipv4mode') != 'dhcp' or info.get('interface') != 'bd' + identifier[:12]:
+    info = dhcp_info(identifier)
+    if net:
+        from .endpoints import resolved
+        info = resolved(info).get(net)
+        if not info:
+            raise ValueError('Unknown DHCP endpoint')
+    if info['node'] != worker.current_node() or info.get('ipv4mode') != 'dhcp' or (not net and info.get('interface') != 'bd' + identifier[:12]):
         raise ValueError('Invalid DHCP project')
     command = worker.dhcp_command(info) + (['-r'] if release else ['-d']) + [info['interface']]
     if release:
@@ -147,6 +183,9 @@ def dhcp_client(identifier, release=False):
 
 
 def ensure_address(info, wait=True):
+    if 'interfaces' in info:
+        from .endpoint_network import ensure_address as ensure
+        return ensure(info, wait)
     # Existing projects from the alias-only release keep their network and address.
     if not info.get('interface'):
         worker.add_address(info['bridge'], info['address'])
@@ -173,7 +212,16 @@ def ensure_address(info, wait=True):
 
 def dhcp_event(environment):
     interface = environment.get('interface', '')
-    info = next((item for item in worker.summaries() if item.get('interface') == interface and
+    from .endpoints import resolved
+    guests = []
+    for guest in worker.summaries():
+        if guest['node'] != worker.current_node() and guest.get('migration'):
+            try:
+                guest = dhcp_info(guest['id'])
+            except (OSError, ValueError):
+                continue
+        guests.extend(resolved(guest).values() if 'interfaces' in guest else [guest])
+    info = next((item for item in guests if item.get('interface') == interface and
                  item['node'] == worker.current_node() and item.get('ipv4mode') == 'dhcp'), None)
     if not info:
         raise ValueError('DHCP hook was called for an unmanaged interface')
@@ -183,9 +231,10 @@ def dhcp_event(environment):
         raise ValueError('Waiting for a valid DHCP offer; an expired fallback lease is not accepted')
     if reason in ('BOUND', 'RENEW', 'REBIND', 'REBOOT'):
         address = str(ipaddress.IPv4Address(environment.get('new_ip_address', '')))
-        worker.check_address(address, info['bridge'], info['id'], interface)
+        if not info.get('tag'):
+            worker.check_address(address, info['bridge'], info['id'], interface)
         previous = worker.lease(info)
-        if not previous or previous['address'] != address:
+        if not info.get('tag') and (not previous or previous['address'] != address):
             worker.check_address(address, info['bridge'], info['id'], interface, probe=True)
         worker.add_address(interface, address)
         seconds = int(environment.get('new_dhcp_lease_time', '3600'))
@@ -214,6 +263,11 @@ def rebind_runtime(directory, address):
     for service in config['services'].values():
         for port in service.get('ports', []):
             port['host_ip'] = address
+    metadata = worker.METADATA / (directory.name + '.json')
+    info = json.loads(metadata.read_text()) if metadata.exists() else {}
+    if 'interfaces' in info:
+        from .endpoints import bind_runtime
+        config = bind_runtime(config, info)
     worker.write_json(path, config)
 
 
@@ -262,6 +316,12 @@ def stop_network_instances(identifier):
 
 
 def prepare_network_start(info):
+    if 'interfaces' in info:
+        from .endpoint_network import sync
+        sync(info, wait=True)
+        worker.rebind_runtime(worker.ROOT / info['id'], info['address'])
+        worker.reconcile_network_runtime(info)
+        return
     # A lease can change between refresh and Start; reconcile published bindings first.
     previous = info.get('address')
     worker.ensure_address(info)
@@ -277,11 +337,14 @@ def reconcile_network_runtime(info):
     marker = directory / 'network-reconcile.json'
     if marker.exists():
         worker.require_stopped(worker.container_records(info['id']))
-        worker.run(worker.compose_base(directory, info['id']) + ['up', '--no-start', '--force-recreate'], timeout=1800)
-        marker.unlink()
+        from .rebind import reconcile
+        reconcile(info)
 
 
 def sync_dhcp(info):
+    if 'interfaces' in info:
+        from .endpoint_network import sync
+        return sync(info, wait=False)
     if info.get('ipv4mode') != 'dhcp':
         return True
     directory = worker.ROOT / info['id']
@@ -312,8 +375,6 @@ def sync_dhcp(info):
         if not marker.exists():
             worker.save_network_resume(marker, worker.active_network_instances(info['id']))
         resume = worker.read_network_resume(marker)
-        if (directory / 'snapshot-restored.json').exists() and changed:
-            raise ValueError('DCT address changed after rollback; restore a snapshot again to rebind preserved filesystems')
         worker.rebind_runtime(directory, assigned['address'])
         worker.write_json(directory / 'network-reconcile.json', {'address': assigned['address']})
         worker.stop_network_instances(info['id'])
@@ -350,7 +411,7 @@ def firewall_check(identifier, node):
 
 def prepare_firewall(info):
     rootless = node_runtime.load().rootless
-    if not info.get('firewall') and not rootless:
+    if not info.get('firewall') and not rootless and 'interfaces' not in info:
         return
     if info.get('firewall'):
         worker.firewall_check(info['id'], info['node'])
@@ -361,7 +422,7 @@ def prepare_firewall(info):
 
 
 def finish_network_start(info):
-    if not info.get('firewall') and not node_runtime.load().rootless:
+    if not info.get('firewall') and not node_runtime.load().rootless and 'interfaces' not in info:
         return
     try:
         worker.run([str(worker.HELPERS / 'firewall.py'), 'apply'])
@@ -385,7 +446,8 @@ def save_pending_network(directory, values):
 
 def network_config(identifier, node):
     info = worker.detail(identifier, node)
-    return dict({key: info.get(key, '') for key in NETWORK_KEYS},
+    from .endpoints import interfaces
+    return dict({key: info.get(key, '') for key in NETWORK_KEYS}, interfaces=interfaces(info),
                 ipv4mode=info.get('ipv4mode', 'static'), mtu=info.get('mtu', 0), firewall=int(info.get('firewall', 0)),
                 cidr=(info.get('cidr') or info.get('address', '')) if info.get('ipv4mode', 'static') == 'static' else '', digest=info['digest'], pending=worker.load_pending_network(worker.ROOT / identifier))
 
@@ -408,8 +470,14 @@ def recover_network_transaction(identifier, node):
     if daemon.returncode == 0:
         worker.require_stopped(worker.container_records(identifier))
     worker.remove_network(current)
+    if saved.get('endpoints'):
+        from .endpoint_network import re_dhcp_file
+        for path in directory.iterdir():
+            if re_dhcp_file(path.name) and path.name not in saved['files']:
+                path.unlink()
     for name, content in saved['files'].items():
-        if name not in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf'):
+        from .endpoint_network import re_dhcp_file
+        if name not in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf') and not re_dhcp_file(name):
             raise ValueError('Invalid network recovery file')
         path = directory / name
         if content is None:
@@ -458,6 +526,9 @@ def network_candidate(identifier, node, info, values):
 
 
 def apply_network(identifier, node, info, values):
+    if 'interfaces' in values:
+        from .endpoint_network import apply
+        return apply(identifier, node, info, values['interfaces'])
     # Caller owns the global lock; the recovery journal protects each mutation.
     directory = worker.ROOT / identifier
     worker.require_stopped(worker.container_records(identifier))
@@ -526,6 +597,16 @@ def apply_network(identifier, node, info, values):
 
 
 def project_network(identifier, node, values, digest=None):
+    from .endpoints import KEYS
+    if isinstance(values, dict) and ('interfaces' in values or 'net' in values or set(values) & (set(KEYS) - set(NETWORK_KEYS))):
+        if set(values) - set((*KEYS, 'net', 'delete', 'interfaces', 'revert')):
+            raise ValueError('Unsupported network setting')
+        from .endpoint_network import update
+        return update(identifier, node, values, digest)
+    metadata = worker.METADATA / (identifier + '.json')
+    if metadata.exists() and 'interfaces' in json.loads(metadata.read_text()):
+        from .endpoint_network import update
+        return update(identifier, node, values, digest)
     if not isinstance(values, dict) or set(values) - set((*NETWORK_KEYS, 'revert')):
         raise ValueError('Unsupported network setting')
     if 'revert' in values and (set(values) != {'revert'} or values['revert'] != 1):
@@ -561,6 +642,9 @@ def apply_pending_network(identifier, node):
 
 
 def remove_network(info):
+    if 'interfaces' in info:
+        from .endpoint_network import remove
+        return remove(info)
     if not info.get('interface'):
         worker.run(['ip', 'address', 'del', info['address'] + '/32', 'dev', info['bridge']])
         return

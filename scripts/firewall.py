@@ -36,7 +36,7 @@ def save(path, value):
 
 def native_config(infos):
     return json.loads(command(['perl', str(Path(__file__).with_suffix('.pl'))],
-                              input=json.dumps({'vmids': [i['vmid'] for i in infos]})))
+                              input=json.dumps({'vmids': [i['vmid'] for i in infos], 'interfaces': {str(i['vmid']): list(i.get('interfaces', {'net0': {}})) for i in infos}})))
 
 
 def networks(info):
@@ -67,6 +67,8 @@ def check_options(options):
 
 
 def published_ports(info):
+    from dctlib.endpoints import resolved
+    endpoint_addresses = {value.get('address') for value in resolved(info).values() if value.get('address')} | {str(ipaddress.IPv6Interface(value['cidr6']).ip) for value in resolved(info).values() if value.get('cidr6')}
     project = 'bd-' + info['id']
     ids = command(['docker', 'ps', '-q', '--filter', 'label=com.docker.compose.project=' + project]).split()
     if not ids:
@@ -83,7 +85,7 @@ def published_ports(info):
                 continue
             target = host.valid_address(addresses[0])
             for port in config['services'][service].get('ports', []):
-                if port.get('host_ip') != info['address']:
+                if port.get('host_ip') not in endpoint_addresses:
                     raise ValueError('Published port is not bound to the DCT endpoint')
                 protocol = port.get('protocol', 'tcp')
                 if protocol not in ('tcp', 'udp'):
@@ -97,7 +99,7 @@ def published_ports(info):
                 published, targets = expand(port['published']), expand(port['target'])
                 if len(published) != len(targets):
                     raise ValueError('Rootless port ranges must have equal lengths')
-                result.extend((protocol, public, target, internal) for public, internal in zip(published, targets))
+                result.extend((protocol, public, target, internal, port['host_ip']) if 'interfaces' in info else (protocol, public, target, internal) for public, internal in zip(published, targets))
         return sorted(result)
     result = []
     for container in json.loads(command(['docker', 'inspect', *ids])):
@@ -114,16 +116,16 @@ def published_ports(info):
             if protocol not in ('tcp', 'udp', 'sctp'):
                 raise ValueError('Unsupported published-port protocol')
             for mapping in mappings or []:
-                if mapping['HostIp'] != info['address']:
+                if mapping['HostIp'] not in endpoint_addresses:
                     raise ValueError('Published port is not bound to the DCT endpoint')
                 host_port = int(mapping['HostPort'])
                 if not 1 <= host_port <= 65535 or not 1 <= int(target_port) <= 65535:
                     raise ValueError('Invalid published port')
-                result.append((protocol, host_port, target, int(target_port)))
+                result.append((protocol, host_port, target, int(target_port), mapping['HostIp']) if 'interfaces' in info else (protocol, host_port, target, int(target_port)))
     return sorted(result)
 
 
-def set_members(lines):
+def set_members(lines, family=4):
     """Expand ipset nomatch entries using longest-prefix precedence."""
     entries = []
     for line in lines:
@@ -131,7 +133,7 @@ def set_members(lines):
         if words[0] != 'add':
             continue
         network = ipaddress.ip_network(words[2], strict=False)
-        if network.version == 4:
+        if network.version == family:
             entries.append((network, 'nomatch' in words[3:]))
     result = []
     for network, excluded in sorted(entries, key=lambda e: e[0].prefixlen):
@@ -147,7 +149,7 @@ def set_members(lines):
     return [str(n) for n in result]
 
 
-def translate(line, names, original=False):
+def translate(line, names, original=False, family=4):
     words = shlex.split(line)
     substitutions = []
     while '--match-set' in words:
@@ -162,13 +164,13 @@ def translate(line, names, original=False):
             negate = True
         if words[start:start + 2] != ['-m', 'set']:
             raise ValueError('Unsupported native IPSet expression')
-        placeholder = '198.18.0.' + str(len(substitutions) + 1)
+        placeholder = ('198.18.0.' if family == 4 else '2001:db8::') + str(len(substitutions) + 1)
         words[start:index + 3] = (['!'] if negate else []) + ['-s' if direction == 'src' else '-d', placeholder]
         substitutions.append((placeholder, '@' + names[name]))
-    output = command(['iptables-translate', *words]).strip()
+    output = command(['iptables-translate' if family == 4 else 'ip6tables-translate', *words]).strip()
     if output.startswith("nft '"):
         output = 'nft ' + shlex.split(output)[1]
-    prefix = 'nft add rule ip filter ' + words[1] + ' '
+    prefix = 'nft add rule ' + ('ip' if family == 4 else 'ip6') + ' filter ' + words[1] + ' '
     if not output.startswith(prefix) or '# ' in output:
         raise ValueError('Native firewall expression has no supported nftables translation: ' + line)
     expression = output[len(prefix):]
@@ -181,13 +183,25 @@ def translate(line, names, original=False):
 
 
 def render(infos, config, bridges, bindings=None, routed=None, inner=False):
+    from dctlib.endpoints import resolved
+    originals = infos
+    expanded = []
+    for guest_info in infos:
+        if 'interfaces' not in guest_info:
+            expanded.append(guest_info); continue
+        for name, endpoint in resolved(guest_info).items():
+            expanded.append(dict(endpoint, net=name, firewall=endpoint.get('firewall', 0)))
+    infos = expanded
+    def chain_name(info):
+        return 'd' + str(info['vmid']) + (info.get('net', '') if info.get('net') != 'net0' else '')
     lines = ['table inet ' + TABLE + ' {']
     policies = {g['vmid']: g for g in config['guests']}
     lograte = config.get('log_ratelimit', {})
     limiter = ('limit rate ' + lograte.get('rate', '1/second') + ' burst ' + str(lograte.get('burst', 5)) + ' packets ') if lograte.get('enable', 1) else ''
     protected = []
     for info in infos:
-        guest = policies[info['vmid']]
+        guest = dict(policies[info['vmid']])
+        guest['rules'] = guest.get('interfaces', {}).get(info.get('net', 'net0'), {}).get('4', guest['rules'])
         if not (config['cluster_enabled'] and guest['options'].get('enable') and info.get('firewall')):
             continue
         check_options(guest['options'])
@@ -204,7 +218,7 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False):
             lines.append(declaration + ' type ipv4_addr; flags interval; auto-merge; ' +
                          ('elements = { ' + ', '.join(members) + ' }; ' if members else '') + '}')
         for direction, original in [('in', False), ('in', True), ('out', False)]:
-            chain = 'd' + str(info['vmid']) + direction + ('nat' if original else '')
+            chain = chain_name(info) + direction + ('nat' if original else '')
             lines.append('chain ' + chain + ' {')
             lines.append('ct state invalid drop')
             lines.append('ct state established,related accept')
@@ -237,8 +251,16 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False):
                 if owned:
                     interfaces = '{ ' + ', '.join(json.dumps(b) for b in owned) + ' }'
                     lines.append(f'iifname {interfaces} oifname {interfaces} return')
+        for endpoint in protected:
+            address = endpoint.get('address')
+            if not address:
+                continue
+            if direction == 'in' and hook == 'forward':
+                lines.append(f'ct original ip daddr {address} jump {chain_name(endpoint)}innat')
+            elif direction == 'out' and hook in ('input', 'forward') and endpoint.get('net', 'net0') != 'net0':
+                lines.append(f'ct direction reply ct original ip daddr {address} jump {chain_name(endpoint)}out')
         for info in protected:
-            chain = 'd' + str(info['vmid']) + direction
+            chain = chain_name(info) + direction
             address = str(ipaddress.IPv4Address(info['address'])) if info.get('address') else None
             if routed and hook == 'forward':
                 addresses = routed.get(info['id'], [])
@@ -251,7 +273,7 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False):
                 # OUTPUT DNAT can reroute after this hook; match the original
                 # endpoint even when oifname still describes the local route.
                 lines.append(f'ct original ip daddr {address} jump {chain}nat')
-            for bridge in bridges.get(info['id'], []):
+            for bridge in (bridges.get(info['id'], []) if info.get('net', 'net0') == 'net0' else []):
                 interface = json.dumps(bridge)
                 if direction == 'out':
                     lines.append(f'iifname {interface} meta nfproto ipv6 drop')
@@ -272,10 +294,53 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False):
         lines.insert(-1, f'chain published_{hook} {{ type nat hook {hook} priority -101; policy accept;')
         for info in protected:
             address = str(ipaddress.IPv4Address(info['address'])) if info.get('address') else None
-            for protocol, port, target, target_port in (bindings or {}).get(info['id'], []):
-                lines.insert(-1, f'ip daddr {address} {protocol} dport {port} dnat ip to {target}:{target_port}')
+            for binding in (bindings or {}).get(info['id'], []):
+                protocol, port, target, target_port = binding[:4]
+                bound = binding[4] if len(binding) > 4 else address
+                if bound == address:
+                    lines.insert(-1, f'ip daddr {address} {protocol} dport {port} dnat ip to {target}:{target_port}')
         lines.insert(-1, '}')
+    add_ipv6_policy(lines, originals, config)
     return '\n'.join(lines) + '\n'
+
+
+def add_ipv6_policy(lines, infos, config):
+    from dctlib.endpoints import resolved
+    policies = {guest['vmid']: guest for guest in config['guests']}
+    chains = []
+    hooks = {'input': [], 'output': []}
+    for info in infos:
+        if 'interfaces' not in info:
+            continue
+        guest = policies[info['vmid']]
+        if not config['cluster_enabled'] or not guest['options'].get('enable'):
+            continue
+        for name, endpoint in resolved(info).items():
+            if not endpoint.get('cidr6') or not endpoint.get('firewall'):
+                continue
+            address = str(ipaddress.IPv6Interface(endpoint['cidr6']).ip)
+            names = {key: 's' + hashlib.sha256(key.encode()).hexdigest()[:20] for key, entries in guest['sets'].items() if 'family inet6' in entries[0]}
+            for key, nft_name in names.items():
+                declaration = 'set ' + nft_name + ' {'
+                if any(line.startswith(declaration) for line in lines + chains):
+                    continue
+                members = set_members(guest['sets'][key], 6)
+                chains.append(declaration + ' type ipv6_addr; flags interval; auto-merge; ' + ('elements = { ' + ', '.join(members) + ' }; ' if members else '') + '}')
+            for direction in ('in', 'out'):
+                chain = 'v6d' + str(info['vmid']) + name + direction
+                chains.extend(['chain ' + chain + ' {', 'ct state invalid drop', 'ct state established,related accept',
+                               # Neighbor discovery is required for static IPv6 endpoints.
+                               'icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept'])
+                for rule in guest.get('interfaces', {}).get(name, {}).get('6', {}).get(direction, []):
+                    chains.append(translate(rule, names, family=6))
+                policy = guest['options'].get('policy_' + direction, 'DROP' if direction == 'in' else 'ACCEPT').lower()
+                if policy not in ('accept', 'drop', 'reject'):
+                    raise ValueError('Invalid IPv6 firewall policy')
+                chains.extend([policy, '}'])
+                hooks['input' if direction == 'in' else 'output'].append('ip6 ' + ('daddr' if direction == 'in' else 'saddr') + ' ' + address + ' jump ' + chain)
+    for hook, rules in hooks.items():
+        chains.extend([f'chain ipv6_{hook} {{ type filter hook {hook} priority -10; policy accept;', *rules, '}'])
+    lines[-1:-1] = chains
 
 
 @contextlib.contextmanager
@@ -309,9 +374,11 @@ def reconcile():
             raise ValueError('DCT cluster configuration is unavailable; retaining firewall rules')
         metadata = [json.loads(path.read_text()) for path in worker.METADATA.glob('*.json')]
         infos = [i for i in metadata if i['node'] == worker.current_node() and i.get('vmid')]
+        from dctlib.endpoint_controls import apply as apply_controls
+        apply_controls(infos)
         config = native_config(infos)
-        bridges = {i['id']: networks(i) for i in infos if i.get('firewall') or rootless}
-        bindings = {i['id']: published_ports(i) for i in infos if i.get('firewall') or rootless}
+        bridges = {i['id']: networks(i) for i in infos if i.get('firewall') or rootless or any(v.get('firewall') for v in i.get('interfaces', {}).values())}
+        bindings = {i['id']: published_ports(i) for i in infos if i.get('firewall') or rootless or any(v.get('firewall') for v in i.get('interfaces', {}).values())}
         if rootless:
             reconcile_rootless(infos, config, bridges, bindings)
             return
@@ -320,7 +387,7 @@ def reconcile():
         if not previous.exists() or previous.read_text() != rules or subprocess.run(
                 ['nft', 'list', 'table', 'inet', TABLE], capture_output=True).returncode:
             apply_rules(rules)
-        active = [i['vmid'] for i in infos if config['cluster_enabled'] and i.get('firewall') and
+        active = [i['vmid'] for i in infos if config['cluster_enabled'] and (i.get('firewall') or any(endpoint.get('firewall') for endpoint in i.get('interfaces', {}).values())) and
                   next(g for g in config['guests'] if g['vmid'] == i['vmid'])['options'].get('enable')]
         save(STATE / 'status.json', json.dumps({'updated': time.time(), 'error': None, 'active': active}))
 
@@ -349,7 +416,8 @@ def reconcile_rootless(infos, config, bridges, bindings):
              'oifname "bd-rootless" ct state established,related accept',
              'oifname "bd-rootless" ct status dnat accept']
     for entries in bindings.values():
-        for protocol, _, target, port in entries:
+        for entry in entries:
+            protocol, _, target, port = entry[:4]
             lines.append(f'oifname "bd-rootless" ip daddr {target} {protocol} dport {port} accept')
     lines.extend(['oifname "bd-rootless" ip daddr 10.240.0.0/16 drop', '}',
              'chain outbound { type nat hook postrouting priority 101; policy accept;',
@@ -361,7 +429,12 @@ def reconcile_rootless(infos, config, bridges, bindings):
         lines.append(f'chain published_{hook} {{ type nat hook {hook} priority -102; policy accept;')
         for info in infos:
             address = str(ipaddress.IPv4Address(info['address'])) if info.get('address') else None
-            for protocol, port, target, target_port in bindings.get(info['id'], []):
+            for entry in bindings.get(info['id'], []):
+                protocol, port, target, target_port = entry[:4]
+                bound = entry[4] if len(entry) > 4 else address
+                if ipaddress.ip_address(bound).version != 4:
+                    continue
+                address = bound
                 lines.append(f'ip daddr {address} {protocol} dport {port} dnat ip to {target}:{target_port}')
         lines.append('}')
     lines.append('}')
@@ -370,7 +443,7 @@ def reconcile_rootless(infos, config, bridges, bindings):
     command(['nft', '--check', '-f', '-'], input=transaction)
     command(['nft', '-f', '-'], input=transaction)
     save(STATE / 'rootless.nft', '\n'.join(lines) + '\n')
-    active = [i['vmid'] for i in infos if config['cluster_enabled'] and i.get('firewall') and
+    active = [i['vmid'] for i in infos if config['cluster_enabled'] and (i.get('firewall') or any(endpoint.get('firewall') for endpoint in i.get('interfaces', {}).values())) and
               next(g for g in config['guests'] if g['vmid'] == i['vmid'])['options'].get('enable')]
     save(STATE / 'status.json', json.dumps({'updated': time.time(), 'error': None, 'active': active, 'runtime': 'rootless'}))
 
@@ -384,6 +457,9 @@ def main():
             saved = STATE / 'applied.nft'
             if saved.exists():
                 apply_rules(saved.read_text())
+            saved = STATE / 'endpoints.nft'
+            if saved.exists():
+                apply_rules(saved.read_text(), table='betterdocker_endpoints', cache='endpoints.nft')
             saved = STATE / 'rootless.nft'
             if runtime.load().rootless and saved.exists():
                 apply_rules(saved.read_text(), table='betterdocker_rootless', cache='rootless.nft')

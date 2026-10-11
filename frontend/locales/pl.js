@@ -14,10 +14,7 @@
             "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.": "Użyj liter, cyfr, kropek, podkreśleń lub łączników; zacznij od litery lub cyfry.",
             "Invalid DNS server list": "Nieprawidłowa lista serwerów DNS",
             "Invalid DNS search domain list": "Nieprawidłowa lista domen DNS",
-            "DCT migration requires a static IPv4 address.": "Migracja DCT wymaga statycznego adresu IPv4.",
-            "DCT migration with snapshot history is not supported.": "Migracja DCT z historią migawek nie jest obsługiwana.",
             "Apply or revert pending network changes before migrating the DCT.": "Zastosuj lub wycofaj oczekujące zmiany sieci przed migracją DCT.",
-            "Stop the DCT before migration.": "Zatrzymaj DCT przed migracją.",
             "Remove the DCT from HA before converting it to a template.": "Usuń DCT z HA przed konwersją na szablon.",
             "Apply or revert pending settings before converting the DCT to a template.": "Zastosuj lub wycofaj oczekujące ustawienia przed konwersją DCT na szablon.",
             "Stop the DCT before converting it to a template.": "Zatrzymaj DCT przed konwersją na szablon.",
@@ -26,7 +23,6 @@
             "Stop the DCT before removal.": "Zatrzymaj DCT przed usunięciem.",
             "Protection mode enabled": "Ochrona jest włączona",
 
-            "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.": "Po przywróceniu DCT można zmieniać tylko zaporę. Wdróż ponownie, aby zmienić adres lub interfejs sieciowy.",
             'Replication': 'Replikacja',
             "Docker Volumes": "Wolumeny Docker",
             "In use": "W użyciu",

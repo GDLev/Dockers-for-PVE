@@ -72,7 +72,7 @@ def snapshot_list(identifier, node):
     for path in worker.snapshot_root(identifier).glob('*/manifest.json'):
         try:
             data = json.loads(path.read_text())
-            if data.get('version') == 1 and data.get('id') == identifier and data.get('name') == path.parent.name:
+            if data.get('version') in (1, 2) and data.get('id') == identifier and data.get('name') == path.parent.name:
                 rows.append({key: data[key] for key in ('name', 'created', 'description', 'size', 'recovery')})
         except (OSError, ValueError, KeyError):
             continue
@@ -287,6 +287,25 @@ def recover_snapshot_transaction(identifier, restoring=False):
 
 def snapshot_restore_network(identifier, node, configs, current, check_only=False):
     saved = json.loads((configs / 'metadata.json').read_text())
+    if 'interfaces' in saved or 'interfaces' in current:
+        from .endpoints import interfaces, validate, resolved
+        from .endpoint_network import preflight
+        candidate = dict(saved, id=identifier, vmid=current['vmid'], node=node, status='stopped', interfaces=validate(interfaces(saved)))
+        preflight(candidate, identifier)
+        if check_only:
+            return candidate
+        project = worker.ROOT / identifier
+        journal = project / 'network-transaction.json'
+        if not journal.exists():
+            from .endpoint_network import re_dhcp_file
+            files = {path.name: path.read_text() for path in project.iterdir()
+                if path.name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf') or re_dhcp_file(path.name)}
+            worker.write_json(journal, {'metadata': {key: value for key, value in current.items() if key not in ('deployment', 'digest')},
+                'files': files, 'endpoints': True})
+        worker.remove_network(current)
+        worker.write_json(worker.METADATA / (identifier + '.json'), candidate)
+        worker.ensure_address(candidate)
+        return candidate
     saved.setdefault('firewall', 0)
     if not all(key in saved for key in worker.NETWORK_KEYS):
         return dict(saved, **{key: current[key] for key in ('id', 'vmid', 'node', 'address') if key in current})
@@ -586,12 +605,18 @@ def snapshot_apply(identifier, node, name, check_only=False):
             for binding in bindings or []:
                 if binding.get('HostIp') == current.get('address') or binding.get('HostIp') == json.loads((configs / 'metadata.json').read_text()).get('address'):
                     binding['HostIp'] = metadata['address']
+        if 'interfaces' in metadata and not node_runtime.load().rootless:
+            from .endpoints import port_bindings
+            service = body['Labels']['com.docker.compose.service']
+            runtime = json.loads((project / 'compose.runtime.json').read_text())
+            body['HostConfig']['PortBindings'] = port_bindings(runtime['services'][service].get('ports', []))
         result = worker.docker_engine('POST', '/containers/create?name=' + quote(container['Name'].lstrip('/'), safe=''), body)
         created.append(result['Id'])
     for container in saved:
         if container.get('SnapshotTag'):
             worker.run(['docker', 'image', 'rm', container['SnapshotTag']], check=False, capture_output=True)
-    worker.write_json(project / 'snapshot-restored.json', {'name': name, 'containers': created, 'address': metadata['address']})
+    worker.write_json(project / 'snapshot-restored.json', {'name': name, 'containers': created, 'address': metadata['address'],
+        'addresses': sorted({p['host_ip'] for service in json.loads((project / 'compose.runtime.json').read_text())['services'].values() for p in service.get('ports', [])})})
     state = worker.snapshot_tree_state(identifier)
     state['current'] = name
     worker.snapshot_tree_write(identifier, state)

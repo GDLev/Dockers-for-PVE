@@ -20,7 +20,7 @@ sub option {
 
 my $vmid = get_standard_option('pve-vmid');
 my $service = option('string', 'Compose service. Required when the DCT contains more than one service.');
-my $net0 = option('string', 'Published IPv4 endpoint: bridge=<bridge>,ip=<CIDR|dhcp>,hwaddr=<MAC>,mtu=<bytes>,firewall=<0|1>.');
+my $net0 = option('string', 'Published endpoint: bridge=<bridge>,ip=<CIDR|dhcp>,ip6=<CIDR|none>,gw=<IPv4>,gw6=<IPv6>,tag=<VLAN>,rate=<MB/s>,link_down=<0|1>,ports=<service:port/protocol>.');
 my $hostname = option('string', 'Name of the DCT.');
 my $pool = option('string', 'Add the new DCT to this resource pool.');
 my $storage = option('string', 'Destination storage for the managed data disk.', format => 'pve-storage-id');
@@ -44,6 +44,7 @@ my %resources = (
     searchdomain => option('string', 'Space-separated DNS search domains.'),
     'restart-policy' => option('string', 'Docker restart policy.'),
 );
+my %network_options = map { ('net' . $_) => $net0 } (0..15);
 my %commands = (
     limits => ['Read or set administrator-owned aggregate DCT limits.', ['vmid'], {
         vmid => $vmid, cpus => option('number', 'Aggregate CPU ceiling; 0 means unlimited.', minimum => 0, maximum => 8192),
@@ -53,7 +54,7 @@ my %commands = (
     create => ['Create a DCT from a Compose file, deployment JSON file or Docker image.', ['vmid', 'source'], {
         vmid => $vmid, source => { type => 'string', description => 'Compose file, deployment JSON file or Docker image.' },
         node => option('string', 'Destination node. Defaults to the local node.'), hostname => $hostname,
-        net0 => $net0, pool => $pool, start => option('boolean', 'Start after creation.', default => 0),
+        %network_options, pool => $pool, start => option('boolean', 'Start after creation.', default => 0),
         ports => option('string', 'Published:container port mappings for an image, separated by commas.'),
         'env-file' => option('string', 'Import environment variables from this file.'),
     }],
@@ -61,15 +62,15 @@ my %commands = (
     status => ['Show DCT status.', ['vmid'], { vmid => $vmid, verbose => option('boolean', 'Verbose output format.') }],
     pending => ['Show current and pending configuration.', ['vmid'], { vmid => $vmid, service => $service }],
     network => ['Show the published IPv4 endpoint configuration.', ['vmid'], { vmid => $vmid }],
-    set => ['Set DCT options.', ['vmid'], { vmid => $vmid, %config, %resources, service => $service, net0 => $net0,
-        delete => option('string', 'Remove startup or hookscript.', enum => ['startup', 'hookscript']) }],
+    set => ['Set DCT options.', ['vmid'], { vmid => $vmid, %config, %resources, service => $service, %network_options, delete => option('string', 'Remove startup, hookscript or comma-separated network interfaces.') }],
     start => ['Start the DCT.', ['vmid'], { vmid => $vmid }],
     stop => ['Stop the DCT immediately.', ['vmid'], { vmid => $vmid }],
     shutdown => ['Shut down the DCT gracefully.', ['vmid'], { vmid => $vmid, timeout => $timeout }],
     reboot => ['Reboot the DCT.', ['vmid'], { vmid => $vmid, timeout => $timeout }],
     destroy => ['Remove the DCT, optionally deleting owned data.', ['vmid'], { vmid => $vmid, 'destroy-owned-data' => option('boolean', 'Remove owned disks, volumes and project files.', default => 0) }],
-    migrate => ['Migrate a stopped DCT to another node, or request native HA relocation.', ['vmid', 'target'], {
-        vmid => $vmid, target => { type => 'string', description => 'Target node.' }, 'target-storage' => $storage }],
+    migrate => ['Migrate a DCT to another node, optionally shutting down and restarting it.', ['vmid', 'target'], {
+        vmid => $vmid, target => { type => 'string', description => 'Target node.' }, 'target-storage' => $storage, restart => option('boolean', 'Shutdown and restart a running DCT.', default => 0),
+        timeout => option('integer', 'Shutdown timeout in seconds.', minimum => 1, maximum => 86400, default => 180) }],
     clone => ['Create an independent full clone, initially stopped.', ['vmid', 'newid'], {
         vmid => $vmid, newid => $vmid, hostname => $hostname, net0 => { %$net0, optional => 0 }, pool => $pool,
         storage => $storage, full => option('boolean', 'Create a full copy. Linked clones are unavailable.', enum => [1], default => 1) }],

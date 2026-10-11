@@ -141,6 +141,17 @@ class PortableStateTests(unittest.TestCase):
                 run.assert_not_called()
                 self.assertFalse(folder.exists())
 
+    def test_migration_history_cannot_write_through_configuration_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / 'transfer.tar'
+            with tarfile.open(archive, 'w') as handle:
+                member = tarfile.TarInfo('history/before/configuration/request.json')
+                member.type = tarfile.SYMTYPE; member.linkname = '/etc/shadow'
+                handle.addfile(member)
+            with patch.object(worker, 'run') as run, self.assertRaisesRegex(ValueError, 'configuration cannot contain links'):
+                state.unpack_state(archive, Path(temporary) / 'target', history=True)
+            run.assert_not_called()
+
     def test_backup_rejects_external_read_only_bind_mounts_too(self):
         with tempfile.TemporaryDirectory() as temporary:
             outside = Path(temporary) / 'outside'; outside.mkdir()

@@ -42,7 +42,7 @@ class NetworkEditTests(unittest.TestCase):
     def test_running_stale_unsupported_and_restored_writes_do_nothing(self):
         self.configure()
         before = (self.directory/'request.json').read_text()
-        for key in ('ip6', 'tag', 'rate', 'net1'):
+        for key in ('ip6', 'unsupported', 'net1'):
             with self.assertRaisesRegex(ValueError, 'Unsupported'):
                 worker.project_network(ID, 'pve', {key:1})
         with self.assertRaisesRegex(ValueError, 'checksum'):

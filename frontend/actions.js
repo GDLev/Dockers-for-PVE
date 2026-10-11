@@ -75,10 +75,9 @@ const openGuestAction = (info, action) => {
             });
             return;
         }
-        if (action === 'migrate' && state.status !== 'stopped' && !state.ha?.managed) { return; }
         Ext.create(action === 'clone' ? 'PVE.betterdocker.StateRestore' : 'PVE.betterdocker.Migrate', {
             autoShow: true, nodename: info.node, projectId, vmid: info.vmid,
-            guestname: state.name || info.name, vmname: state.name || info.name, isTemplate: state.template, digest: state.digest, haManaged: state.ha?.managed,
+            guestname: state.name || info.name, vmname: state.name || info.name, isTemplate: state.template, digest: state.digest, running: Boolean(state.active_containers || ['running', 'partial'].includes(state.status)), haManaged: state.ha?.managed,
         });
     } });
 };

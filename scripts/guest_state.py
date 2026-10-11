@@ -314,7 +314,7 @@ def pack_state(folder, archive):
     os.chmod(archive, 0o600)
 
 
-def unpack_state(archive, folder):
+def unpack_state(archive, folder, history=False):
     folder = Path(folder)
     if folder.exists():
         raise ValueError('Restore staging directory already exists')
@@ -332,20 +332,23 @@ def unpack_state(archive, folder):
                     raise ValueError('Duplicate DCT archive member')
                 names[normalized] = member
             links = {name for name, member in names.items() if member.issym() or member.islnk()}
+            def application_path(name):
+                return name.startswith('data/') or history and bool(re.fullmatch(r'history/[A-Za-z][A-Za-z0-9_-]{0,39}/data/.+', name))
             for name, member in names.items():
                 if any(str(parent) in links for parent in PurePosixPath(name).parents):
                     raise ValueError('DCT archive writes through a link')
-                if name != '.' and not (name.startswith('data/') or name.startswith('configuration/') or name in
+                history_member = history and (name in ('history', 'history/tree.json') or bool(re.fullmatch(r'history/[A-Za-z][A-Za-z0-9_-]{0,39}(?:/.*)?', name)))
+                if name != '.' and not history_member and not (name.startswith('data/') or name.startswith('configuration/') or name in
                         ('data', 'configuration', 'manifest.json', 'containers.json', 'networks.json', 'images.tar', 'checksums.json')):
                     raise ValueError('Unknown DCT archive member')
                 if member.issym():
                     # Application symlinks are preserved, but never followed while extracting.
-                    if not name.startswith('data/'):
+                    if not application_path(name):
                         raise ValueError('DCT configuration cannot contain links')
                 if member.islnk():
                     target = PurePosixPath(member.linkname)
                     linked = names.get(str(target))
-                    if target.is_absolute() or '..' in target.parts or not linked or not linked.isfile() or not name.startswith('data/') or not str(target).startswith('data/'):
+                    if target.is_absolute() or '..' in target.parts or not linked or not linked.isfile() or not application_path(name) or not application_path(str(target)):
                         raise ValueError('Unsafe DCT archive hard link')
         worker.run(['tar', '--numeric-owner', '--xattrs', '--acls', '-xf', str(archive), '-C', str(folder)], timeout=86400)
         return check_state(folder)
@@ -426,9 +429,14 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
         if not vmid:
             raise ValueError('Reserve the destination DCT ID before restoring')
         request = read(folder / 'configuration' / 'request.json')
-        if not isinstance(overrides, dict) or set(overrides) - {'name', 'bridge', 'address', 'cidr', 'ipv4mode', 'hwaddr', 'mtu'}:
+        if not isinstance(overrides, dict) or set(overrides) - {'name', 'bridge', 'address', 'cidr', 'ipv4mode', 'hwaddr', 'mtu', 'interfaces'}:
             raise ValueError('Unsupported DCT restore override')
         request.update(overrides, vmid=vmid)
+        if 'interfaces' in request and 'interfaces' not in overrides:
+            from dctlib.endpoints import KEYS
+            request['interfaces']['net0'].update({key: value for key, value in overrides.items() if key in KEYS})
+            if overrides.get('address') and not overrides.get('cidr'):
+                request['interfaces']['net0']['cidr'] = overrides['address']
         if overrides.get('address') and not overrides.get('cidr'):
             request.pop('cidr', None)
         if overrides.get('ipv4mode') == 'dhcp':
@@ -451,6 +459,8 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                     address=request['address'], cidr=request['cidr'], ipv4mode=request['ipv4mode'], mtu=request['mtu'],
                     hwaddr=request['hwaddr'] or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2)),
                     interface='bd' + identifier[:12], status='restoring', created=int(time.time()), template=bool(template))
+        if 'interfaces' in request:
+            info['interfaces'] = request['interfaces']
         info['runtime_mode'] = worker.node_runtime.load().mode
         project.mkdir(parents=True, mode=0o700)
         worker.node_runtime.read_access(project)
@@ -469,6 +479,9 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                     shutil.copy2(path, project / filename)
             worker.ensure_address(info)
             manifest, runtime, volume_names, network_names, remap_source = adapted_state(folder, identifier, info['address'])
+            if 'interfaces' in info:
+                from dctlib.endpoints import bind_runtime
+                runtime = bind_runtime(runtime, info)
             containers = read(folder / 'containers.json')
             worker.project_limits.check_directory(project, runtime)
             worker.project_limits.check_containers(containers, worker.project_limits.load(project))
@@ -547,6 +560,10 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                 for bindings in (host.get('PortBindings') or {}).values():
                     for binding in bindings or []:
                         binding['HostIp'] = info['address']
+                if 'interfaces' in info and not worker.node_runtime.load().rootless:
+                    from dctlib.endpoints import port_bindings
+                    service = body['Labels']['com.docker.compose.service']
+                    host['PortBindings'] = port_bindings(runtime['services'][service].get('ports', []))
                 host['NetworkMode'] = network_names.get(host.get('NetworkMode'), host.get('NetworkMode'))
                 if manifest.get('runtime', {}).get('mode') == 'rootless' and not worker.node_runtime.load().rootless:
                     service = body['Labels']['com.docker.compose.service']

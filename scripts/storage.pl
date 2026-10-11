@@ -92,7 +92,7 @@ if ($action eq 'allocate') {
     my ($old) = PVE::Storage::volume_size_info($cfg, $volid);
     die "Disks may only grow\n" unless $size > $old;
     PVE::Storage::volume_resize($cfg, $volid, $size, 0);
-} elsif ($action =~ /\A(snapshot|rollback|snapshot-delete|rollback-check)\z/) {
+} elsif ($action =~ /\A(snapshot|rollback|snapshot-delete|rollback-check|snapshot-export|snapshot-export-cleanup)\z/) {
     my $name = $p->{name};
     die "Invalid snapshot\n" unless $name =~ /\A[a-zA-Z][a-zA-Z0-9_-]{0,39}\z/;
     die "Storage snapshots unsupported\n" unless $scfg->{type} eq 'lvmthin' || $scfg->{type} eq 'zfspool';
@@ -104,7 +104,45 @@ if ($action eq 'allocate') {
         my $volumes = PVE::Storage::LVMPlugin::lvm_list_volumes($scfg->{vgname});
         $exists = $volumes->{$scfg->{vgname}}->{"snap_${volume}_$name"};
     }
-    die "Storage snapshot does not exist\n" if !$exists && ($action eq 'rollback' || $action eq 'rollback-check');
+    die "Storage snapshot does not exist\n" if !$exists && ($action eq 'rollback' || $action eq 'rollback-check' || $action eq 'snapshot-export');
+    if ($action eq 'snapshot-export' || $action eq 'snapshot-export-cleanup') {
+        my $output = $p->{output};
+        die "Invalid snapshot export path\n" unless $output =~ m!\A/var/lib/betterdocker/transfers/[0-9a-f]{32}/state/history/[A-Za-z][A-Za-z0-9_-]{0,39}/disk\.raw\z!;
+        my $parent = $output;
+        $parent =~ s!/[^/]+$!!;
+        while ($parent ne '/') {
+            my @stat = lstat($parent);
+            die "Unsafe snapshot export directory\n" unless @stat && !-l $parent && -d $parent && $stat[4] == 0 && ($stat[2] & 022) == 0;
+            $parent =~ s!/[^/]+$!!;
+            $parent ||= '/';
+        }
+        my $journal = "$output.snapdev";
+        if (-e $journal) {
+            die "Unsafe snapshot export journal\n" if -l $journal;
+            my $saved = read_json($journal);
+            die "Invalid snapshot export journal\n" unless $scfg->{type} eq 'zfspool' && $saved->{volid} eq $volid && $saved->{previous} =~ /\A(?:hidden|visible)\z/;
+            PVE::Tools::run_command(['zfs', 'set', "snapdev=$saved->{previous}", "$scfg->{pool}/$volume"]);
+            unlink $journal or die $!;
+        }
+        if ($action eq 'snapshot-export-cleanup') { print "{}\n"; exit; }
+        sysopen(my $export, $output, O_WRONLY|O_CREAT|O_EXCL, 0600) or die "Export file already exists: $!\n";
+        close $export;
+        my $previous;
+        if ($scfg->{type} eq 'zfspool') {
+            my $dataset = "$scfg->{pool}/$volume";
+            PVE::Tools::run_command(['zfs', 'get', '-H', '-o', 'value', 'snapdev', $dataset], outfunc => sub { $previous = $_[0]; });
+            sysopen(my $saved, $journal, O_WRONLY|O_CREAT|O_EXCL, 0600) or die $!;
+            print $saved encode_json({ volid => $volid, previous => $previous }); close $saved or die $!;
+            PVE::Tools::run_command(['zfs', 'set', 'snapdev=visible', $dataset]);
+            PVE::Tools::run_command(['udevadm', 'settle']);
+        } else { PVE::Storage::activate_volumes($cfg, [$volid], $name); }
+        my $path = PVE::Storage::path($cfg, $volid, $name);
+        eval { PVE::Tools::run_command(['dd', "if=$path", "of=$output", 'bs=4M', 'conv=sparse', 'status=none']); chmod 0600, $output; };
+        my $error = $@;
+        if (defined($previous)) { PVE::Tools::run_command(['zfs', 'set', "snapdev=$previous", "$scfg->{pool}/$volume"]); unlink $journal or die $!; }
+        die $error if $error;
+        print "{}\n"; exit;
+    }
     if ($action eq 'snapshot') { PVE::Storage::volume_snapshot($cfg, $volid, $name); }
     elsif ($action eq 'rollback') { PVE::Storage::volume_snapshot_rollback($cfg, $volid, $name); }
     elsif ($action eq 'snapshot-delete') {

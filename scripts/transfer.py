@@ -15,6 +15,7 @@ import uuid
 
 from dctlib import projects as worker
 import guest_state as state
+import migration_history as history
 
 TRANSFERS = worker.ROOT.parent / 'transfers'
 GLOBAL_METADATA = Path('/etc/pve/betterdocker')
@@ -36,7 +37,11 @@ def ssh_command(node):
 
 
 def remote(node, *args):
-    return worker.capture(ssh_command(node) + [shlex.join([HELPER, *map(str, args)])])
+    try:
+        return worker.run(ssh_command(node) + [shlex.join([HELPER, *map(str, args)])], capture_output=True, timeout=86400 if args and args[0] in ('prepare', 'abort', 'resume') else 120).stdout
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or 'No error details from destination').strip().splitlines()[-1]
+        raise ValueError(f'Destination {node}: {detail}') from error
 
 
 def check_runtime(target):
@@ -80,9 +85,7 @@ def prepare(token, identifier, source, storage):
     worker.node_runtime.assert_compatible({'mode': current.get('runtime_mode', 'rootful'), 'count': 65536})
     if current['node'] != source or current.get('migration') != token:
         raise ValueError('DCT migration ownership changed')
-    if current.get('ipv4mode', 'static') != 'static':
-        raise ValueError('Stopped DCT transfer currently requires a static IPv4 endpoint')
-    state.unpack_state(folder / 'state.tar', folder / 'state')
+    state.unpack_state(folder / 'state.tar', folder / 'state', history=True)
     volume = current.get('replication')
     if volume:
         import replica
@@ -90,7 +93,7 @@ def prepare(token, identifier, source, storage):
         if not selected:
             raise ValueError('Replicated DCT migration requires a successful replica on the destination')
         replica.recovery_source(volume['volid'], selected['snapshot'], selected['guid'])
-    with private_metadata(folder, current):
+    with worker.operation(identifier, 'migration-prepare') as lock, private_metadata(folder, current):
         # A fenced former HA owner can retain its stopped local copy. Reclaim
         # only that enrolled copy after validating the incoming ownership above.
         project = worker.ROOT / identifier
@@ -101,7 +104,10 @@ def prepare(token, identifier, source, storage):
             clean_local(identifier, local)
             path.unlink()
         state.restore_state(folder / 'state', identifier, worker.current_node(),
-                            {key: current[key] for key in ('name', 'bridge', 'address', 'cidr', 'hwaddr', 'mtu') if key in current}, storage, live_firewall=current.get('firewall', 0))
+                            {key: current[key] for key in ('name', 'bridge', 'address', 'cidr', 'ipv4mode', 'hwaddr', 'mtu', 'interfaces') if key in current}, storage, lock_fd=lock.fileno(), live_firewall=current.get('firewall', 0))
+        provisional = state.read(worker.METADATA / (identifier + '.json'))
+        state.write(folder / 'ready.json', {'id': identifier, 'source': source, 'info': provisional})
+        history.restore(identifier, worker.current_node(), folder / 'state')
         info = state.read(worker.METADATA / (identifier+'.json'))
         info['template'] = bool(current.get('template'))
         info['onboot'] = current.get('onboot', 0)
@@ -147,6 +153,7 @@ def clean_local(identifier, info):
     if volumes:
         worker.run(['docker', 'volume', 'rm', *volumes], capture_output=True)
     worker.remove_network(info)
+    history.remove(identifier)
     disk = worker.storage_config(identifier)
     if disk:
         worker.storage_unmount(identifier)
@@ -165,6 +172,17 @@ def abort(token):
     folder = directory(token)
     if not folder.exists():
         return
+    identifier = state.read(folder / 'state/manifest.json')['id'] if (folder / 'state/manifest.json').exists() else None
+    if identifier:
+        with worker.operation(identifier, 'migration-abort', wait_timeout=1800):
+            return abort_copy(token)
+    return abort_copy(token)
+
+
+def abort_copy(token):
+    folder = directory(token)
+    if not folder.exists():
+        return
     ready = folder / 'ready.json'
     if ready.exists():
         value = state.read(ready)
@@ -173,7 +191,7 @@ def abort(token):
         if published['node'] == worker.current_node():
             raise ValueError('Cannot abort an already committed destination guest')
         with private_metadata(folder, info):
-            with worker.operation(identifier, 'migration-abort'), worker.locked():
+            with worker.locked(identifier):
                 clean_local(identifier, info)
     # Interrupted imports retain their ownership journal until rollback succeeds.
     elif (folder / 'metadata').exists():
@@ -185,7 +203,7 @@ def abort(token):
             published = state.read(GLOBAL_METADATA / (identifier+'.json'))
             if published['node'] == worker.current_node():
                 raise ValueError('Cannot abort an already committed destination guest')
-            with worker.operation(identifier, 'migration-abort'), worker.locked():
+            with worker.locked(identifier):
                 if (worker.ROOT.parent / 'imports' / (identifier+'.json')).exists():
                     state.cleanup_import(identifier)
                 elif (worker.METADATA / (identifier+'.json')).exists():
@@ -235,11 +253,16 @@ def recover(token):
             with private_metadata(folder, info):
                 worker.write_json(worker.METADATA / (identifier+'.json'), info)
                 clean_local(identifier, info)
+            history.cleanup_exports(identifier, folder)
             remote(target, 'finish', token)
+            resume = state.read(folder / 'target.json').get('resume', [])
+            if resume:
+                remote(target, 'resume', identifier, json.dumps(resume))
             shutil.rmtree(folder)
             return
         if current['node'] != info['node'] or current.get('migration') != token:
             raise ValueError('Migration ownership changed; recovery was not performed')
+        history.cleanup_exports(identifier, folder)
         remote(target, 'abort', token)
         # A killed commit can leave the reservation changed before metadata changed.
         program = r"""use PVE::Cluster; use PVE::Tools; use JSON qw(decode_json encode_json);
@@ -257,6 +280,9 @@ $owner->{node}=$node; PVE::Tools::file_set_contents($reservation,encode_json($ow
         marker = worker.ROOT.parent / 'restart-paused' / (identifier+'.json')
         marker.parent.mkdir(exist_ok=True,parents=True,mode=0o700)
         state.write(marker, {'paused': True})
+        resume = state.read(folder / 'target.json').get('resume', [])
+        if resume:
+            resume_instances(identifier, resume)
         shutil.rmtree(folder)
 
 
@@ -270,7 +296,10 @@ def recover_all():
             print(f'DCT migration recovery pending: {error}', file=sys.stderr)
 
 
-def migrate(identifier, node, target, storage, digest=None):
+def migrate(identifier, node, target, storage, digest=None, restart=0, timeout=180):
+    restart, timeout = int(restart), int(timeout)
+    if restart not in (0, 1) or not 1 <= timeout <= 86400:
+        raise ValueError('Invalid migration restart or timeout')
     if target == node:
         raise ValueError('Choose another cluster node')
     with worker.operation(identifier, 'migrate') as lock:
@@ -281,14 +310,11 @@ def migrate(identifier, node, target, storage, digest=None):
                 raise ValueError('Apply or revert pending network changes before migrating the DCT')
             check_runtime(target)
             worker.recover_guest_hook(info)
-            worker.require_stopped(worker.container_records(identifier))
+            active = worker.active_network_instances(identifier)
+            if active and not restart:
+                raise ValueError('Running DCT migration requires restart=1')
             if info.get('replication') and target not in info['replication'].get('targets', {}):
                 raise ValueError('Replicated DCT migration requires a successful replica on the destination')
-            if info.get('ipv4mode', 'static') != 'static':
-                raise ValueError('Stopped DCT transfer currently requires a static IPv4 endpoint')
-            snapshots = worker.snapshot_root(identifier)
-            if snapshots.exists() and any(snapshots.iterdir()):
-                raise ValueError('DCT snapshot history transfer is not implemented yet')
             token = uuid.uuid4().hex
             folder = directory(token); folder.mkdir(parents=True, mode=0o700)
             info.pop('deployment', None); info.pop('digest', None)
@@ -297,13 +323,16 @@ def migrate(identifier, node, target, storage, digest=None):
             info['migration'] = token
             worker.write_json(worker.METADATA / (identifier+'.json'), info)
             state.write(folder / 'source.json', info)
-            state.write(folder / 'target.json', {'node': target})
+            state.write(folder / 'target.json', {'node': target, 'resume': active, 'timeout': timeout})
             records = worker.container_records(identifier)
             if records:
                 worker.run(['docker','update','--restart=no',*[c['id'] for c in records]],capture_output=True)
         committed = False
         try:
+            if active:
+                worker.action(identifier, node, 'shutdown', timeout)
             state.capture_state(identifier, node, folder / 'state', lock_fd=lock.fileno())
+            history.capture(identifier, folder / 'state')
             state.pack_state(folder / 'state', folder / 'state.tar')
             with worker.locked(identifier):
                 worker.remove_network(info)
@@ -320,11 +349,14 @@ def migrate(identifier, node, target, storage, digest=None):
                 with worker.locked(identifier):
                     clean_local(identifier, info)
             remote(target, 'finish', token)
+            if active:
+                remote(target, 'resume', identifier, json.dumps(active))
             shutil.rmtree(folder)
         except BaseException:
             published = state.read(GLOBAL_METADATA / (identifier+'.json'))
             committed = committed or published['node'] == target
             if not committed:
+                history.cleanup_exports(identifier, folder)
                 remote(target, 'abort', token)
                 with worker.locked(identifier):
                     worker.ensure_address(info)
@@ -333,15 +365,38 @@ def migrate(identifier, node, target, storage, digest=None):
                     marker = worker.ROOT.parent / 'restart-paused' / (identifier+'.json')
                     marker.parent.mkdir(exist_ok=True,parents=True,mode=0o700)
                     state.write(marker, {'paused': True})
+                if active:
+                    resume_instances(identifier, active)
                 shutil.rmtree(folder)
             raise
+
+
+def resume_instances(identifier, instances):
+    info = worker.detail(identifier, worker.current_node())
+    worker.prepare_network_start(info)
+    worker.guest_hook(info, 'pre-start')
+    worker.expect_guest_hook(info, 'post-start')
+    worker.prepare_firewall(info)
+    records = worker.container_records(identifier)
+    for saved in instances:
+        row = next((r for r in records if r['service'] == saved['service'] and r.get('number', '1') == saved['number']), None)
+        if not row:
+            raise ValueError('Migration cannot find a previously active instance')
+        if row['state'] not in ('running', 'paused'):
+            worker.run(['docker', 'start', row['id']], capture_output=True)
+        if saved.get('paused') and row['state'] != 'paused':
+            worker.run(['docker', 'pause', row['id']], capture_output=True)
+    worker.restore_restart_policy(identifier)
+    worker.finish_network_start(info)
+    worker.guest_hook(info, 'post-start')
+    worker.refresh(worker.current_node())
 
 
 def main():
     if os.geteuid():
         raise SystemExit('Root required')
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('receive','prepare','abort','finish','migrate','recover','runtime','check-runtime'))
+    parser.add_argument('action', choices=('receive','prepare','abort','finish','migrate','recover','runtime','check-runtime','resume'))
     parser.add_argument('values', nargs='*')
     args = parser.parse_args()
     if args.action == 'runtime': print(json.dumps(worker.node_runtime.load().identity()))
@@ -350,6 +405,10 @@ def main():
     elif args.action == 'prepare': prepare(*args.values)
     elif args.action == 'abort': abort(*args.values)
     elif args.action == 'recover': recover(*args.values)
+    elif args.action == 'resume':
+        identifier = worker.project_id(args.values[0])
+        with worker.operation(identifier, 'start'), worker.locked(identifier):
+            resume_instances(identifier, json.loads(args.values[1]))
     elif args.action == 'finish':
         folder=directory(*args.values)
         if not folder.exists():

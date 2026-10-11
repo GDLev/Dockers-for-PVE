@@ -11,6 +11,27 @@ INFO = dict(BASE, id=IDENTIFIER, node='pve', interface='bdaaaaaaaaaaaa', hwaddr=
 
 
 class NetworkTests(unittest.TestCase):
+    def test_incoming_dhcp_requires_matching_guest_and_target(self):
+        import stat
+        from types import SimpleNamespace
+        from dctlib.network import dhcp_info
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); metadata = root / 'metadata'; metadata.mkdir()
+            projects = root / 'projects'; projects.mkdir()
+            token = 'b' * 32
+            staged = root / 'transfers' / token / 'metadata'; staged.mkdir(parents=True)
+            worker.write_json(metadata / (IDENTIFIER + '.json'), dict(INFO, vmid=100, node='source', migration=token))
+            for vmid in (101, 100):
+                worker.write_json(staged / (IDENTIFIER + '.json'), dict(INFO, vmid=vmid, node='pve'))
+                with patch.object(worker, 'METADATA', metadata), patch.object(worker, 'ROOT', projects), \
+                     patch.object(worker, 'current_node', return_value='pve'), \
+                     patch('dctlib.network.os.fstat', return_value=SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o600)):
+                    if vmid != 100:
+                        with self.assertRaisesRegex(ValueError, 'ownership differs'):
+                            dhcp_info(IDENTIFIER)
+                    else:
+                        self.assertEqual(dhcp_info(IDENTIFIER)['node'], 'pve')
+
     def test_dhcp_ignores_static_fields(self):
         data = worker.validate(dict(BASE, ipv4mode='dhcp', address='', cidr=''))
         self.assertEqual(data['address'], '')
@@ -70,8 +91,8 @@ class NetworkTests(unittest.TestCase):
              patch.object(worker, 'lease', return_value={'address': '192.0.2.91'}), \
              patch.object(worker, 'rebind_runtime') as rebind, patch.object(worker, 'ensure_link'), \
              patch.object(worker, 'start_dhcp'), patch.object(worker, 'restore_restart_policy'), \
-             patch.object(worker, 'container_records', side_effect=[records, records, [dict(row, state='exited') for row in records], records]), \
-             patch.object(worker, 'run') as run:
+             patch.object(worker, 'container_records', side_effect=[records, records, records]), \
+             patch.object(worker, 'reconcile_network_runtime') as reconcile, patch.object(worker, 'run') as run:
             info = dict(INFO, status='partial', address='192.0.2.90')
             worker.sync_dhcp(info)
             rebind.assert_called_once_with(Path(folder) / IDENTIFIER, '192.0.2.91')
@@ -79,7 +100,7 @@ class NetworkTests(unittest.TestCase):
             self.assertIn(['docker', 'start', 'a'], commands)
             self.assertNotIn(['docker', 'start', 'b'], commands)
             self.assertNotIn(['docker', 'start', 'c'], commands)
-            self.assertTrue(any(command[-3:] == ['up', '--no-start', '--force-recreate'] for command in commands))
+            reconcile.assert_called_once_with(info)
             self.assertEqual(info['address'], '192.0.2.91')
 
     def test_dhcp_does_not_restart_an_explicitly_stopped_project(self):
@@ -88,7 +109,7 @@ class NetworkTests(unittest.TestCase):
              patch.object(worker, 'lease', return_value={'address': '192.0.2.91'}), \
              patch.object(worker, 'rebind_runtime'), patch.object(worker, 'ensure_link'), \
              patch.object(worker, 'start_dhcp'), patch.object(worker, 'container_records', return_value=[]), \
-             patch.object(worker, 'run') as run:
+             patch.object(worker, 'reconcile_network_runtime'), patch.object(worker, 'run') as run:
             worker.sync_dhcp(dict(INFO, status='stopped', address='192.0.2.90'))
             self.assertFalse(any(call.args[0][:2] == ['docker', 'start'] for call in run.call_args_list))
 

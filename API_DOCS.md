@@ -21,11 +21,11 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | POST | `/nodes/<node>/docker` | Create a DCT; send `deployment` as a JSON-encoded string and optional `pool` and `start`. Omitted `start` keeps the legacy API default of starting immediately. |
 | GET | `G/management` | Status, services, capabilities and configuration digest. |
 | GET / PUT | `G/config` | Notes, tags, protection, startup and hook configuration. |
-| GET / PUT | `G/network` | Endpoint settings, pending changes and firewall flag. PUT `revert=1` with `digest` to discard pending net0 changes. |
+| GET / PUT | `G/network` | Endpoint settings, pending changes and firewall flag. PUT `revert=1` with `digest` to discard pending network changes. |
 | GET / PUT | `G/pending` | Service effective/pending values. PUT `service`, comma-separated `revert` keys and `digest` to discard selected changes. |
 | PUT | `G/settings` | Service settings; send `service`, JSON-encoded `settings` and `digest`. |
 | POST | `G/action` | `action`: `start`, `shutdown`, `force-stop` or `reboot`. Optional `timeout` in seconds. |
-| POST | `G/migrate` | Move to `target`; requires a stopped DCT or HA relocation. Optional `storage` and `digest`. |
+| POST | `G/migrate` | Move to `target`; running DCTs require `restart=1`. Optional `storage`, `timeout` and `digest`. HA uses native relocation. |
 | POST | `G/clone` | Clone with `newid`, JSON-encoded destination `deployment`, optional `pool`, `storage` and `digest`. |
 | GET | `G/snapshots` | List snapshots. |
 | GET / PUT | `G/snapshot/<name>/config` | Snapshot metadata. PUT `description` with the digest returned by GET. |
@@ -37,7 +37,7 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | DELETE | `G/volumes/<vmid>?volume=<volid>` | Remove one unused or retained DCT disk. |
 | DELETE | `G` | Remove the DCT. Set `destroy-owned-data=1` to remove its owned data; otherwise retain it. Protection and HA restrictions apply. |
 
-Network changes on a running DCT are queued. GET returns the effective fields and a `pending` object; `/management` includes `pending_network`. A full DCT start, reboot or restart applies them after all containers stop. Restarting one service does not apply them. Failed application keeps the pending changes and restores the previous network. Stopped guests apply edits immediately. Apply or revert pending network changes before migration. Clone/restore use the destination endpoint and discard the source's pending endpoint. Restored DCTs allow firewall changes; endpoint changes require redeployment.
+Network changes on a running DCT are queued. GET returns the effective fields and a `pending` object; `/management` includes `pending_network`. A full DCT start, reboot or restart applies them after all containers stop. Restarting one service does not apply them. Failed application keeps the pending changes and restores the previous network. Stopped guests apply edits immediately. Apply or revert pending network changes before migration. Clone/restore use the destination endpoint and discard the source's pending endpoint. Endpoint edits preserve writable container layers, including after snapshot rollback.
 
 ## Start a guest and follow its task
 
@@ -151,3 +151,24 @@ The Docker Volumes storage tab can remove individual unused or retained PVE disk
 The CLI accepts `dct destroy 150 --destroy-owned-data 1`. Deletion is permanent; take a backup first.
 
 Charts use PVE's native guest RRD archives and consolidation. Long ranges fill as new measurements arrive; the previous JSON history is not imported.
+
+## Migration and network interfaces
+
+`POST /nodes/<node>/docker/<id>/migrate` accepts `target`, optional `storage`, `restart=1` and `timeout` in seconds. Running guests require restart mode: shutdown, transfer, then start the instances that were previously active. Stopped guests remain stopped. Snapshot history travels with the guest. Native disk snapshots require snapshot-capable destination storage. Runtime modes must match.
+
+`GET /nodes/<node>/docker/<id>/network` returns an `interfaces` object keyed by `net0` through `net15`, current `digest` and pending changes. `PUT` edits one interface using `net=net1`, or replaces the whole map using JSON in `interfaces`. Supply the latest digest. `delete=1` removes the selected interface; `net0` is required. `revert=1` discards pending network changes. Running guests apply changes at their next full start or reboot.
+
+Each interface accepts `bridge`, `hwaddr`, `mtu`, `firewall`, `tag`, `link_down`, `rate`, `ipv4mode`, `cidr`, `gw`, `ipv6mode`, `cidr6`, `gw6` and `ports`. IPv4 supports static addresses and DHCP; additional interfaces can disable IPv4. IPv6 supports static addresses. VLAN tags require a VLAN-aware bridge. Rate limits use MiB/s in both directions. Unassigned published ports use net0; `ports=web:8080/tcp` assigns that service's published port to the selected endpoint.
+
+These are published endpoints on the host, not extra NICs inside each Docker service. Gateways provide source routing for endpoint traffic without changing the node's management routes. Docker's private service networks and their default route remain separate. Published IPv6 ports pass DCT firewall policy before bypassing the separate node INPUT policy. Rootless IPv6 uses a host TCP/UDP adapter; it does not enable IPv6 inside the private Docker networks. Disconnect blocks endpoint traffic while keeping its address reserved.
+
+```bash
+curl --fail --silent --show-error -X PUT \
+  -H "Authorization: PVEAPIToken=$PVE_TOKEN" \
+  --data-urlencode "digest=$DIGEST" \
+  --data-urlencode 'net=net1' --data-urlencode 'bridge=vmbr0' \
+  --data-urlencode 'cidr=192.0.2.151/24' --data-urlencode 'ports=web:8080/tcp' \
+  "$PVE_URL/api2/json$G/network"
+```
+
+Use the returned task ID to follow completion. To disconnect the interface, PUT `net=net1`, `link_down=1` and a fresh digest. To remove it, send `delete=1` instead.

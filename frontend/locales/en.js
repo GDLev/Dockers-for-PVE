@@ -13,10 +13,7 @@
             "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.": "Use letters, numbers, dots, underscores or hyphens; start with a letter or number.",
             "Invalid DNS server list": "Invalid DNS server list",
             "Invalid DNS search domain list": "Invalid DNS search domain list",
-            "DCT migration requires a static IPv4 address.": "DCT migration requires a static IPv4 address.",
-            "DCT migration with snapshot history is not supported.": "DCT migration with snapshot history is not supported.",
             "Apply or revert pending network changes before migrating the DCT.": "Apply or revert pending network changes before migrating the DCT.",
-            "Stop the DCT before migration.": "Stop the DCT before migration.",
             "Remove the DCT from HA before converting it to a template.": "Remove the DCT from HA before converting it to a template.",
             "Apply or revert pending settings before converting the DCT to a template.": "Apply or revert pending settings before converting the DCT to a template.",
             "Stop the DCT before converting it to a template.": "Stop the DCT before converting it to a template.",
@@ -25,7 +22,6 @@
             "Stop the DCT before removal.": "Stop the DCT before removal.",
             "Protection mode enabled": "Protection mode enabled",
 
-            "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.": "Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.",
             "Docker Volumes": "Docker Volumes",
             "In use": "In use",
             "Unused": "Unused",

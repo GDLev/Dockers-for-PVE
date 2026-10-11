@@ -52,9 +52,11 @@ sub register_api {
 
     PVE::API2::BetterDocker::register_docker_method({
         name => 'migrate', path => '{id}/migrate', method => 'POST', protected => 1, proxyto => 'node',
-        description => 'Move a stopped DCT to another cluster node with an exclusive ownership handoff.', permissions => $root,
+        description => 'Move a DCT to another cluster node, optionally shutting down and restarting it.', permissions => $root,
         parameters => { additionalProperties => 0, properties => {
             node => $node, id => $id, digest => $digest, target => $node,
+            restart => { type => 'boolean', optional => 1, default => 0 },
+            timeout => { type => 'integer', minimum => 1, maximum => 86400, optional => 1, default => 180 },
             storage => { type => 'string', format => 'pve-storage-id', optional => 1 },
         } },
         returns => { type => 'string' },
@@ -76,10 +78,10 @@ sub register_api {
                 });
             }
             my $state = decode_json(PVE::API2::BetterDocker::output(['access-state', $param->{id}, $param->{node}]));
-            die "DCT must be stopped before migration\n" if $state->{active_containers};
+            die "Running DCT migration requires restart=1\n" if $state->{active_containers} && !$param->{restart};
             return $rpc->fork_worker('betterdockermigrate', PVE::API2::BetterDocker::task_id($param->{id}, $param->{node}), $user, sub {
                 PVE::Tools::run_command(['/usr/local/lib/betterdocker/transfer.py', 'migrate',
-                    $param->{id}, $param->{node}, $param->{target}, $param->{storage} // '', $param->{digest} // '']);
+                    $param->{id}, $param->{node}, $param->{target}, $param->{storage} // '', $param->{digest} // '', $param->{restart} // 0, $param->{timeout} // 180]);
             });
         },
     });

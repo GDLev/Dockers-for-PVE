@@ -7,7 +7,7 @@
 
 BetterDockers lets you manage Docker projects from the Proxmox VE web interface: deploy Compose files or images, control services, view logs, open consoles, set limits and take snapshots.
 
-Projects appear as **DCT** in the resource tree, with a guest ID and their own IPv4 address. Docker runs directly on the Proxmox node.
+Projects appear as **DCT** in the resource tree, with a guest ID and dedicated network endpoints. Docker runs directly on the Proxmox node.
 
 > [!WARNING]
 > At its current stage of development, this project is recommended only for small installations, preferably on a single node. It is not recommended for commercial use or complex deployments. Do not rely on it for critical workloads.
@@ -134,12 +134,12 @@ Permanent removal is a separate maintenance operation. Remove the DCTs and purge
 - **Runtime modes:** choose rootful or rootless Docker during installation. Rootless uses a shared unprivileged runtime account on each node.
 - **Resource settings:** set CPU, memory, swap and PID limits per service instance, along with restart policies. Changes that require a restart appear as pending and can be reverted.
 - **Disk limits:** limit application data with a managed data disk. Writable container layers can also have quotas in rootful mode with `overlay2` on XFS with project quotas.
-- **Networking:** assign one static or DHCP IPv4 endpoint for published ports. Select a Linux bridge or supported SDN VNet using PVE permissions. The bridge needs a connected IPv4 subnet; DHCP needs a reachable server.
+- **Networking:** configure up to 16 published endpoints with static IPv4, DHCP, static IPv6, VLAN tags, firewall, Disconnect and rate limits. Select a Linux bridge or supported SDN VNet using PVE permissions. The bridge needs a connected IPv4 subnet; DHCP needs a reachable server.
 - **Firewall:** configure native PVE guest rules, macros, aliases, IP sets, security groups and logs. Filtering covers incoming, outgoing and cross-DCT traffic on owned IPv4 Docker bridge networks.
 - **Storage:** managed data disks appear under Docker Volumes in the storage view. Local directory, LVM-thin and ZFS storage with `rootdir` content are supported. Create, grow or move disks while services are stopped.
 - **Snapshots:** capture deployment settings, writable container layers and owned application data. LVM-thin and ZFS data disks use PVE storage snapshots. Rollback leaves the DCT stopped.
 - **Backup and restore:** use native vzdump, scheduled PVE backup jobs and PBS. Backups include deployment files, settings, images, writable layers and owned application data. Restore creates a stopped DCT with a new guest ID and endpoint.
-- **Clones, templates and migration:** create independent full clones and clone stopped templates. Migrate stopped DCTs with static IPv4 endpoints and no snapshot history between nodes using the same runtime mode.
+- **Clones, templates and migration:** create independent full clones and clone stopped templates. Migrate stopped DCTs or shut down and restart active instances between nodes using the same runtime mode. Static and DHCP endpoints and snapshot history are supported; native disk history needs snapshot-capable destination storage.
 - **Replication and HA:** use native PVE replication jobs with managed ZFS data disks and native HA management. Recovery requires quorum and a complete replica on an eligible destination node. HA relocation has downtime.
 - **Startup and hooks:** configure Start at boot, startup/shutdown order and guest hook scripts. Native node and datacenter bulk operations include DCTs. Hooks run for PVE-controlled guest start and stop operations.
 

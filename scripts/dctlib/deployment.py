@@ -16,9 +16,14 @@ import runtime as node_runtime
 def validate(data):
     if not isinstance(data, dict):
         raise ValueError('Deployment must be an object')
-    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid', 'firewall'}
+    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid', 'firewall', 'interfaces'}
     if set(data) - allowed:
         raise ValueError('Unknown deployment setting')
+    if 'interfaces' in data:
+        from .endpoints import validate as validate_interfaces
+        data = dict(data, interfaces=validate_interfaces(data['interfaces']))
+        data.update({key: data['interfaces']['net0'][key] for key in worker.NETWORK_KEYS})
+        data['address'] = data['cidr']
     vmid = data.get('vmid')
     if vmid not in (None, '') and (isinstance(vmid, bool) or not isinstance(vmid, int) or not 100 <= vmid <= 999999999):
         raise ValueError('DCT ID must be an integer between 100 and 999999999')
@@ -96,7 +101,7 @@ def image_compose(data):
     }}})
 
 
-def bind_ports(config, address, identifier):
+def bind_ports(config, address, identifier, endpoints=None):
     """Normalize Compose's actual service ports; internal networks/volumes stay as supplied."""
     services = config.get('services')
     if not isinstance(services, dict) or not services:
@@ -117,7 +122,9 @@ def bind_ports(config, address, identifier):
                 raise ValueError(f'{name}: specify a published port (for example 8080:80)')
             protocol = port.get('protocol', 'tcp')
             # Docker validates individual values and ranges when parsing Compose.
-            binding = (str(port['published']), protocol)
+            selector = name + ':' + str(port['published']) + '/' + protocol
+            network = next((key for key, value in (endpoints or {}).items() if selector in value.get('ports', '').split(',')), 'net0')
+            binding = (network, str(port['published']), protocol)
             if binding in published:
                 raise ValueError('Two services publish the same port on the project IP')
             published.add(binding)
@@ -161,7 +168,10 @@ def prepare(data, identifier, directory, project_directory=None):
         locations = sorted(set(re.findall(r'line [0-9]+', error.stderr or '')))
         location = ' (' + ', '.join(locations) + ')' if locations else ''
         raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
-    config = worker.bind_ports(config, data['address'], identifier)
+    config = worker.bind_ports(config, data['address'], identifier, data['interfaces']) if 'interfaces' in data else worker.bind_ports(config, data['address'], identifier)
+    if 'interfaces' in data and all(endpoint['ipv4mode'] != 'dhcp' for endpoint in data['interfaces'].values()):
+        from .endpoints import bind_runtime
+        config = bind_runtime(config, dict(data, id=identifier))
     worker.apply_log_defaults(config)
     if node_runtime.load().rootless:
         for service in config['services'].values():
@@ -219,12 +229,15 @@ def create(data, node, identifier=None, hookscript=None, start=True):
                 'ipv4mode': data.get('ipv4mode', 'static'), 'cidr': data.get('cidr', ''),
                 'interface': 'bd' + identifier[:12], 'mtu': data.get('mtu', 0), 'firewall': data.get('firewall', 0),
                 'hwaddr': data.get('hwaddr') or '02:' + ':'.join(identifier[i:i+2] for i in range(0, 10, 2))}
+        if 'interfaces' in data:
+            info['interfaces'] = data['interfaces']
         info['runtime_mode'] = node_runtime.load().mode
         if hookscript:
             info['hookscript'] = hookscript
         worker.write_json(worker.METADATA / (identifier + '.json'), info)
         try:
             worker.ensure_address(info)
+            worker.write_json(worker.METADATA / (identifier + '.json'), info)
             worker.rebind_runtime(directory, info['address'])
             worker.write_json(worker.METADATA / (identifier + '.json'), info)
             if start:
@@ -252,6 +265,10 @@ def update(identifier, node, data, digest=None):
         if data.get('vmid') and data['vmid'] != existing.get('vmid'):
             raise ValueError('DCT ID cannot be changed during deployment edits')
         previous = existing['deployment']
+        if 'interfaces' in previous:
+            if 'interfaces' in data and data['interfaces'] != previous['interfaces']:
+                raise ValueError('Use the network editor to change interfaces')
+            data['interfaces'] = previous['interfaces']
         for key in ('bridge', 'name', 'ipv4mode', 'hwaddr', 'mtu', 'firewall'):
             default = 'static' if key == 'ipv4mode' else 0 if key in ('mtu', 'firewall') else ''
             if data.get(key, default) != previous.get(key, default):

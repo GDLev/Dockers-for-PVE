@@ -1124,7 +1124,7 @@ context.Ext.Msg.alert = networkAlert;
 context.Proxmox.Utils.API2Request = networkAPI;
 const networkFields = [...networkEditor.items[0].column1, ...networkEditor.items[0].column2, ...networkEditor.items[0].advancedColumn1];
 for (const name of ['bridge', 'hwaddr', 'cidr', 'mtu']) assert(networkFields.some(field => field.name === name));
-for (const name of ['ip6', 'tag', 'rate', 'gw']) assert(!networkFields.some(field => field.name === name));
+for (const name of ['cidr6', 'tag', 'rate', 'gw', 'gw6', 'link_down']) assert(networkFields.some(field => field.name === name));
 assert.equal(definitions['PVE.betterdocker.NetworkEdit'].showTaskViewer, false);
 assert.equal(networkEditor.items[0].onGetValues({ ipv4mode: 'dhcp', mtu: '' }).cidr, '');
 console.log('Network editor uses native load/digest/task handling and supported fields only');
@@ -1160,7 +1160,8 @@ assert.equal(guestActionWindow.options.projectId, 'c'.repeat(32));
 assert.equal(guestActionWindow.options.digest, 'current-version');
 guestActionWindow = undefined;
 guestActionRequest.success({ result: { data: { status: 'running', capabilities: { configure: 1, migrate: 1 } } } });
-assert.equal(guestActionWindow, undefined, 'a running guest cannot open stopped migration');
+assert.equal(guestActionWindow.name, 'PVE.betterdocker.Migrate');
+assert.equal(guestActionWindow.options.running, true, 'running guests use restart migration');
 console.log('Context guest actions load current capabilities, state and configuration digest');
 
 for (const clone of [false, true]) {
@@ -1236,10 +1237,10 @@ console.log('Shared keyboard editing, duplicate prevention, unchanged forms, con
 const restoredEditor = { restoredNetwork:true, callParent, on() {}, setLoading() {}, down() { return null; } };
 definitions['PVE.betterdocker.NetworkEdit'].initComponent.call(restoredEditor);
 const restoredFields = [...restoredEditor.items[0].column1, ...restoredEditor.items[0].column2, ...restoredEditor.items[0].advancedColumn1];
-assert(restoredFields.filter(item => item.name !== 'firewall').every(item => item.disabled));
+for (const name of ['bridge', 'hwaddr', 'cidr', 'mtu']) { assert(!restoredFields.find(item => item.name === name).disabled); }
 assert(!restoredFields.find(item => item.name === 'firewall').disabled);
-assert.deepEqual(JSON.parse(JSON.stringify(restoredEditor.items[0].onGetValues({ firewall:1, mtu:1400 }))), { firewall:1 });
-console.log('Restored endpoints expose only their supported firewall edit');
+assert.equal(restoredEditor.items[0].onGetValues({ firewall:1, mtu:1400 }).net, 'net0');
+console.log('Restored endpoints support edits while preserving writable layers');
 
 // Stable rows must survive changed values, not merely identical polling responses.
 const stableStore = memoryStore(), stableGrid = tableView(stableStore), table = definitions['PVE.betterdocker.Table'];
@@ -1487,13 +1488,11 @@ const applyActions = changes => {
 };
 applyActions({ status: 'error', active_containers: 1 });
 assert.equal(actionMenu.down('#shutdown').disabled, false, 'failed deployment can still have live instances');
-assert.equal(actionMenu.down('#migrate').disabled, true);
+assert.equal(actionMenu.down('#migrate').disabled, false);
 applyActions({ ipv4mode: 'dhcp' });
-assert.equal(actionMenu.down('#migrate').disabled, true);
-assert(actionMenu.down('#migrate').tooltip.includes('static IPv4'));
+assert.equal(actionMenu.down('#migrate').disabled, false);
 applyActions({ has_snapshots: true });
-assert.equal(actionMenu.down('#migrate').disabled, true);
-assert(actionMenu.down('#migrate').tooltip.includes('snapshot history'));
+assert.equal(actionMenu.down('#migrate').disabled, false);
 applyActions({ protection: 1 });
 assert.equal(actionButtons.removeButton.disabled, true);
 assert.equal(actionMenu.down('#template').disabled, true);

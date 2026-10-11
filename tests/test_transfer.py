@@ -39,7 +39,7 @@ class TransferTests(unittest.TestCase):
                 with patch.object(worker, 'ROOT', root), patch.object(worker, 'METADATA', metadata), \
                         patch.object(transfer, 'GLOBAL_METADATA', metadata), \
                         patch.object(transfer, 'TRANSFERS', folder.parent), \
-                        patch.object(worker, 'current_node', return_value='target'), \
+                        patch.object(worker, 'current_node', return_value='target'), patch.object(worker, 'operation'), \
                         patch.object(state, 'unpack_state'), patch.object(state, 'restore_state', side_effect=restore), \
                         patch.object(transfer, 'clean_local', side_effect=clean) as cleanup, \
                         contextlib.redirect_stdout(io.StringIO()):
@@ -70,3 +70,9 @@ class TransferTests(unittest.TestCase):
                 transfer.migrate(ID, 'source', 'target', '')
             hooks.assert_not_called()
             write.assert_not_called()
+
+    def test_destination_import_has_a_transfer_timeout(self):
+        from unittest.mock import Mock
+        with patch.object(transfer, 'ssh_command', return_value=['ssh', 'target']), patch.object(worker, 'run', return_value=Mock(stdout='{}')) as run:
+            transfer.remote('target', 'prepare', 'token')
+        self.assertEqual(run.call_args.kwargs['timeout'], 86400)

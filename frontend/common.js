@@ -54,6 +54,7 @@ const editKey = (edit, record, event) => {
 const networkValue = (data, key) => ({
     address: data.ipv4mode === 'dhcp' ? data.address || 'DHCP' : data.cidr || data.address || '',
     mode: data.ipv4mode === 'dhcp' ? 'DHCP' : translate('Static'),
+    tag: data.tag || '', rate: data.rate || '', link_down: Proxmox.Utils.format_boolean(data.link_down),
     mtu: data.mtu || translate('Same as bridge'), firewall: Proxmox.Utils.format_boolean(data.firewall),
 })[key] ?? data[key] ?? '';
 const renderNetwork = (value, meta, record) => {
@@ -61,6 +62,7 @@ const renderNetwork = (value, meta, record) => {
     const current = networkValue(record.data, key);
     const pending = record.data.pending;
     const requested = pending && networkValue(Object.assign({}, record.data, pending), key);
+    if (pending?.removed) { return '<span style="color:darkorange;text-decoration:line-through">' + Ext.htmlEncode(current) + '</span>'; }
     return Ext.htmlEncode(current) + (pending && requested !== current ? '<div style="color:darkorange">' + Ext.htmlEncode(requested) + '</div>' : '');
 };
 // Keep records (and selection) alive when one value changes. ExtJS updates
@@ -219,7 +221,6 @@ const guestActions = (info, state, pendingTask) => {
     const ha = Boolean(state ? data.ha?.managed : data.hastate && data.hastate !== 'unmanaged');
     const override = !ha && !data.operation?.service && Boolean(data.capabilities?.overrule_shutdown);
     const pendingNetwork = Boolean(data.pending_network && Object.keys(data.pending_network).length);
-    const fixedAddress = data.ipv4mode !== 'dhcp';
     const pendingSettings = Boolean(data.pending_settings || data.services?.some(item => Object.keys(item.pending || {}).length));
     const restriction = (disabled, tooltip) => ({ disabled, tooltip: disabled ? translate(tooltip) : undefined });
     return {
@@ -230,10 +231,8 @@ const guestActions = (info, state, pendingTask) => {
         console: { hidden: template, disabled: !allowed('console') || template || !running },
         clone: { hidden: !allowed('clone'), disabled: !allowed('clone') || busy },
         migrate: { hidden: PVE.Utils.isStandaloneNode() || !allowed('migrate'),
-            ...restriction(!allowed('migrate') || busy || running && !ha || pendingNetwork || !fixedAddress || Boolean(data.has_snapshots),
-                !fixedAddress ? 'DCT migration requires a static IPv4 address.' : data.has_snapshots ?
-                'DCT migration with snapshot history is not supported.' : pendingNetwork ? 'Apply or revert pending network changes before migrating the DCT.' :
-                running && !ha ? 'Stop the DCT before migration.' : 'Operation in progress') },
+            ...restriction(!allowed('migrate') || busy || pendingNetwork,
+                pendingNetwork ? 'Apply or revert pending network changes before migrating the DCT.' : 'Operation in progress') },
         template: { hidden: !allowed('template'),
             ...restriction(!allowed('template') || busy || template || running || ha || Boolean(data.protection) || pendingSettings || pendingNetwork,
                 ha ? 'Remove the DCT from HA before converting it to a template.' :

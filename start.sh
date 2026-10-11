@@ -130,7 +130,7 @@ if [[ "$ACTION" == install ]]; then
     stage dependencies
     echo 'Updating the package index and installing BetterDocker dependencies.'
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client pve-xtermjs nftables iptables
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client ndisc6 pve-xtermjs nftables iptables
     if [[ "$RUNTIME_MODE" == rootless ]]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y uidmap dbus-user-session
     fi

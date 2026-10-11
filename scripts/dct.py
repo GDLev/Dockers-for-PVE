@@ -78,24 +78,35 @@ def net0(value):
         if not separator or key in values:
             raise ValueError('Use net0 key=value pairs without duplicate keys')
         values[key] = setting
-    unknown = set(values) - {'name', 'bridge', 'ip', 'hwaddr', 'mtu', 'firewall'}
+    unknown = set(values) - {'name', 'bridge', 'ip', 'hwaddr', 'mtu', 'firewall', 'ip6', 'gw', 'gw6', 'tag', 'link_down', 'rate', 'ports'}
     if unknown:
         raise ValueError('Unsupported DCT net0 option: ' + ', '.join(sorted(unknown)))
-    if values.get('name', 'eth0') != 'eth0':
-        raise ValueError('DCT supports only the net0 endpoint')
+    if not re.fullmatch(r'eth(?:[0-9]|1[0-5])', values.get('name', 'eth0')):
+        raise ValueError('Use an interface name eth0 through eth15')
     result = {key: values[key] for key in ('bridge', 'hwaddr') if key in values}
     if 'ip' in values:
-        result.update(ipv4mode='dhcp' if values['ip'] == 'dhcp' else 'static',
-                      cidr='' if values['ip'] == 'dhcp' else values['ip'])
-    for key in ('mtu', 'firewall'):
+        result.update(ipv4mode=values['ip'] if values['ip'] in ('dhcp', 'none') else 'static',
+                      cidr='' if values['ip'] in ('dhcp', 'none') else values['ip'])
+    for key in ('gw', 'gw6', 'ports'):
+        if key in values:
+            result[key] = values[key].replace(';', ',') if key == 'ports' else values[key]
+    if 'ip6' in values:
+        result.update(ipv6mode='none' if values['ip6'] == 'none' else 'static', cidr6='' if values['ip6'] == 'none' else values['ip6'])
+    if 'rate' in values:
+        result['rate'] = float(values['rate'])
+    for key in ('mtu', 'firewall', 'tag', 'link_down'):
         if key in values:
             result[key] = int(values[key])
     return result
 
 
 def format_net0(info):
-    values = {'bridge': info['bridge'], 'ip': 'dhcp' if info.get('ipv4mode') == 'dhcp' else info.get('cidr', info.get('address', ''))}
-    values.update({key: info[key] for key in ('hwaddr', 'mtu', 'firewall') if key in info})
+    values = {'bridge': info['bridge'], 'ip': info['ipv4mode'] if info.get('ipv4mode') in ('dhcp', 'none') else info.get('cidr', info.get('address', ''))}
+    values.update({key: info[key] for key in ('hwaddr', 'mtu', 'firewall', 'tag', 'link_down', 'rate', 'gw', 'gw6') if info.get(key)})
+    if info.get('cidr6'):
+        values['ip6'] = info['cidr6']
+    if info.get('ports'):
+        values['ports'] = info['ports'].replace(',', ';')
     return ','.join(f'{key}={value}' for key, value in values.items())
 
 
@@ -134,7 +145,9 @@ def configuration(base, info, params):
     network = api('get', base + '/network')
     if not params.get('current'):
         network.update(network.get('pending', {}))
-    value['net0'] = format_net0(network)
+    interfaces = network.get('interfaces', {'net0': network})
+    for name, endpoint in interfaces.items():
+        value[name] = format_net0(endpoint)
     services = [service(info, params['service'])] if params.get('service') else info.get('services', [])
     for entry in services:
         settings = dict(entry['settings'])
@@ -168,8 +181,13 @@ def create(params):
             raise ValueError('Deployment file does not exist')
         data = {'mode': 'image', 'image': params['source'], 'ports': params.get('ports', '').replace(',', '\n')}
     data.update(vmid=params['vmid'], name=params.get('hostname') or data.get('name') or f'dct-{params["vmid"]}')
-    if params.get('net0'):
-        data.update(net0(params['net0']))
+    networks = {key: net0(params[key]) for key in params if re.fullmatch(r'net(?:[0-9]|1[0-5])', key)}
+    if networks:
+        from dctlib.endpoints import KEYS
+        primary = networks.get('net0', {})
+        data.update({key: value for key, value in primary.items() if key in ('bridge', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'firewall')})
+        if len(networks) > 1 or set(primary) - {'bridge', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'firewall'}:
+            data['interfaces'] = networks
     if params.get('env-file'):
         data['environment'] = Path(params['env-file']).read_text()
     if not data.get('bridge') or not (data.get('cidr') or data.get('ipv4mode') == 'dhcp'):
@@ -179,9 +197,13 @@ def create(params):
 
 
 def set_options(base, info, params):
-    changes = {key: params[key] for key in CONFIG_KEYS if key in params}
+    changes = {key: params[key] for key in CONFIG_KEYS if key in params and key != 'delete'}
+    deleted = params.get('delete', '').split(',')
+    if any(name and name not in ('startup', 'hookscript') and not re.fullmatch(r'net(?:[0-9]|1[0-5])', name) for name in deleted):
+        raise ValueError('Only startup, hookscript or network interfaces can be deleted')
     limits = {key: params[native] for native, key in RESOURCE_KEYS.items() if native in params}
-    network = net0(params['net0']) if 'net0' in params else {}
+    networks = {key: net0(params[key]) for key in params if re.fullmatch(r'net(?:[0-9]|1[0-5])', key)}
+    network = bool(networks) or any(deleted)
     if not changes and not limits and not network:
         raise ValueError('No configuration options specified')
     chosen = service(info, params.get('service')) if limits else None
@@ -195,9 +217,16 @@ def set_options(base, info, params):
     # Re-read the digest between distinct API updates in a combined set command.
     if changes:
         finish_task(api('set', base + '/config', **changes, digest=info['digest']), params)
-    if network:
+    for name, values in networks.items():
         digest = api('get', base + '/management')['digest']
-        finish_task(api('set', base + '/network', **network, digest=digest), params)
+        finish_task(api('set', base + '/network', net=name, **values, digest=digest), params)
+    for name in deleted:
+        if not name:
+            continue
+        if name in ('startup', 'hookscript'):
+            finish_task(api('set', base + '/config', delete=name, digest=api('get', base + '/management')['digest']), params)
+            continue
+        finish_task(api('set', base + '/network', net=name, delete=1, digest=api('get', base + '/management')['digest']), params)
     if limits:
         digest = api('get', base + '/management')['digest']
         finish_task(api('set', base + '/settings', service=chosen['name'], settings=values, digest=digest), params)
@@ -207,7 +236,7 @@ def dispatch(command, params):
     # PVE validates numeric options, but Perl can encode their scalars as strings.
     params = dict(params)
     for key in ('vmid', 'newid', 'memory', 'swap', 'cpuunits', 'pids', 'timeout',
-                'onboot', 'protection', 'start', 'cluster', 'current', 'verbose', 'full'):
+                'onboot', 'protection', 'restart', 'start', 'cluster', 'current', 'verbose', 'full'):
         if key in params:
             params[key] = int(params[key])
     if 'cpulimit' in params:
@@ -289,8 +318,16 @@ def dispatch(command, params):
         for entry in services:
             rows += [dict(row, service=entry['name']) for row in api('get', base + '/pending', service=entry['name'])]
         network = api('get', base + '/network')
-        if network.get('pending'):
-            rows.append({'key':'net0', 'value':format_net0(network), 'pending':format_net0(dict(network, **network['pending'])), 'service':''})
+        pending = network.get('pending', {})
+        if 'interfaces' in pending:
+            existing = network.get('interfaces', {'net0': network})
+            for name in sorted(set(existing) | set(pending['interfaces'])):
+                before, after = existing.get(name), pending['interfaces'].get(name)
+                if before != after:
+                    rows.append({'key': name, 'value': format_net0(before) if before else '',
+                                 'pending': format_net0(after) if after else 'delete', 'service': ''})
+        elif pending:
+            rows.append({'key':'net0', 'value':format_net0(network), 'pending':format_net0(dict(network, **pending)), 'service':''})
         if params.get('output-format', 'text') == 'text':
             table(rows, [('service', 'Service'), ('key', 'Option'), ('value', 'Current'), ('pending', 'Pending')])
         else:
@@ -298,7 +335,7 @@ def dispatch(command, params):
     elif command == 'set':
         set_options(base, info, params)
     elif command == 'migrate':
-        finish_task(api('create', base + '/migrate', target=params['target'], storage=params.get('target-storage'), digest=info['digest']), params)
+        finish_task(api('create', base + '/migrate', target=params['target'], storage=params.get('target-storage'), restart=params.get('restart'), timeout=params.get('timeout'), digest=info['digest']), params)
     elif command == 'clone':
         destination = net0(params['net0'])
         if 'firewall' in destination:

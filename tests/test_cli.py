@@ -83,8 +83,8 @@ class CLITests(unittest.TestCase):
             api.assert_not_called()
 
     def test_unsupported_network_options_are_rejected(self):
-        with self.assertRaisesRegex(ValueError,'gw'):
-            cli.net0('bridge=vmbr0,ip=dhcp,gw=192.0.2.1')
+        with self.assertRaisesRegex(ValueError,'unknown'):
+            cli.net0('bridge=vmbr0,ip=dhcp,unknown=192.0.2.1')
         with self.assertRaisesRegex(ValueError,'duplicate'):
             cli.net0('bridge=vmbr0,bridge=vmbr1')
 
@@ -117,6 +117,12 @@ class CLITests(unittest.TestCase):
                 cli.dispatch(command,{'vmid':123,'snapname':'baseline'})
                 self.assertEqual(api.call_args.kwargs['action'],action)
                 self.assertEqual(api.call_args.kwargs['snapname'],'baseline')
+
+    def test_additional_ipv6_only_endpoint_and_port_assignments_round_trip(self):
+        value = cli.net0('bridge=vmbr0,ip=none,ip6=2001:db8::2/64,ports=web:8080/tcp;dns:53/udp')
+        self.assertEqual(value['ipv4mode'], 'none')
+        self.assertEqual(value['ports'], 'web:8080/tcp,dns:53/udp')
+        self.assertEqual(cli.net0(cli.format_net0(value)), value)
 
     def test_clone_requires_an_independent_endpoint_before_allocation(self):
         with patch.object(cli,'guest',return_value='/guest'), patch.object(cli,'api',return_value={'digest':'x','name':'web'}) as api:

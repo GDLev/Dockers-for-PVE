@@ -82,9 +82,14 @@ Ext.define('PVE.betterdocker.Config', {
             });
             const summary = me.down('#summary');
             if (visible(summary)) { summary.updateSnapshot(current); }
-            rows('networkGrid', [{ id: 'net0', name: 'net0', bridge: current.bridge, hwaddr: current.hwaddr || '',
-                firewall: current.firewall, mtu: current.mtu, address: current.address, cidr: current.cidr,
-                ipv4mode: current.ipv4mode, pending: current.pending_network }]);
+            const networks = current.interfaces || { net0: { bridge: current.bridge, hwaddr: current.hwaddr || '', firewall: current.firewall,
+                mtu: current.mtu, address: current.address, cidr: current.cidr, ipv4mode: current.ipv4mode } };
+            const pendingNetworks = current.pending_network?.interfaces;
+            rows('networkGrid', [...new Set([...Object.keys(networks), ...Object.keys(pendingNetworks || {})])].sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)))
+                .map(name => Object.assign({ id: name, name }, networks[name] || {}, {
+                    address: networks[name]?.cidr || current.endpoint_addresses?.[name] || (name === 'net0' ? current.address : ''),
+                    pending: pendingNetworks ? pendingNetworks[name] || { removed: true } : name === 'net0' ? current.pending_network : {},
+                })));
             updateNetworkActions();
             rows('portGrid', current.services.flatMap(item => item.ports.map(port => Object.assign({ service: item.name,
                 id: JSON.stringify([item.name, port.host_ip || '', port.published, port.target, port.protocol]) }, port))));
@@ -161,16 +166,18 @@ Ext.define('PVE.betterdocker.Config', {
         const updateNetworkActions = () => {
             const selected = me.down('#networkGrid')?.getSelectionModel().getSelection()[0];
             const edit = me.down('#networkEdit'), revert = me.down('#networkRevert');
+            me.down('#networkAdd')?.setDisabled(!networkEditable());
+            me.down('#networkRemove')?.setDisabled(!networkEditable() || !selected || selected.get('name') === 'net0');
             if (edit) {
                 edit.setDisabled(!selected || !networkEditable());
-                edit.setTooltip(current?.network_restored ? translate('Restored DCTs allow firewall changes only. Redeploy before changing the endpoint.') : undefined);
+                edit.setTooltip(undefined);
             }
             if (revert) { revert.setDisabled(!selected || !networkEditable() || !Object.keys(current?.pending_network || {}).length); }
         };
         const editNetwork = () => {
             if (!networkEditable() || !me.down('#networkGrid')?.getSelectionModel().getSelection()[0]) { return; }
             openEditor(me, 'network', () => {
-                const win = Ext.create('PVE.betterdocker.NetworkEdit', { url: url + '/network', method: 'PUT', nodename: info.node, restoredNetwork: current.network_restored, taskDone: reload,
+                const win = Ext.create('PVE.betterdocker.NetworkEdit', { url: url + '/network', method: 'PUT', nodename: info.node, interfaceName: me.down('#networkGrid').getSelectionModel().getSelection()[0].get('name'), taskDone: reload,
                     apiCallDone: (success, response) => { if (success) { trackTask(response, me); } } });
                 win.on('destroy', reload);
                 return win;
@@ -363,9 +370,9 @@ Ext.define('PVE.betterdocker.Config', {
             { xtype: 'splitbutton', text: translate('Shutdown'), itemId: 'stopButton', iconCls: 'fa fa-power-off', handler: () => act('shutdown'),
                 menu: [{ text: translate('Reboot'), itemId: 'restartButton', iconCls: 'fa fa-refresh', handler: () => act('reboot') },
                     { text: translate('Stop'), itemId: 'forceStopButton', iconCls: 'fa fa-stop', handler: () => act('force-stop') }] },
-            { text: translate('Migrate'), itemId: 'migrateButton', bdScope: 'migrate', hidden: PVE.Utils.isStandaloneNode(), bdWrite: true, bdTemplateAllowed: true, bdNeedsStopped: true, iconCls: 'fa fa-send-o', handler: () => {
+            { text: translate('Migrate'), itemId: 'migrateButton', bdScope: 'migrate', hidden: PVE.Utils.isStandaloneNode(), bdWrite: true, bdTemplateAllowed: true, iconCls: 'fa fa-send-o', handler: () => {
                     if (!guestActions(info, current, me.pendingTask).migrate.disabled) { Ext.create('PVE.betterdocker.Migrate', { autoShow: true, nodename: info.node,
-                    projectId: identifier, vmid: info.vmid, vmname: info.name, haManaged: current?.ha?.managed, digest: current?.digest, listeners: { destroy: reload } }); }
+                    projectId: identifier, vmid: info.vmid, vmname: info.name, running: Boolean(current?.active_containers || ['running', 'partial'].includes(current?.status)), haManaged: current?.ha?.managed, digest: current?.digest, listeners: { destroy: reload } }); }
             } },
             { xtype: 'splitbutton', text: translate('Console'), itemId: 'consoleButton', iconCls: 'fa fa-terminal', handler: () => { if (!guestActions(info, current).console.disabled) { openConsoleWindow(info); } },
                 menu: [{ text: 'xterm.js', iconCls: 'fa fa-terminal', handler: () => { if (!guestActions(info, current).console.disabled) { openConsoleWindow(info); } } }] },
@@ -433,12 +440,27 @@ Ext.define('PVE.betterdocker.Config', {
             card('Network', 'network', 'exchange', [Object.assign(grid('networkGrid', [
                 { text: translate('Name'), dataIndex: 'name', width: 80, flex: 0 }, { text: translate('Bridge'), dataIndex: 'bridge' },
                 { text: translate('MAC address'), dataIndex: 'hwaddr' }, { text: translate('IPv4'), dataIndex: 'address' },
-                { text: translate('IPv4 mode'), dataIndex: 'mode' }, { text: gettext('Firewall'), dataIndex: 'firewall', renderer: renderNetwork }, { text: translate('MTU'), dataIndex: 'mtu' }].map(column => Object.assign(column, { renderer: renderNetwork })),
-                ['name', 'bridge', 'hwaddr', 'address', 'cidr', 'ipv4mode', 'mode', 'mtu', 'firewall', 'pending']), { flex: 1, listeners: { itemdblclick: editNetwork, selectionchange: updateNetworkActions, itemkeydown: (_, record, item, index, event) => editKey(editNetwork, record, event) } }),
+                { text: translate('IPv6'), dataIndex: 'cidr6' }, { text: translate('VLAN Tag'), dataIndex: 'tag' }, { text: translate('Disconnect'), dataIndex: 'link_down' }, { text: translate('Rate limit (MB/s)'), dataIndex: 'rate' }, { text: gettext('Firewall'), dataIndex: 'firewall', renderer: renderNetwork }, { text: translate('MTU'), dataIndex: 'mtu' }].map(column => Object.assign(column, { renderer: renderNetwork })),
+                ['name', 'bridge', 'hwaddr', 'address', 'cidr', 'ipv4mode', 'mode', 'mtu', 'firewall', 'pending', 'cidr6', 'tag', 'link_down', 'rate']), { flex: 1, listeners: { itemdblclick: editNetwork, selectionchange: updateNetworkActions, itemkeydown: (_, record, item, index, event) => editKey(editNetwork, record, event) } }),
                 Object.assign(grid('portGrid', [{ text: translate('Service'), dataIndex: 'service' }, { text: translate('IP address'), dataIndex: 'host_ip' },
                     { text: translate('Published port'), dataIndex: 'published' }, { text: translate('Container port'), dataIndex: 'target' },
                     { text: translate('Protocol'), dataIndex: 'protocol' }], ['service', 'host_ip', 'published', 'target', 'protocol']), { title: translate('Published ports'), flex: 1 })],
-                [{ text: translate('Edit'), itemId: 'networkEdit', disabled: true, handler: editNetwork },
+                [{ text: translate('Add'), itemId: 'networkAdd', disabled: true, handler: () => {
+                    if (!networkEditable()) { return; }
+                    const used = new Set(me.down('#networkGrid').getStore().getRange().map(row => row.get('name')));
+                    const name = Array.from({ length: 16 }, (_, i) => 'net' + i).find(value => !used.has(value));
+                    if (!name) { return; }
+                    Ext.create('PVE.betterdocker.NetworkEdit', { autoShow: true, isCreate: true, interfaceName: name, method: 'PUT', url: url + '/network', nodename: info.node,
+                        apiCallDone: (success, response) => { if (success) { trackTask(response, me); } }, listeners: { destroy: reload } });
+                 } },
+                 { text: translate('Remove'), itemId: 'networkRemove', disabled: true, handler: () => {
+                     const selected = me.down('#networkGrid').getSelectionModel().getSelection()[0];
+                     if (!networkEditable() || !selected || selected.get('name') === 'net0') { return; }
+                     Ext.Msg.confirm(translate('Confirm'), translate('Remove') + ' ' + selected.get('name') + '?', answer => {
+                         if (answer === 'yes') { request({ url: url + '/network', method: 'PUT', params: { net: selected.get('name'), delete: 1, digest: current.digest }, success: response => trackTask(response, me) }); }
+                     });
+                 } },
+                 { text: translate('Edit'), itemId: 'networkEdit', disabled: true, handler: editNetwork },
                  { xtype: 'pvePendingRevertButton', itemId: 'networkRevert', disabled: true, handler: () => {
                      if (!networkEditable() || !me.down('#networkGrid').getSelectionModel().getSelection()[0] || !Object.keys(current.pending_network || {}).length) { return; }
                      request({ url: url + '/network', method: 'PUT', params: { revert: 1, digest: current.digest },

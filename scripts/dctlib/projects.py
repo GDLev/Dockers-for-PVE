@@ -261,7 +261,7 @@ def capture(args):
 
 def write_json(path, value, allow_migration_change=False):
     if path.parent == METADATA and isinstance(value, dict):
-        value = {key: item for key, item in value.items() if key != 'digest'}
+        value = {key: item for key, item in value.items() if key not in ('digest', 'deployment')}
     if path.parent == METADATA and METADATA == Path('/etc/pve/betterdocker') and isinstance(value, dict) and value.get('id') and value.get('vmid'):
         owner = reserved_ids().get(int(value['vmid']))
         if owner and owner.get('node') != value.get('node'):
@@ -764,7 +764,7 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
     project_id(identifier)
     metadata = METADATA / (identifier + '.json')
     info = json.loads(metadata.read_text()) if metadata.exists() else {}
-    if info.get('migration') and name not in ('migrate', 'migration-abort', 'migration-recovery'):
+    if info.get('migration') and name not in ('migrate', 'migration-prepare', 'migration-abort', 'migration-recovery'):
         raise ValueError('DCT migration is in progress; recover it before another operation')
     if info.get('template') and name in ('update', 'settings', 'network', 'snapshot-restore'):
         raise ValueError('A DCT template is immutable; clone it before changing its deployment')
@@ -968,7 +968,7 @@ def restored_start(identifier, service=None):
     restored = json.loads(marker.read_text())
     runtime = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
     addresses = {port.get('host_ip') for service_config in runtime['services'].values() for port in service_config.get('ports', [])}
-    if addresses and addresses != {restored.get('address')}:
+    if addresses and addresses != set(restored.get('addresses', [restored.get('address')])):
         raise ValueError('DCT address changed after rollback; restore a snapshot again to rebind preserved filesystems')
     saved = set(restored['containers'])
     records = container_records(identifier)

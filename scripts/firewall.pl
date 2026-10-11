@@ -21,36 +21,46 @@ for my $value (@{$request->{vmids} // []}) {
         next unless $scope;
         PVE::Firewall::generate_ipset_chains($sets, $cluster, $scope, {}, $scope->{ipset} // {});
     }
-    my %directions;
-    for my $direction (qw(in out)) {
-        my $chain = "d${vmid}$direction";
-        my $ruleset = { $chain => [] };
-        my $expand;
-        $expand = sub {
-            my ($rules, $scope, $seen) = @_;
-            for my $source (@$rules) {
-                next unless $source->{enable};
-                die "Invalid firewall rule for DCT $vmid\n" if $source->{errors};
-                die "DCT firewall supports only net0\n" if $source->{iface} && $source->{iface} ne 'net0';
-                if ($source->{type} eq 'group') {
-                    my $name = $source->{action};
-                    die "Recursive security group '$name'\n" if $seen->{$name};
-                    my $group = $cluster->{groups}->{$name} // die "Missing security group '$name'\n";
-                    $expand->($group, $cluster, { %$seen, $name => 1 });
-                    next;
-                }
-                next unless $source->{type} eq $direction;
-                die "DCT firewall supports IPv4 rules only\n" if $source->{ipversion} && $source->{ipversion} != 4;
-                my $rule = dclone($source);
-                die "Unsupported firewall action\n" unless $rule->{action} =~ /\A(?:ACCEPT|DROP|REJECT)\z/;
-                $rule->{logmsg} = "$rule->{action}: ";
-                PVE::Firewall::ruleset_generate_rule($ruleset, $chain, 4, $rule, $cluster, $scope, $vmid);
+    my %per_interface;
+    my @interfaces = @{$request->{interfaces}->{$vmid} // ['net0']};
+    for my $interface (@interfaces) {
+        die "Invalid interface\n" unless $interface =~ /\Anet(?:[0-9]|1[0-5])\z/;
+        for my $family (4, 6) {
+            my %directions;
+            for my $direction (qw(in out)) {
+                my $chain = "d${vmid}$direction";
+                my $ruleset = { $chain => [] };
+                my $expand;
+                $expand = sub {
+                    my ($rules, $scope, $seen, $group_iface) = @_;
+                    for my $source (@$rules) {
+                        next unless $source->{enable};
+                        die "Invalid firewall rule for DCT $vmid\n" if $source->{errors};
+                        my $iface = $source->{iface} || $group_iface;
+                        next if $iface && $iface ne $interface;
+                        if ($source->{type} eq 'group') {
+                            my $name = $source->{action};
+                            die "Recursive security group '$name'\n" if $seen->{$name};
+                            my $group = $cluster->{groups}->{$name} // die "Missing security group '$name'\n";
+                            $expand->($group, $cluster, { %$seen, $name => 1 }, $iface);
+                            next;
+                        }
+                        next unless $source->{type} eq $direction;
+                        next if $source->{ipversion} && $source->{ipversion} != $family;
+                        my $rule = dclone($source);
+                        die "Unsupported firewall action\n" unless $rule->{action} =~ /\A(?:ACCEPT|DROP|REJECT)\z/;
+                        $rule->{logmsg} = "$rule->{action}: ";
+                        PVE::Firewall::ruleset_generate_rule($ruleset, $chain, $family, $rule, $cluster, $scope, $vmid);
+                    }
+                };
+                $expand->($conf->{rules} // [], $conf, {});
+                $directions{$direction} = $ruleset->{$chain};
             }
-        };
-        $expand->($conf->{rules} // [], $conf, {});
-        $directions{$direction} = $ruleset->{$chain};
+            $per_interface{$interface}->{$family} = \%directions;
+        }
     }
-    push @guests, { vmid => 0 + $vmid, options => $conf->{options} // {}, rules => \%directions, sets => $sets };
+    my $directions = $per_interface{net0}->{4};
+    push @guests, { vmid => 0 + $vmid, options => $conf->{options} // {}, rules => $directions, interfaces => \%per_interface, sets => $sets };
 }
 my $lograte = PVE::JSONSchema::parse_property_string(
     $PVE::Firewall::cluster_option_properties->{log_ratelimit}->{format},

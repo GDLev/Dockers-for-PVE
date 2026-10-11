@@ -11,6 +11,10 @@ Ext.define('PVE.betterdocker.Migrate', {
                 disallowedNodes: [me.nodename], onlineValidator: true },
             { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Target Storage'), storageContent: 'rootdir',
                 allowBlank: true, hidden: Boolean(me.haManaged), disabled: Boolean(me.haManaged), emptyText: translate('Same as source'), storageType: ['dir', 'lvmthin', 'zfspool'] },
+            { xtype: 'proxmoxcheckbox', name: 'restart', fieldLabel: translate('Restart Mode'),
+                checked: Boolean(me.running), hidden: !me.running || Boolean(me.haManaged), disabled: !me.running || Boolean(me.haManaged) },
+            { xtype: 'numberfield', name: 'timeout', fieldLabel: translate('Shutdown timeout'), value: 180, minValue: 1, maxValue: 86400, allowDecimals: false,
+                hidden: !me.running || Boolean(me.haManaged), disabled: !me.running || Boolean(me.haManaged) },
         ], onGetValues: values => {
             if (me.haManaged || !values.storage) { delete values.storage; }
             if (me.digest) { values.digest = me.digest; }

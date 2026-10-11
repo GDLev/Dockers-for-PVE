@@ -20,37 +20,49 @@ Ext.define('PVE.betterdocker.NetworkEdit', {
     extend: 'Proxmox.window.Edit', subject: translate('Network Device'), showTaskViewer: false,
     initComponent: function () {
         const me = this;
+        me.interfaceName = me.interfaceName || 'net0';
+        me.isCreate = Boolean(me.isCreate);
         me.items = [{ xtype: 'inputpanel',
             column1: [
-                { xtype: 'displayfield', fieldLabel: translate('Name'), value: 'net0' },
+                { xtype: 'displayfield', fieldLabel: translate('Name'), value: me.interfaceName },
                 field('hwaddr', 'MAC address', '', { vtype: 'MacAddress', emptyText: 'auto' }),
-                field('bridge', 'Bridge', '', { xtype: 'pveBetterDockerBridgeSelector', nodename: me.nodename,
-                    bridgeType: 'any_bridge', allowBlank: false }),
+                field('bridge', 'Bridge', '', { xtype: 'pveBetterDockerBridgeSelector', nodename: me.nodename, bridgeType: 'any_bridge', allowBlank: false }),
+                field('tag', 'VLAN Tag', '', { xtype: 'numberfield', minValue: 1, maxValue: 4094, allowDecimals: false, emptyText: translate('No VLAN') }),
+                { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'), uncheckedValue: 0 },
+                { xtype: 'proxmoxcheckbox', name: 'link_down', fieldLabel: gettext('Disconnect'), uncheckedValue: 0 },
             ],
             column2: [
-                { xtype: 'radiogroup', fieldLabel: 'IPv4', columns: 2, items: [
+                { xtype: 'radiogroup', fieldLabel: 'IPv4', columns: 3, items: [
                     { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'), checked: true },
                     { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: 'DHCP' },
-                ], listeners: { change: function (group) {
-                    const address = group.up('window').down('[name=cidr]');
-                    if (address) { address.setDisabled(me.restoredNetwork || group.getValue().ipv4mode !== 'static'); }
+                    { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'none', boxLabel: translate('None'), hidden: me.interfaceName === 'net0', disabled: me.interfaceName === 'net0' },
+                ], listeners: { change: group => {
+                    ['cidr', 'gw'].forEach(name => group.up('window').down('[name=' + name + ']')?.setDisabled(group.getValue().ipv4mode !== 'static'));
                 } } },
                 field('cidr', 'IPv4/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false }),
-                { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'), uncheckedValue: 0 },
+                field('gw', 'Gateway (IPv4)', '', { vtype: 'IPAddress' }),
+                { xtype: 'radiogroup', fieldLabel: 'IPv6', columns: 2, items: [
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'static', boxLabel: translate('Static') },
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'none', boxLabel: translate('None'), checked: true },
+                ], listeners: { change: group => {
+                    ['cidr6', 'gw6'].forEach(name => group.up('window').down('[name=' + name + ']')?.setDisabled(group.getValue().ipv6mode !== 'static'));
+                } } },
+                field('cidr6', 'IPv6/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false, disabled: true }),
+                field('gw6', 'Gateway (IPv6)', '', { vtype: 'IPAddress', disabled: true }),
             ],
-            advancedColumn1: [field('mtu', 'MTU', '', { xtype: 'numberfield', minValue: 576, maxValue: 9216,
-                allowDecimals: false, emptyText: translate('Same as bridge') })],
-            onGetValues: function (values) {
-                if (values.ipv4mode === 'dhcp') { values.cidr = ''; }
-                if (me.restoredNetwork) { return { firewall: values.firewall }; }
-                values.mtu = values.mtu || 0;
+            advancedColumn1: [
+                field('mtu', 'MTU', '', { xtype: 'numberfield', minValue: 576, maxValue: 9216, allowDecimals: false, emptyText: translate('Same as bridge') }),
+                field('rate', 'Rate limit (MB/s)', '', { xtype: 'numberfield', minValue: 0, maxValue: 100000, emptyText: translate('Unlimited') }),
+            ],
+            advancedColumn2: [field('ports', 'Published ports', '', { emptyText: 'web:8080/tcp', tooltip: translate('Unassigned ports use net0.') })],
+            onGetValues: values => {
+                values.net = me.interfaceName;
+                if (values.ipv4mode !== 'static') { values.cidr = ''; values.gw = ''; }
+                if (values.ipv6mode !== 'static') { values.cidr6 = ''; values.gw6 = ''; }
+                ['mtu', 'tag', 'rate'].forEach(key => { values[key] = values[key] || 0; });
                 return values;
             },
         }];
-        if (me.restoredNetwork) {
-            const panel = me.items[0];
-            [...panel.column1, ...panel.column2, ...panel.advancedColumn1].filter(item => item.name !== 'firewall').forEach(item => { item.disabled = true; });
-        }
         me.callParent();
         // Native Edit.load touches its form before invoking success. A
         // delayed response must not touch a network editor closed with Escape.
@@ -63,8 +75,10 @@ Ext.define('PVE.betterdocker.NetworkEdit', {
                 me.setLoading(false);
                 me.formPanel.getForm().clearInvalid();
                 const values = response.result.data;
-                const requested = Object.assign({}, values, values.pending);
-                if (!requested.mtu) { requested.mtu = ''; }
+                const requested = Object.assign({ bridge: 'vmbr0', ipv4mode: 'static', ipv6mode: 'none' },
+                    values.interfaces?.[me.interfaceName] || (me.interfaceName === 'net0' ? values : {}), values.pending?.interfaces?.[me.interfaceName] ||
+                    (me.interfaceName === 'net0' ? values.pending : {}));
+                ['mtu', 'tag', 'rate'].forEach(key => { if (!requested[key]) { requested[key] = ''; } });
                 me.setValues(requested);
                 me.digest = values.digest;
                 me.query('radiofield').forEach(item => item.resetOriginalValue());
