@@ -38,21 +38,21 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(history[-1]['netin'], 0)
             self.assertEqual((directory / 'metrics.json').stat().st_mode & 0o777, 0o600)
 
-    def test_native_chart_average_and_max_are_distinct_and_history_is_bounded(self):
+    def test_charts_use_native_rrd_and_counter_resets_publish_unknown(self):
+        import subprocess
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), \
-             patch.object(worker, 'detail'), patch.object(worker.time, 'time', return_value=3000000):
-            directory = Path(folder) / ID
-            directory.mkdir()
-            sample = {'time': 3000000 - 60, 'cpu': 0.1, 'mem': 5, 'maxmem': 10, 'instances': '',
-                      **{key + '_total': 0 for key in ('netin', 'netout', 'diskread', 'diskwrite')}}
-            worker.record_metrics({'id': ID, 'metrics': sample})
-            worker.record_metrics({'id': ID, 'metrics': dict(sample, time=3000000, cpu=0.9)})
-            average = worker.rrddata(ID, 'pve', 'week', 'AVERAGE')
-            maximum = worker.rrddata(ID, 'pve', 'week', 'MAX')
-            self.assertAlmostEqual(average[0]['cpu'], 0.5)
-            self.assertEqual(maximum[0]['cpu'], 0.9)
-            worker.record_metrics({'id': ID, 'metrics': dict(sample, time=3000000 + 8 * 86400)})
+             patch.object(worker, 'detail'), patch.object(worker, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='[{"time":1000,"cpu":0.5}]')) as run:
+            directory = Path(folder) / ID; directory.mkdir()
+            sample = {'time': 1000, 'cpu': 0.1, 'mem': 5, 'maxmem': 10, 'instances': 'a',
+                      **{key + '_total': 100 for key in ('netin', 'netout', 'diskread', 'diskwrite')}}
+            worker.record_metrics({'id': ID, 'vmid': 100, 'metrics': sample})
+            worker.record_metrics({'id': ID, 'vmid': 100, 'metrics': dict(sample, time=1060, instances='b')})
+            payload = json.loads(run.call_args.kwargs['input'])
+            self.assertIsNone(payload['metrics']['netin_total'])
             self.assertEqual(len(json.loads((directory / 'metrics.json').read_text())), 1)
+            for range_ in ('hour', 'day', 'week', 'month', 'year', 'decade'):
+                self.assertEqual(worker.rrddata(ID, 'pve', range_, 'MAX')[0]['cpu'], .5)
+                self.assertEqual(json.loads(run.call_args.kwargs['input'])['timeframe'], range_)
 
     def test_notes_are_saved_privately_without_redeployment(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'detail'):
@@ -65,11 +65,11 @@ class MetricsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 worker.notes(ID, 'pve', 'x' * 8193)
 
-    def test_chart_ranges_cannot_claim_more_than_the_retained_week(self):
+    def test_invalid_chart_ranges_are_rejected(self):
         with patch.object(worker, 'detail'):
-            for timeframe in ('month', 'year'):
+            for timeframe, cf in (('forever', 'AVERAGE'), ('hour', 'TOTAL')):
                 with self.assertRaisesRegex(ValueError, 'Invalid chart range'):
-                    worker.rrddata(ID, 'pve', timeframe, 'AVERAGE')
+                    worker.rrddata(ID, 'pve', timeframe, cf)
 
     def test_swap_is_read_from_owned_cgroup_and_capped_by_host_capacity(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -187,7 +187,7 @@ sub hook_storage_content {
         type => 'boolean', optional => 1,
         description => 'Filter Docker volumes (1) or exclude them (0). Omit for the complete native list.',
     };
-    for my $key (qw(dct_name dct_status)) {
+    for my $key (qw(dct_name dct_status dct_id dct_node)) {
         $index->{returns}->{items}->{properties}->{$key} = {type => 'string', optional => 1};
     }
     $index->{code} = sub {
@@ -228,6 +228,8 @@ sub hook_storage_content {
                 my $audit = $user eq 'root@pam' || $rpc->check($user, '/vms/' . $item->{vmid}, ['VM.Audit'], 1) ||
                     $rpc->check($user, '/nodes/' . $owner->{node}, ['Sys.Console'], 1);
                 $item->{dct_name} = $audit ? ($guest ? $guest->{name} : $owner->{name} // '') : '';
+                $item->{dct_id} = $audit ? $owner->{id} : '';
+                $item->{dct_node} = $audit && $guest ? $guest->{node} : '';
                 $item->{dct_status} = 'retained';
                 if ($guest && $guest->{node} eq $param->{node}) {
                     my $id = $owner->{id};
@@ -268,6 +270,45 @@ sub hook_storage_content {
         return $native_delete->($param);
     };
 }
+
+
+# Retained guests no longer have guest ACLs. Cleaning those disks requires node administration.
+__PACKAGE__->register_method({
+    name => 'delete_storage_volume', path => '{id}/volumes/{vmid}', method => 'DELETE',
+    protected => 1, proxyto => 'node', permissions => {user => 'all'},
+    description => 'Remove one unused or retained DCT-owned PVE disk.',
+    parameters => {additionalProperties => 0, properties => {
+        node => $node, id => $id, vmid => {type => 'integer', minimum => 100, maximum => 999999999},
+        volume => {type => 'string', format => 'pve-volume-id'},
+    }}, returns => {type => 'string'},
+    code => sub {
+        my ($p) = @_;
+        my $owner = storage_guest_owner($p->{vmid}) or die "Not a DCT disk owner\n";
+        die "DCT disk ownership changed\n" unless $owner->{id} eq $p->{id};
+        my $rpc = PVE::RPCEnvironment::get();
+        my $user = $rpc->get_user();
+        my ($guest) = grep { $_->{id} eq $owner->{id} && $_->{node} eq $p->{node} } @{summaries()};
+        my $caps = $guest ? capabilities($owner->{id}, $p->{node}) : {};
+        if ($guest) {
+            raise_perm_exc('DCT disk') unless $caps->{disk};
+            die "Remove DCT from HA before deleting disks\n" if ha_managed($owner->{id}, $p->{node});
+        } else {
+            $rpc->check($user, "/nodes/$p->{node}", ['Sys.Modify']);
+        }
+        my ($sid) = PVE::Storage::parse_volume_id($p->{volume});
+        $rpc->check($user, "/storage/$sid", ['Datastore.AllocateSpace']);
+        local $ENV{BETTERDOCKER_TASK_USER} = $user;
+        local $ENV{BETTERDOCKER_TRUSTED} = $guest ? ($caps->{trusted} ? '1' : '0') : '1';
+        local $ENV{BETTERDOCKER_REQUIRE_SAFE} = $guest && !$caps->{trusted} ? '1' : '0';
+        my $state = decode_json(output(['storage-volume-state', $p->{id}, $p->{node}, $p->{vmid}]));
+        my @allowed = @{$state->{unused} // []};
+        push @allowed, $state->{volid} if !$guest && $state->{volid};
+        die "Cannot delete an attached or unowned DCT disk\n" unless grep { $_ eq $p->{volume} } @allowed;
+        return $rpc->fork_worker('betterdockerdiskdelete', worker_id($p->{vmid}), $user, sub {
+            PVE::Tools::run_command([$helper, 'delete-storage-volume', $p->{vmid}, $p->{node}, $p->{volume}]);
+        });
+    },
+});
 
 hook_storage_content();
 require PVE::BetterDocker::Backup;

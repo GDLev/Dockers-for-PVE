@@ -67,7 +67,7 @@ my %commands = (
     stop => ['Stop the DCT immediately.', ['vmid'], { vmid => $vmid }],
     shutdown => ['Shut down the DCT gracefully.', ['vmid'], { vmid => $vmid, timeout => $timeout }],
     reboot => ['Reboot the DCT.', ['vmid'], { vmid => $vmid, timeout => $timeout }],
-    destroy => ['Remove the DCT. Persistent application data and managed disks are retained.', ['vmid'], { vmid => $vmid }],
+    destroy => ['Remove the DCT, optionally deleting owned data.', ['vmid'], { vmid => $vmid, 'destroy-owned-data' => option('boolean', 'Remove owned disks, volumes and project files.', default => 0) }],
     migrate => ['Migrate a stopped DCT to another node, or request native HA relocation.', ['vmid', 'target'], {
         vmid => $vmid, target => { type => 'string', description => 'Target node.' }, 'target-storage' => $storage }],
     clone => ['Create an independent full clone, initially stopped.', ['vmid', 'newid'], {

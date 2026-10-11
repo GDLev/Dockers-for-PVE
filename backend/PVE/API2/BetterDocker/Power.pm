@@ -71,16 +71,24 @@ sub register_api {
 
     PVE::API2::BetterDocker::register_docker_method({
         name => 'destroy', path => '{id}', method => 'DELETE', protected => 1, proxyto => 'node', permissions => $root,
-        description => 'Remove the project while retaining persistent data and deployment files.',
-        parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+        description => 'Remove the project, optionally deleting its owned data.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id,
+            'destroy-owned-data' => {type => 'boolean', optional => 1, default => 0, description => 'Remove owned disks, local volumes and project files. External mounts are retained.'} } },
         returns => { type => 'string' },
         code => sub {
             my ($param) = @_;
             my $rpcenv = PVE::RPCEnvironment::get();
             die "can't remove DCT - protection mode enabled\n" if decode_json(PVE::API2::BetterDocker::output(['detail', $param->{id}, $param->{node}]))->{protection};
+            if ($param->{'destroy-owned-data'}) {
+                my $cfg = decode_json(PVE::API2::BetterDocker::output(['storage-config', $param->{id}, $param->{node}]));
+                for my $volid (@{$cfg->{unused} // []}, $cfg->{volid} // ()) {
+                    my ($sid) = PVE::Storage::parse_volume_id($volid);
+                    $rpcenv->check($rpcenv->get_user(), "/storage/$sid", ['Datastore.AllocateSpace']);
+                }
+            }
             my $vmid = PVE::API2::BetterDocker::task_id($param->{id}, $param->{node});
             return $rpcenv->fork_worker('betterdockerdelete', $vmid, $rpcenv->get_user(), sub {
-                PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, 'delete']);
+                PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, 'delete', 60, 0, $param->{'destroy-owned-data'} ? 1 : 0]);
                 PVE::AccessControl::remove_vm_access($vmid);
             });
         },

@@ -4,6 +4,9 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Remove owned disks, volumes and project files": "Remove owned disks, volumes and project files",
+            "External mounts are retained.": "External mounts are retained.",
+            "Remove disk": "Remove disk",
             "Runtime mode": "Runtime mode",
             "Runtime service": "Runtime service",
             "Invalid Docker image": "Invalid Docker image",
@@ -30,7 +33,6 @@
             "Start at boot": "Start at boot",
             "Start/Shutdown order": "Start/Shutdown order",
 
-            "Volumes, bind mounts and deployment files are retained.": "Volumes, bind mounts and deployment files are retained.",
             "Could not read file": "Could not read file",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.",
             "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.": "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.",

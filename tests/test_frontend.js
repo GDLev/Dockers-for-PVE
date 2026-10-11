@@ -244,7 +244,7 @@ panelEvents.beforedestroy();
 console.log('Summary values and reload with inactive cards absent passed');
 
 assert.equal(summaryFields['#swapValue'].usage, 0.25);
-assert.equal(summaryFields['#diskValue'].usage, 0.1);
+assert.equal(summaryFields['#diskValue'].text, '100 B');
 console.log('SWAP usage and Bootdisk size status rows passed');
 
 const createdWindows = [];
@@ -708,22 +708,15 @@ console.log('Measured usage without capacities, service-scoped log filters and d
 context.Proxmox.data = { RRDStore: { prototype: { setRRDUrl(timeframe, cf) {
     this.requestRange = timeframe; this.requestCF = cf;
 } } } };
-const chartState = { timeframe: 'year' };
-chartConfigs[0].setRRDUrl.call(chartState, undefined, 'MAX');
-assert.equal(chartState.requestRange, 'hour');
-assert.equal(chartState.requestCF, 'MAX');
-chartConfigs[0].setRRDUrl.call(chartState, 'week', 'AVERAGE');
-assert.equal(chartState.requestRange, 'week');
-let chartSelection = 'year', allowedRanges;
-summaryView.tbar.find(item => item.xtype === 'proxmoxRRDTypeSelector').listeners.afterrender({
-    lookup: () => ({ getValue: () => chartSelection, setValue: value => { chartSelection = value; },
-        getStore: () => ({ filterBy: predicate => {
-            allowedRanges = ['hour', 'day', 'week', 'month', 'year'].filter(id => predicate({ get: () => id }));
-        } }),
-    }),
-});
-assert.deepEqual(allowedRanges, ['hour', 'day', 'week']);
-assert.equal(chartSelection, 'hour');
+assert.equal(chartConfigs[0].setRRDUrl, undefined, 'native RRD ranges are not filtered');
+assert.equal(summaryView.tbar.find(item => item.xtype === 'proxmoxRRDTypeSelector').listeners, undefined);
+const templateSummary = { ...summaryView, on() {}, pveSelNode: { data: { template: 1 } } };
+definitions['PVE.betterdocker.Summary'].initComponent.call(templateSummary);
+assert.equal(chartConfigs.length, 1, 'templates must not create an RRD store');
+assert.equal(templateSummary.items[0].items.length, 2);
+assert.equal(templateSummary.items[0].items[1].xtype, 'pveBetterDockerNotes');
+assert(!templateSummary.items[0].items[0].items.some(item => item.itemId === 'statusValue'));
+assert.equal(templateSummary.tbar.length, 0);
 summaryEvents.deactivate();
 assert.equal(chartCalls.at(-1), 'stop');
 summaryEvents.activate();
@@ -777,8 +770,8 @@ for (const [status, expected] of [['running', 'Running'], ['stopped', 'Stopped']
 definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, {
     ...summaryData, metrics: { ...summaryData.metrics, disk: null, maxdisk: null, swap: null, maxswap: null },
 });
-assert.equal(summaryFields['#diskValue'].text, 'Unavailable');
-assert.equal(summaryFields['#swapValue'].text, 'Unavailable');
+assert.equal(summaryFields['#diskValue'].text, '');
+assert.equal(summaryFields['#swapValue'].text, '');
 assert.equal(summaryBars['#diskValue'], false);
 console.log('Empty initial values, running/stopped/partial status and unavailable storage passed');
 
@@ -1275,8 +1268,8 @@ assert.equal(table.viewConfig.preserveScrollOnRefresh, true);
 
 const missingMetrics = { ...summaryData, metrics: {} };
 definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, missingMetrics);
-assert.equal(summaryFields['#cpuValue'].text, 'Unavailable');
-assert.equal(summaryFields['#memoryValue'].text, 'Unavailable');
+assert.equal(summaryFields['#cpuValue'].text, '');
+assert.equal(summaryFields['#memoryValue'].text, '');
 assert.equal(summaryBars['#cpuValue'], false);
 assert.equal(summaryBars['#memoryValue'], false);
 definitions['PVE.betterdocker.Summary'].updateSnapshot.call(unlimitedSummary, { ...summaryData,

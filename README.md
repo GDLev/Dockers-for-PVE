@@ -14,6 +14,8 @@ Projects appear as **DCT** in the resource tree, with a guest ID and their own I
 
 ![Docker project overview](assets/screenshots/demo.png)
 
+DCT summaries show managed data-disk usage separately from container filesystem sizes. Charts use PVE's native RRD history; templates show configuration and notes without runtime charts. The Docker Volumes storage tab opens the owning guest and removes unused or retained disks. Guest removal can retain data or permanently remove DCT-owned data. External mounts remain.
+
 ## Installation
 
 Run as **root** on a Proxmox VE 9.1 or 9.2 node with internet access. Other versions are not currently supported.

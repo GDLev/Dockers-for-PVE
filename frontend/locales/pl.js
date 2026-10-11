@@ -5,6 +5,9 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "Remove owned disks, volumes and project files": "Usuń dyski, wolumeny i pliki należące do projektu",
+            "External mounts are retained.": "Zewnętrzne punkty montowania są zachowywane.",
+            "Remove disk": "Usuń dysk",
             "Runtime mode": "Tryb uruchomienia",
             "Runtime service": "Usługa runtime",
             "Invalid Docker image": "Nieprawidłowy obraz Dockera",
@@ -32,7 +35,6 @@
             "Start at boot": "Uruchom przy starcie",
             "Start/Shutdown order": "Kolejność uruchamiania/zamykania",
 
-            "Volumes, bind mounts and deployment files are retained.": "Wolumeny, bind mounty i pliki wdrożenia są zachowywane.",
             "Could not read file": "Nie można odczytać pliku",
             "Limits apply per container. Restore Compose removes GUI overrides. Zero CPU, memory or PID limit means unlimited; with a memory limit, swap 0 disables swap and -1 is unlimited.": "Limity dotyczą każdego kontenera. Przywróć Compose usuwa ustawienia GUI. Limit CPU, pamięci lub PID równy 0 oznacza brak limitu; przy limicie pamięci swap 0 wyłącza swap, a -1 oznacza brak limitu.",
             "Network changes made while running take effect at the next full DCT start or reboot. Published ports use this address; routing and outbound traffic use the host network.": "Zmiany sieci zapisane podczas pracy zostaną zastosowane przy następnym pełnym uruchomieniu lub restarcie DCT. Publikowane porty używają tego adresu; routing i ruch wychodzący korzystają z sieci hosta.",

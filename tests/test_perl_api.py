@@ -16,6 +16,43 @@ def route_source(name):
 
 
 class PerlAPITests(unittest.TestCase):
+    def test_disk_cleanup_permissions_are_checked_before_worker_creation(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        start = source.index("name => 'delete_storage_volume'")
+        start = source.index('    code => sub {', start)
+        end = source.index('\n    },\n});', start)
+        body = source[start:end].removeprefix('    code => sub {')
+        code = r'''my $helper='/helper'; our ($live,$disk,$admin,$storage,$forks)=(1,0,0,1,0);
+sub storage_guest_owner { {id=>'a' x 32,node=>'pve'} }
+sub summaries { $live ? [{id=>'a' x 32,node=>'pve'}] : [] }
+sub capabilities { {disk=>$disk,trusted=>0} }
+sub ha_managed { 0 }
+sub worker_id { $_[0] }
+sub output { '{"volid":"local:owned"}' }
+sub decode_json { JSON::PP::decode_json($_[0]) }
+use JSON::PP ();
+sub raise_perm_exc { die 'Guest permission denied' }
+package PVE::RPCEnvironment;
+sub get { bless {}, __PACKAGE__ }
+sub get_user { 'user@pve' }
+sub check { my ($self,$user,$path,$priv)=@_; die 'Admin permission denied' if $priv->[0] eq 'Sys.Modify' && !$main::admin;
+ die 'Storage permission denied' if $priv->[0] eq 'Datastore.AllocateSpace' && !$main::storage; }
+sub fork_worker { $main::forks++; 'UPID:test' }
+package PVE::Storage;
+sub parse_volume_id { ('local','disk') }
+package main;
+my $delete=sub { BODY };
+my $args={id=>'a' x 32,node=>'pve',vmid=>100,volume=>'local:owned'};
+eval {$delete->($args)}; die 'Guest permission bypass' unless $@ =~ /Guest permission/ && !$forks;
+$disk=1;$storage=0; eval {$delete->($args)}; die 'Storage permission bypass' unless $@ =~ /Storage permission/ && !$forks;
+$live=0;$storage=1; eval {$delete->($args)}; die 'Retained permission bypass' unless $@ =~ /Admin permission/ && !$forks;
+$admin=1;$delete->($args); die 'No worker' unless $forks==1;
+$args->{id}='b' x 32; eval {$delete->($args)}; die 'Owner mismatch accepted' unless $@ =~ /ownership changed/ && $forks==1;
+print 'PASS';
+'''.replace('BODY',body)
+        result = subprocess.run(['perl', '-e', code], check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout, 'PASS')
+
     def test_project_limits_require_node_permission_and_preserve_numeric_json(self):
         source = (ROOT / 'backend/PVE/API2/BetterDocker/Settings.pm').read_text()
         start = source.index("name => 'set_project_limits'")
@@ -277,7 +314,7 @@ die 'schema missing Docker' unless grep { $_ eq 'docker' } @{$PVE::API2::Cluster
 $PVE::RPCEnvironment::user = 'audit@pve';
 my %param = (id => 'a' x 32, node => 'pve', action => 'start');
 for my $route (@main::registered) {
-    next if $route->{name} eq 'list';
+    next if $route->{name} eq 'list' || $route->{name} eq 'delete_storage_volume'; # Explicit retained-disk authorization has a separate test.
     eval { $route->{code}->(\%param); };
     die "route lacks authorization: $route->{name}" unless $@ =~ /Permission denied/;
 }

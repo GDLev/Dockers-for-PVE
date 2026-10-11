@@ -46,7 +46,12 @@ const removeProject = (info, target) => Ext.create('Proxmox.window.SafeDestroy',
     autoShow: true, item: { id: info.vmid || info.name,
         formattedIdentifier: PVE.Utils.getFormattedGuestIdentifier(info.vmid, info.name) }, taskName: 'betterdockerdelete',
     url: '/nodes/' + encodeURIComponent(info.node) + '/docker/' + (info.realId || info.id).split('/')[1],
-    note: translate('Volumes, bind mounts and deployment files are retained.'), showProgress: false,
+    params: {},
+    additionalItems: [{ xtype: 'proxmoxcheckbox', boxLabel: translate('Remove owned disks, volumes and project files'),
+        checked: false, listeners: { change: (field, value) => {
+            field.up('proxmoxSafeDestroy').params['destroy-owned-data'] = value ? 1 : 0;
+        } } }],
+    note: translate('External mounts are retained.'), showProgress: false,
     apiCallDone: (success, response) => { if (success) { trackTask(response, target); } },
 });
 const openConsoleWindow = info => Ext.create('Ext.window.Window', {

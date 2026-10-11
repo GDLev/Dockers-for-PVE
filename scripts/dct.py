@@ -259,7 +259,7 @@ def dispatch(command, params):
                         timeout=params.get('timeout', 60) if command in ('shutdown', 'reboot') else None), params)
         return
     if command == 'destroy':
-        finish_task(api('delete', base), params)
+        finish_task(api('delete', base, **{'destroy-owned-data': params.get('destroy-owned-data', 0)}), params)
         return
     if command == 'network':
         output(api('get', base + '/network'), params)

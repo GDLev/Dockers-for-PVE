@@ -33,7 +33,9 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | GET / POST | `G/firewall/rules` | Read or add native PVE firewall rules. |
 | PUT / DELETE | `G/firewall/rules/<position>` | Edit or remove a firewall rule. |
 | GET / PUT | `G/firewall/options` | Read or edit firewall options. |
-| DELETE | `G` | Remove the DCT; persistent data is retained. Protection and HA restrictions apply. |
+| GET | `G/rrddata?timeframe=hour&cf=AVERAGE` | Native PVE RRD history. Ranges: hour, day, week, month, year, decade. |
+| DELETE | `G/volumes/<vmid>?volume=<volid>` | Remove one unused or retained DCT disk. |
+| DELETE | `G` | Remove the DCT. Set `destroy-owned-data=1` to remove its owned data; otherwise retain it. Protection and HA restrictions apply. |
 
 Network changes on a running DCT are queued. GET returns the effective fields and a `pending` object; `/management` includes `pending_network`. A full DCT start, reboot or restart applies them after all containers stop. Restarting one service does not apply them. Failed application keeps the pending changes and restores the previous network. Stopped guests apply edits immediately. Apply or revert pending network changes before migration. Clone/restore use the destination endpoint and discard the source's pending endpoint. Restored DCTs allow firewall changes; endpoint changes require redeployment.
 
@@ -139,3 +141,13 @@ From the node CLI:
 dct limits 100
 dct limits 100 --cpus 2 --memory 1024 --pids 512
 ```
+
+## Removing data
+
+`DELETE G?destroy-owned-data=1` removes project files, managed disks and local Docker volumes owned exclusively by that DCT. External bind mounts and external volumes remain. Shared volumes, protection, snapshots, HA, replication and unfinished transfers prevent removal. Keep the default if you need recovery data.
+
+The Docker Volumes storage tab can remove individual unused or retained PVE disks. Attached disks cannot be deleted there. For an existing DCT, removal requires `VM.Config.Disk` and `Datastore.AllocateSpace`. Retained disks require node `Sys.Modify` and storage `Datastore.AllocateSpace`, because the deleted guest no longer has ACLs.
+
+The CLI accepts `dct destroy 150 --destroy-owned-data 1`. Deletion is permanent; take a backup first.
+
+Charts use PVE's native guest RRD archives and consolidation. Long ranges fill as new measurements arrive; the previous JSON history is not imported.

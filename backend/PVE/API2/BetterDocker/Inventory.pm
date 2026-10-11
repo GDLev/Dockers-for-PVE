@@ -78,9 +78,9 @@ sub register_api {
 
     PVE::API2::BetterDocker::register_docker_method({
         name => 'rrddata', path => '{id}/rrddata', method => 'GET', protected => 1, proxyto => 'node', permissions => $root,
-        description => 'Read recorded Docker metrics in the native chart format (seven-day retention).',
+        description => 'Read Docker metrics from native PVE RRD archives.',
         parameters => { additionalProperties => 0, properties => {
-            node => $node, id => $id, timeframe => { type => 'string', enum => ['hour', 'day', 'week'] },
+            node => $node, id => $id, timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year', 'decade'] },
             cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1, default => 'AVERAGE' },
         } },
         returns => { type => 'array', items => { type => 'object' } },

@@ -167,6 +167,13 @@ def management(identifier, node, shared_stats=None):
                                  'settings': settings.get(name, values), 'replicas': service.get('deploy', {}).get('replicas', 1),
                                  'mounts': service.get('volumes', []), 'ports': service.get('ports', []),
                                  'overridden': name in settings, 'pending': worker.load_pending(directory).get(name, {})})
+    if info.get('template'):
+        info['containers'], info['stats'] = [], []
+        info['metrics'] = worker.metric_snapshot([], [], info['services'])
+        info['metrics'].update(worker.swap_usage([], info['services']))
+        info['storage'] = worker.project_storage_status(identifier)
+        info['operation'] = worker.operation_state(identifier)
+        return info
     info['containers'] = worker.container_records(identifier)
     active = [item['id'] for item in info['containers'] if item['state'] == 'running']
     info['stats'] = []

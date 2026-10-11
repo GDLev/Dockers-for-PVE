@@ -34,7 +34,13 @@ if (defined($p->{metadata})) {
 }
 my $exists = -f "$metadata/$id.json";
 my $info = read_json($exists ? "$metadata/$id.json" : "$base/storage.json");
-die "Deleted guest permits disk cleanup only\n" if !$exists && $p->{action} ne 'free';
+# A migrated guest can leave a local owned disk behind. Only explicit cleanup may use its local state.
+if ($exists && $info->{node} ne PVE::INotify::nodename() && $p->{action} =~ /\Afree(?:-check)?\z/) {
+    my $local = read_json("$base/storage.json");
+    die "Local disk ownership changed\n" unless $local->{vmid} == $info->{vmid};
+    $info = $local;
+}
+die "Deleted guest permits disk cleanup only\n" if !$exists && $p->{action} ne 'free' && $p->{action} ne 'free-check';
 my $vmid = $info->{vmid};
 die "Wrong node\n" unless $info->{node} eq PVE::INotify::nodename();
 my $reservation = read_json("$metadata/ids/$vmid.json");
@@ -105,7 +111,16 @@ if ($action eq 'allocate') {
         PVE::Storage::volume_snapshot_delete($cfg, $volid, $name, 0) if $exists;
     }
     else { PVE::Storage::volume_rollback_is_possible($cfg, $volid, $name); }
-} elsif ($action eq 'free') {
+} elsif ($action eq 'free' || $action eq 'free-check') {
+    if ($scfg->{type} eq 'lvmthin') {
+        my (undef, $volume) = PVE::Storage::parse_volume_id($volid);
+        my $volumes = PVE::Storage::LVMPlugin::lvm_list_volumes($scfg->{vgname});
+        die "Remove storage snapshots before freeing the disk\n" if grep { index($_, "snap_${volume}_") == 0 } keys %{$volumes->{$scfg->{vgname}} // {}};
+    } elsif ($scfg->{type} eq 'zfspool' && -e PVE::Storage::path($cfg, $volid)) {
+        my $snapshots = PVE::Storage::volume_snapshot_info($cfg, $volid);
+        die "Remove storage snapshots before freeing the disk\n" if keys %$snapshots;
+    }
+    if ($action eq 'free-check') { print "{}\n"; exit; }
     my $path = PVE::Storage::path($cfg, $volid);
     my $exists = -e $path;
     if ($scfg->{type} eq 'lvmthin') {

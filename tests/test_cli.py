@@ -35,7 +35,7 @@ class CLITests(unittest.TestCase):
     def test_destroy_uses_positional_id_without_extra_confirmation(self):
         with patch.object(cli,'guest',return_value='/guest'), patch.object(cli,'api',return_value=None) as api:
             cli.dispatch('destroy', {'vmid':123})
-            api.assert_called_once_with('delete','/guest')
+            api.assert_called_once_with('delete','/guest', **{'destroy-owned-data': 0})
 
     def test_api_serializes_parameters_as_separate_arguments(self):
         with patch.object(cli.subprocess,'run') as run:

@@ -114,28 +114,24 @@ def record_metrics(info):
     for key in ('netin', 'netout', 'diskread', 'diskwrite'):
         snapshot[key] = max(0, (snapshot[key + '_total'] - previous[key + '_total']) / elapsed) if (
             previous and elapsed > 0 and snapshot['instances'] == previous['instances']) else 0
-    history = [row for row in history if snapshot['time'] - row['time'] <= 7 * 86400]
-    worker.write_json(path, history + [snapshot])
+    if info.get('vmid') and not info.get('template'):
+        published = dict(snapshot)
+        if previous and snapshot['instances'] != previous['instances']:
+            for key in ('netin', 'netout', 'diskread', 'diskwrite'):
+                published[key + '_total'] = None
+        worker.run(['perl', str(worker.HELPERS / 'rrd.pl')],
+                   input=json.dumps({'id': info['id'], 'action': 'update', 'metrics': published}), capture_output=True)
+    # Only the previous sample is needed to detect counter resets. History lives in PVE RRD.
+    worker.write_json(path, [snapshot])
     os.chmod(path, 0o600)
 
 
 def rrddata(identifier, node, timeframe, cf):
     worker.detail(identifier, node)
-    seconds = {'hour': 3600, 'day': 86400, 'week': 604800}
-    if timeframe not in seconds or cf not in ('AVERAGE', 'MAX'):
+    if timeframe not in ('hour', 'day', 'week', 'month', 'year', 'decade') or cf not in ('AVERAGE', 'MAX'):
         raise ValueError('Invalid chart range or consolidation function')
-    path = worker.ROOT / identifier / 'metrics.json'
-    history = json.loads(path.read_text()) if path.exists() else []
-    cutoff = time.time() - seconds[timeframe]
-    bucket_size = max(60, seconds[timeframe] // 600)
-    buckets = {}
-    for row in history:
-        if row['time'] >= cutoff:
-            buckets.setdefault(row['time'] // bucket_size * bucket_size, []).append(row)
-    fields = ('cpu', 'mem', 'maxmem', 'netin', 'netout', 'diskread', 'diskwrite')
-    return [dict(time=stamp, **{key: (max(row[key] for row in rows) if cf == 'MAX' else
-                                     sum(row[key] for row in rows) / len(rows)) for key in fields})
-            for stamp, rows in sorted(buckets.items())]
+    return json.loads(worker.run(['perl', str(worker.HELPERS / 'rrd.pl')], capture_output=True,
+                      input=json.dumps({'id': identifier, 'action': 'read', 'timeframe': timeframe, 'cf': cf})).stdout)
 
 
 # Projects exports these operations, so bind it after defining them.

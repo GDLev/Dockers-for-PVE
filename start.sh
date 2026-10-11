@@ -204,7 +204,7 @@ done
 for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     TARGETS+=("/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")")
 done
-TARGETS+=(/usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py)
+TARGETS+=(/usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py /usr/local/lib/betterdocker/rrd.pl)
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
         cp -a "${TARGETS[$index]}" "$BACKUP_DIR/addon-$index"
@@ -287,6 +287,7 @@ install -m 0755 "$PROJECT_DIR/scripts/backup.pl" "${TARGETS[22]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/BetterDocker/Backup.pm" "${TARGETS[23]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/VZDump/Docker.pm" "${TARGETS[24]}"
 install -m 0755 "$PROJECT_DIR/scripts/storage.pl" "${TARGETS[20]}"
+install -m 0755 "$PROJECT_DIR/scripts/rrd.pl" /usr/local/lib/betterdocker/rrd.pl
 install -m 0755 "$PROJECT_DIR/scripts/provision.py" "${TARGETS[0]}"
 install -m 0755 "$PROJECT_DIR/scripts/docker-install.sh" "${TARGETS[1]}"
 install -m 0644 "$PROJECT_DIR/backend/PVE/API2/BetterDocker.pm" "${TARGETS[2]}"

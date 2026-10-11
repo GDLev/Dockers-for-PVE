@@ -66,6 +66,8 @@ from .storage import (
     project_storage_limit,
 )
 
+from .data import owned_data_plan, remove_owned_data, delete_storage_volume, storage_volume_state
+
 from .settings import (
     load_settings,
     validate_settings,
@@ -216,7 +218,7 @@ def reserve_id(identifier, node, preferred=None):
 
 
 def release_id(identifier):
-    if storage_config(identifier).get('volid'):
+    if storage_config(identifier).get('volid') or storage_config(identifier).get('unused'):
         return  # Retained PVE disks keep their numeric guest ID reserved.
     for vmid, entry in reserved_ids().items():
         if entry['id'] == identifier:
@@ -560,61 +562,76 @@ def refresh(node):
     # Rebinding may recreate containers, so refresh the state list afterwards.
     projects = [info for info in summaries() if info['node'] == node and not info.get('ha_recovery')]
     for info in projects:
-        # Portable state transactions use the same per-project operation lock.
-        if (ROOT / info['id'] / 'export-transaction.json').exists() or (ROOT.parent / 'imports' / (info['id'] + '.json')).exists():
-            from guest_state import recover
-            recover(info['id'])
-        if not (METADATA / (info['id'] + '.json')).exists():
+        if operation_state(info['id']).get('active'):
             continue
-        recover_network_transaction(info['id'], node)
-        info.update(json.loads((METADATA / (info['id'] + '.json')).read_text()))
-        if info['node'] != node or info.get('ha_recovery'):
-            continue
-        try:
-            journal = ROOT / info['id'] / 'snapshot-transaction.json'
-            if journal.exists() and json.loads(journal.read_text()).get('action') == 'create':
-                recover_snapshot_transaction(info['id'])
-            sync_dhcp(info)
-        except (ValueError, OSError, subprocess.SubprocessError) as error:
-            # One broken lease must not freeze status refresh for every guest on the node.
-            info['status'] = 'network-error'
-            update_status(info)
-            print(f"Network unavailable for DCT {info.get('vmid', info['id'])}: {error}", file=sys.stderr)
+        with locked(info['id']):
+            if not (METADATA / (info['id'] + '.json')).exists():
+                continue
+            # Portable state transactions use the same per-project operation lock.
+            if (ROOT / info['id'] / 'export-transaction.json').exists() or (ROOT.parent / 'imports' / (info['id'] + '.json')).exists():
+                from guest_state import recover
+                recover(info['id'])
+            if not (METADATA / (info['id'] + '.json')).exists():
+                continue
+            recover_network_transaction(info['id'], node)
+            info.update(json.loads((METADATA / (info['id'] + '.json')).read_text()))
+            if info['node'] != node or info.get('ha_recovery'):
+                continue
+            try:
+                journal = ROOT / info['id'] / 'snapshot-transaction.json'
+                if journal.exists() and json.loads(journal.read_text()).get('action') == 'create':
+                    recover_snapshot_transaction(info['id'])
+                sync_dhcp(info)
+            except (ValueError, OSError, subprocess.SubprocessError) as error:
+                # One broken lease must not freeze status refresh for every guest on the node.
+                info['status'] = 'network-error'
+                update_status(info)
+                print(f"Network unavailable for DCT {info.get('vmid', info['id'])}: {error}", file=sys.stderr)
     projects = [info for info in projects if info['node'] == node and not info.get('ha_recovery') and (METADATA / (info['id'] + '.json')).exists() and
                 not (ROOT.parent / 'imports' / (info['id'] + '.json')).exists()]
     entries = json.loads('[' + ','.join(capture(['docker', 'ps', '-a', '--filter', 'label=betterdocker.id',
                                               '--format', '{{json .}}']).splitlines()) + ']')
     for info in projects:
-        if info['status'] == 'network-error':
+        if operation_state(info['id']).get('active'):
             continue
-        states = [entry['State'] for entry in entries
-                  if ('betterdocker.id=' + info['id']) in entry.get('Labels', '').split(',')]
-        status = 'running' if states and len(states) >= info.get('expected', 1) and all(state == 'running' for state in states) else (
-            'partial' if 'running' in states else 'stopped')
-        # Preserve a failed deployment until it is started successfully or stopped explicitly.
-        if info['status'] == 'error' and status != 'running':
-            continue
-        info['status'] = status
-        update_status(info)
-    due = [info for info in projects if not (ROOT / info['id'] / 'metrics.json').exists() or
-           time.time() - (ROOT / info['id'] / 'metrics.json').stat().st_mtime >= 60]
+        with locked(info['id']):
+            if not (METADATA / (info['id'] + '.json')).exists():
+                continue
+            if info['status'] == 'network-error':
+                continue
+            states = [entry['State'] for entry in entries
+                      if ('betterdocker.id=' + info['id']) in entry.get('Labels', '').split(',')]
+            status = 'running' if states and len(states) >= info.get('expected', 1) and all(state == 'running' for state in states) else (
+                'partial' if 'running' in states else 'stopped')
+            # Preserve a failed deployment until it is started successfully or stopped explicitly.
+            if info['status'] == 'error' and status != 'running':
+                continue
+            info['status'] = status
+            update_status(info)
+    due = [info for info in projects if not info.get('template') and (not (ROOT / info['id'] / 'metrics.json').exists() or
+           time.time() - (ROOT / info['id'] / 'metrics.json').stat().st_mtime >= 60)]
     if due:
         active = [entry['ID'] for entry in entries if entry['State'] == 'running']
         try:
             shared_stats = [json.loads(line) for line in capture(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *active]).splitlines()] if active else []
             for info in due:
-                snapshot = management(info['id'], node, shared_stats=shared_stats)
-                if snapshot.get('ha_recovery'):
+                if operation_state(info['id']).get('active'):
                     continue
-                record_metrics(snapshot)
-                public = json.loads((METADATA / (info['id'] + '.json')).read_text())
-                public['metrics'] = {key: snapshot['metrics'][key] for key in ('cpu', 'cpus', 'mem', 'maxmem', 'uptime', 'time')}
-                write_json(METADATA / (info['id'] + '.json'), public)
+                with locked(info['id']):
+                    if not (METADATA / (info['id'] + '.json')).exists():
+                        continue
+                    snapshot = management(info['id'], node, shared_stats=shared_stats)
+                    if snapshot.get('ha_recovery'):
+                        continue
+                    record_metrics(snapshot)
+                    public = json.loads((METADATA / (info['id'] + '.json')).read_text())
+                    public['metrics'] = {key: snapshot['metrics'][key] for key in ('cpu', 'cpus', 'mem', 'maxmem', 'uptime', 'time')}
+                    write_json(METADATA / (info['id'] + '.json'), public)
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             print(f'Metrics unavailable: {error}', file=sys.stderr)
 
 
-def action(identifier, node, operation, timeout=60):
+def action(identifier, node, operation, timeout=60, destroy_data=False):
     with locked(identifier):
         recover_network_transaction(identifier, node)
         info = detail(identifier, node)
@@ -636,6 +653,7 @@ def action(identifier, node, operation, timeout=60):
             raise ValueError('DCT is running. Stop it before removal.')
         if operation == 'reboot' and not was_running:
             raise ValueError('DCT is not running')
+        owned_volumes = owned_data_plan(identifier, info) if operation == 'delete' and destroy_data else []
         recover_guest_hook(info)
         if operation == 'start' and records and len(records) == info.get('expected') and all(item['state'] == 'running' for item in records):
             return
@@ -687,6 +705,8 @@ def action(identifier, node, operation, timeout=60):
                 storage_unmount(identifier)
                 unit = capture(['systemd-escape', '--path', '--suffix=mount', str(directory / 'storage-data')]).strip()
                 run(['systemctl', 'disable', unit], check=False, capture_output=True)
+            if destroy_data:
+                remove_owned_data(identifier, owned_volumes)
             if storage_config(identifier).get('volid'):
                 reservation = METADATA / 'ids' / (str(info['vmid']) + '.json')
                 owner = json.loads(reservation.read_text())
@@ -700,7 +720,7 @@ def action(identifier, node, operation, timeout=60):
             release_id(identifier)
             if info.get('firewall'):
                 run([str(HELPERS / 'firewall.py'), 'apply'])
-            print(f'Project removed. Volumes and bind-mount data are retained at {directory}.')
+            print('Project and owned data removed.' if destroy_data else f'Project removed. Volumes and bind-mount data are retained at {directory}.')
         else:
             info.pop('deployment', None)
             if operation in ('stop', 'shutdown', 'force-stop'):
@@ -962,7 +982,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['storage-volume-state', 'delete-storage-volume', 'project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -1043,7 +1063,7 @@ def main():
         if overrule and values[2] != 'force-stop':
             raise ValueError('Overrule is only available for Stop')
         with operation(values[0], values[2], overrule=overrule):
-            action(*values[:4])
+            action(*values[:4], destroy_data=len(values) > 5 and values[5] == '1')
     elif args.operation == 'logs':
         print(project_logs(*values), end='')
     elif args.operation == 'preview':
@@ -1072,6 +1092,10 @@ def main():
     elif args.operation == 'storage-config':
         detail(*values)
         print(json.dumps(storage_config(values[0])))
+    elif args.operation == 'storage-volume-state':
+        print(json.dumps(storage_volume_state(*values)))
+    elif args.operation == 'delete-storage-volume':
+        delete_storage_volume(*values)
     elif args.operation == 'purge-retained-storage':
         purge_retained_storage(*values)
     elif args.operation == 'storage-limit':
@@ -1082,8 +1106,7 @@ def main():
     elif args.operation == 'restore':
         restore(current_node())
     elif args.operation == 'refresh':
-        with locked():
-            refresh(current_node())
+        refresh(current_node())
 
 # Network allocation touches shared node addresses; guest work remains independent.
 network_preflight = node_locked(network_preflight)

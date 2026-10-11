@@ -195,7 +195,7 @@ const task = response => {
     return Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
 };
 const dockerTaskLabels = { create: 'Create', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
-    restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Destroy', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Delete Snapshot', restore: 'Restore', clone: 'Clone', template: 'Convert to template', migrate: 'Migrate' };
+    diskdelete: 'Remove disk', restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Destroy', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Delete Snapshot', restore: 'Restore', clone: 'Clone', template: 'Convert to template', migrate: 'Migrate' };
 const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
 Object.entries(dockerTaskLabels).forEach(([action, label]) => {
     dockerTaskDescriptions['betterdocker' + action] = (type, id) =>
