@@ -27,7 +27,7 @@ Run the same command to update or repair. Existing nodes keep their saved runtim
 curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash -s -- install --runtime=rootless --yes
 ```
 
-Add `--nodes=pve1,pve2` to target specific cluster nodes, `--no-restart` to defer service reload, or `--lang=pl` for Polish. Without a terminal, specify an operation; no menu is opened. Running `bash start.sh` from a downloaded checkout opens the same installer. DEB configuration and PVE update triggers keep their package workflow and reload services automatically.
+Add `--nodes=pve1,pve2` to target specific cluster nodes or `--no-restart` to defer service reload. Without a terminal, specify an operation; no menu is opened. Running `bash start.sh` from a downloaded checkout opens the same installer. DEB configuration and PVE update triggers keep their package workflow and reload services automatically.
 
 Rootless runs Docker under the dedicated `betterdocker` account. PVE still manages host networking, storage and guest permissions as root. Both modes use the same web interface. Updates and repair preserve the saved choice; existing installations stay rootful. A DEB installation uses the package configuration choice.
 

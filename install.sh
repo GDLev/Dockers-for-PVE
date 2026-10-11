@@ -6,7 +6,7 @@ set -Eeuo pipefail
 main() {
     local project_dir
     if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-        echo 'Usage: bash install.sh [install|repair|uninstall|finish|check] [--nodes=node1,node2] [--runtime=rootful|rootless] [--yes] [--no-restart] [--lang=en|pl] [--interactive]'
+        echo 'Usage: bash install.sh [install|repair|uninstall|finish|check] [--nodes=node1,node2] [--runtime=rootful|rootless] [--yes] [--no-restart] [--interactive]'
         return 0
     fi
     [[ $EUID -eq 0 ]] || { echo 'Run as root on a Proxmox VE host.' >&2; return 1; }

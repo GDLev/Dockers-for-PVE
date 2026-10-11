@@ -7,7 +7,7 @@ if [[ $# -eq 0 ]]; then
 fi
 for option in "$@"; do
     case "$option" in
-        finish|--nodes|--nodes=*|--lang|--lang=*|--runtime|--yes|--no-restart|--interactive|--help|-h)
+        finish|--nodes|--nodes=*|--runtime|--yes|--no-restart|--interactive|--help|-h)
             exec python3 "$PROJECT_DIR/scripts/installer.py" "$@" ;;
     esac
 done

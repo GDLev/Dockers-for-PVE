@@ -202,12 +202,12 @@ def main():
         assert remote(node, ['test', '-f', PENDING]).returncode == 1
     print('PASS native cluster selection, mixed fixed modes, unchanged workloads and reload only after final Enter', flush=True)
 
-    # TERM=dumb and Polish, then cancel final reload and recover from cached source.
+    # TERM=dumb, then cancel final reload and recover from cached source.
     baseline = panels()
-    ui = Session(['bash', str(source / 'start.sh'), 'repair', '--interactive', '--nodes=pve3', '--lang=pl'], logs / 'plain-polish.tty', term='dumb')
-    ui.wait('Naciśnij Enter, aby rozpocząć')
+    ui = Session(['bash', str(source / 'start.sh'), 'repair', '--interactive', '--nodes=pve3'], logs / 'plain-terminal.tty', term='dumb')
+    ui.wait('Press Enter to start')
     ui.send(b'\n')
-    ui.wait('Naciśnij Enter, aby teraz przeładować')
+    ui.wait('Press Enter to reload the PVE panel')
     assert panels() == baseline
     ui.send(b'q\n')
     ui.finish(130)
@@ -217,7 +217,7 @@ def main():
     assert result.returncode == 0, result.stderr + result.stdout
     assert panels()['pve3'] != baseline['pve3']
     assert workloads() == before
-    print('PASS plain Polish terminal, deferred cancellation and cached finish recovery', flush=True)
+    print('PASS plain terminal, deferred cancellation and cached finish recovery', flush=True)
 
     # Cluster-wide uninstall blockers must prevent changes on every node.
     baseline = panels()

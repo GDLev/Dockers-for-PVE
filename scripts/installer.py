@@ -322,7 +322,6 @@ def parser():
     result.add_argument('action', nargs='?', choices=('install', 'repair', 'uninstall', 'finish', 'check'))
     result.add_argument('--nodes', help='Comma-separated cluster node names. Default: local node.')
     result.add_argument('--runtime', choices=('rootful', 'rootless'))
-    result.add_argument('--lang', choices=('en', 'pl'))
     result.add_argument('--interactive', action='store_true', help='Open terminal forms even with an explicit action.')
     result.add_argument('--yes', action='store_true', help='Run without terminal forms or confirmation prompts.')
     result.add_argument('--no-restart', action='store_true', help='Leave panel/API restart pending for a later finish command.')
@@ -350,7 +349,7 @@ def main():
     if os.geteuid() != 0:
         raise ValueError('Run as root on a Proxmox VE node')
     interactive = not args.yes and (args.action is None or args.interactive)
-    ui = Terminal(args.lang)
+    ui = Terminal()
     runner = None
     handlers = {}
     try:

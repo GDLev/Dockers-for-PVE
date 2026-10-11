@@ -14,7 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import installer
-from installer_ui import Terminal
+from installer_ui import MESSAGES, Terminal
 
 
 class TerminalInstallerTests(unittest.TestCase):
@@ -23,12 +23,12 @@ class TerminalInstallerTests(unittest.TestCase):
             python = Path(directory) / 'python3'
             python.write_text('#!' + sys.executable + '\nimport sys,json\nsys.path.insert(0,' + repr(str(ROOT / 'scripts')) + ')\nfrom installer import parser\nsys.argv=sys.argv[1:]\nprint(json.dumps(vars(parser().parse_args())))\n')
             python.chmod(0o755)
-            for flags in (['--nodes', 'one,two', '--lang', 'pl'], ['--nodes=one,two', '--lang=pl'], ['--runtime', 'rootless', '--nodes', 'one,two', '--lang', 'pl']):
+            for flags in (['--nodes', 'one,two'], ['--nodes=one,two'], ['--runtime', 'rootless', '--nodes', 'one,two']):
                 result = subprocess.run(['bash', str(ROOT / 'start.sh'), 'repair', *flags],
                                         env=dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH']),
                                         capture_output=True, text=True, check=True)
                 values = json.loads(result.stdout)
-                self.assertEqual((values['action'], values['nodes'], values['lang']), ('repair', 'one,two', 'pl'))
+                self.assertEqual((values['action'], values['nodes']), ('repair', 'one,two'))
 
     def test_fixed_modes_and_fresh_selection_in_mixed_cluster(self):
         nodes = [dict(node='one', mode='rootful'), dict(node='two', mode='rootless'), dict(node='three', mode=None)]
@@ -66,12 +66,11 @@ class TerminalInstallerTests(unittest.TestCase):
                 self.assertEqual((installer.CACHE / 'source/start.sh').read_text(), 'second')
                 self.assertFalse((installer.CACHE / 'previous').exists())
 
-    def test_locales_have_identical_keys_and_safe_format_fields(self):
-        languages = [Terminal(lang).words for lang in ('en', 'pl')]
-        self.assertEqual(set(languages[0]), set(languages[1]))
-        for lang in ('en', 'pl'):
-            ui = Terminal(lang)
-            for key in ui.words:
+    def test_messages_are_english_regardless_of_system_locale(self):
+        with patch.dict(os.environ, LC_ALL='pl_PL.UTF-8', LANG='pl_PL.UTF-8'):
+            ui = Terminal()
+            self.assertEqual(ui.t('operation'), 'Choose an operation')
+            for key in MESSAGES:
                 self.assertTrue(ui.t(key, path='/log', node='one', nodes='one,two', command='finish'))
 
     def test_unreachable_node_is_not_silently_treated_as_reloaded(self):
@@ -84,7 +83,7 @@ class TerminalInstallerTests(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, 'fork'), 'requires POSIX terminal')
     def test_arrow_keys_space_and_enter_with_real_controlling_terminal(self):
         code = '''import sys;sys.path.insert(0,sys.argv[1]);from installer_ui import *
-t=Terminal('en');assert t.open()
+t=Terminal();assert t.open()
 try:
  r=t.choose('Nodes',[Choice('one','One'),Choice('two','Two'),Choice('bad','Offline',enabled=False)],['one'],True)
  t.output('RESULT='+','.join(r))
