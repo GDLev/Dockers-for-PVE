@@ -27,6 +27,9 @@ The panel uses PVE's ExtJS environment. `frontend/sources.json` sets the source 
 From the repository root, with Python 3.12 or newer and Node.js installed:
 
 ```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r requirements-test.txt
 python3 -m unittest discover -s tests
 python3 scripts/build_frontend.py | node --check
 node tests/test_frontend.js
@@ -34,3 +37,11 @@ bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
 ```
 
 Tests named `live_*.py` use a real PVE cluster and can change guests or host configuration. Read the test before running it and use a disposable installation. Ordinary unit tests do not connect to a cluster.
+
+Check install, repair and removal patch compatibility against a supported PVE node or a saved filesystem:
+
+```sh
+python3 tests/check_native.py /
+```
+
+This check reads native files, applies integration patches in memory twice to exercise repair, and removes them in memory. It does not install packages or restart services. Run it on both PVE 9.1 and 9.2 after package updates. Full installer lifecycle tests remain in `tests/live_installation.py` and `tests/live_terminal_installer.py`; these change the host and require a disposable node.

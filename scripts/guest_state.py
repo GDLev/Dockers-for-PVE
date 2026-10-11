@@ -20,7 +20,7 @@ from urllib.parse import quote
 from dctlib import projects as worker
 
 CONFIG_FILES = ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json',
-                'settings.json', 'pending.json', 'pending-network.json', 'notes.txt')
+                'settings.json', 'pending.json', 'pending-network.json', 'notes.txt', 'limits.json')
 
 
 def read(path):
@@ -118,7 +118,7 @@ def cleanup_capture(identifier, resume=True):
 def quiesce(identifier, node, mode, lock_fd=None):
     if mode not in ('stop', 'suspend'):
         raise ValueError('Invalid backup quiescence mode')
-    with operation(identifier, 'backup', lock_fd), worker.locked():
+    with operation(identifier, 'backup', lock_fd), worker.locked(identifier):
         worker.detail(identifier, node)
         containers = worker.snapshot_containers(identifier, allow_running=True)
         path = journal_path(identifier)
@@ -165,7 +165,7 @@ def check_portable_networks(runtime):
 
 def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_journal=False, digest=None):
     folder = Path(folder)
-    with operation(identifier, 'backup', lock_fd), worker.locked():
+    with operation(identifier, 'backup', lock_fd), worker.locked(identifier):
         info = worker.detail(identifier, node)
         if digest:
             worker.assert_configuration_digest(identifier, node, digest)
@@ -417,7 +417,7 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                 worker.safe_bind(mount['source'], manifest['id'])
     if node != worker.current_node():
         raise ValueError('Restore was sent to the wrong node')
-    with operation(identifier, 'restore', lock_fd), worker.locked():
+    with operation(identifier, 'restore', lock_fd), worker.locked(identifier):
         project = worker.ROOT / identifier
         metadata_path = worker.METADATA / (identifier + '.json')
         if project.exists() or metadata_path.exists():
@@ -470,6 +470,8 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
             worker.ensure_address(info)
             manifest, runtime, volume_names, network_names, remap_source = adapted_state(folder, identifier, info['address'])
             containers = read(folder / 'containers.json')
+            worker.project_limits.check_directory(project, runtime)
+            worker.project_limits.check_containers(containers, worker.project_limits.load(project))
             info['expected'] = len(containers)
             worker.write_json(metadata_path, info)
             (project / 'pending-network.json').unlink(missing_ok=True)
@@ -653,7 +655,7 @@ def clone(identifier, node, destination, options):
 
 
 def make_template(identifier, node, digest=None):
-    with operation(identifier, 'template'), worker.locked():
+    with operation(identifier, 'template'), worker.locked(identifier):
         info = worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         worker.check_protection(info, "can't convert protected DCT to a template")

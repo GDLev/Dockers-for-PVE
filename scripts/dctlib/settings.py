@@ -126,7 +126,7 @@ def pending_settings(identifier, node, service):
 
 
 def revert_settings(identifier, node, service, keys, digest=None):
-    with worker.locked():
+    with worker.locked(identifier):
         worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         directory = worker.ROOT / identifier
@@ -267,7 +267,7 @@ def service_settings(identifier, node, service, values, digest=None):
     worker.validate_settings(values)
     if values.get('disk') and not worker.rootfs_quota_support()['supported']:
         raise ValueError('Container disk limit requires overlay2 on XFS with project quotas; volumes use a separate data disk')
-    with worker.locked():
+    with worker.locked(identifier):
         worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         rows = worker.pending_settings(identifier, node, service)
@@ -275,6 +275,11 @@ def service_settings(identifier, node, service, values, digest=None):
         proposed = worker.validate_settings(dict(effective, **values))
         candidate = json.loads((worker.ROOT / identifier / 'compose.runtime.json').read_text())
         worker.apply_settings(candidate, {service: proposed})
+        worker.project_limits.check_directory(worker.ROOT / identifier, candidate)
+        # Include every queued service change when reserving the project budget.
+        worker.apply_settings(candidate, worker.load_pending(worker.ROOT / identifier))
+        worker.apply_settings(candidate, {service: proposed})
+        worker.project_limits.check_directory(worker.ROOT / identifier, candidate)
         node_runtime.check_resources(candidate)
         if 'disk' not in values and not proposed.get('disk'):
             proposed.pop('disk', None)
@@ -290,6 +295,9 @@ def _service_settings(identifier, node, service, values):
     config = json.loads(original)
     if service not in config['services']:
         raise ValueError('Unknown Compose service')
+    candidate = json.loads(original)
+    worker.apply_settings(candidate, {service: values})
+    worker.project_limits.check_directory(directory, candidate)
     settings = worker.load_settings(directory)
     current = settings.get(service, worker.service_values(config['services'][service]))
     pending = worker.load_pending(directory)

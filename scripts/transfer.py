@@ -274,7 +274,7 @@ def migrate(identifier, node, target, storage, digest=None):
     if target == node:
         raise ValueError('Choose another cluster node')
     with worker.operation(identifier, 'migrate') as lock:
-        with worker.locked():
+        with worker.locked(identifier):
             info = worker.detail(identifier, node)
             worker.assert_configuration_digest(identifier, node, digest)
             if worker.load_pending_network(worker.ROOT / identifier):
@@ -305,7 +305,7 @@ def migrate(identifier, node, target, storage, digest=None):
         try:
             state.capture_state(identifier, node, folder / 'state', lock_fd=lock.fileno())
             state.pack_state(folder / 'state', folder / 'state.tar')
-            with worker.locked():
+            with worker.locked(identifier):
                 worker.remove_network(info)
             with (folder / 'state.tar').open('rb') as archive:
                 subprocess.run(ssh_command(target) + [shlex.join([HELPER, 'receive', token])],stdin=archive,check=True,timeout=86400)
@@ -317,7 +317,7 @@ def migrate(identifier, node, target, storage, digest=None):
                 ha.switch_jobs(info['vmid'], target, node)
             with private_metadata(folder, info):
                 worker.write_json(worker.METADATA / (identifier+'.json'), info)
-                with worker.locked():
+                with worker.locked(identifier):
                     clean_local(identifier, info)
             remote(target, 'finish', token)
             shutil.rmtree(folder)
@@ -326,7 +326,7 @@ def migrate(identifier, node, target, storage, digest=None):
             committed = committed or published['node'] == target
             if not committed:
                 remote(target, 'abort', token)
-                with worker.locked():
+                with worker.locked(identifier):
                     worker.ensure_address(info)
                     info.pop('migration', None)
                     worker.write_json(GLOBAL_METADATA / (identifier+'.json'), info, allow_migration_change=True)

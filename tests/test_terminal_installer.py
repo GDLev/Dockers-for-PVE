@@ -30,6 +30,18 @@ class TerminalInstallerTests(unittest.TestCase):
                 values = json.loads(result.stdout)
                 self.assertEqual((values['action'], values['nodes']), ('repair', 'one,two'))
 
+    def test_worker_progress_markers_use_english_messages(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cluster = unittest.mock.Mock(local='one')
+            cluster.command.side_effect = lambda node, args: args
+            ui = Terminal()
+            runner = installer.Runner(cluster, ui)
+            runner.directory = Path(folder)
+            with patch.object(ui, 'output') as output:
+                result = runner.process('one', [sys.executable, '-c', "print('[betterdocker-stage] integration')"], 'apply')
+            self.assertEqual(result['code'], 0)
+            output.assert_any_call('  one  Registering the PVE extension')
+
     def test_fixed_modes_and_fresh_selection_in_mixed_cluster(self):
         nodes = [dict(node='one', mode='rootful'), dict(node='two', mode='rootless'), dict(node='three', mode=None)]
         self.assertEqual(installer.modes_for(nodes, 'rootless', fresh_only=True),

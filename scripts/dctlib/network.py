@@ -531,7 +531,7 @@ def project_network(identifier, node, values, digest=None):
     if 'revert' in values and (set(values) != {'revert'} or values['revert'] != 1):
         raise ValueError('Revert cannot be combined with network settings')
     worker.authorize_config_keys(NETWORK_KEYS)
-    with worker.locked():
+    with worker.locked(identifier):
         worker.recover_network_transaction(identifier, node)
         info = worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)

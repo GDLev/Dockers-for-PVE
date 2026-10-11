@@ -113,3 +113,29 @@ dct clone 150 152 --hostname website-copy --net0 bridge=vmbr0,ip=192.0.2.152/24
 ```
 
 Resource options apply per service instance. Omit `--service` for a single-service DCT. Multi-service DCTs require a service name when changing resources. Docker-specific runtime and networking restrictions still apply; LXC-only commands and options are not advertised by `dct help`.
+
+## Project resource budgets
+
+`GET /nodes/{node}/docker/{id}/limits` returns `cpus`, `memory` in MiB, `pids` and a configuration `digest`. Reading requires `VM.Audit`.
+
+`PUT` to the same path sets all three ceilings. Send `cpus`, `memory`, `pids` and the last `digest`. Zero removes that ceiling. Changing a budget requires the guest configuration privileges and `Sys.Modify` on the node. The DCT must be stopped, outside HA and not a template.
+
+For example, with the same authentication headers used above:
+
+```http
+PUT /api2/json/nodes/pve1/docker/{id}/limits
+Content-Type: application/x-www-form-urlencoded
+
+cpus=2&memory=1024&pids=512&digest={digest}
+```
+
+Every service must have a finite limit for each active ceiling. The extension sums those limits across all declared replicas and rejects configurations exceeding the budget. It checks pending edits, deployment changes, saved containers and snapshot rollback. Docker enforces the individual container caps; unused capacity is not shared dynamically between services. CPU and memory reservations are not hard limits.
+
+Budgets are preserved in backups, clones and migration. Snapshot rollback retains the current administrator budget. Changes are synchronous and return the saved ceilings, without a task dialog.
+
+From the node CLI:
+
+```sh
+dct limits 100
+dct limits 100 --cpus 2 --memory 1024 --pids 512
+```

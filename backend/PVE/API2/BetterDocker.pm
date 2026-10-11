@@ -407,12 +407,12 @@ sub register_docker_method {
         } else {
             $caps = capabilities($param->{id}, $param->{node});
         }
-        if ($param->{id} && $param->{node} && $name =~ /^(?:update|template|destroy|service_action|settings|reset_settings|snapshot)$/ &&
+        if ($param->{id} && $param->{node} && $name =~ /^(?:update|template|destroy|service_action|settings|set_project_limits|reset_settings|snapshot)$/ &&
             ($name ne 'snapshot' || ($param->{action} // '') eq 'restore') && ha_managed($param->{id}, $param->{node})) {
             die "Remove the DCT from HA before changing its deployment, services or persistent state\n";
         }
         my $scope = $name eq 'list' && $param->{diagnostics} ? 'trusted' :
-                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config)$/ ? 'audit' :
+                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config|project_limits)$/ ? 'audit' :
                     $name =~ /^(termproxy|vncwebsocket|logs)$/ ? 'console' :
                     $name =~ /^(storage_limit|storage_config)$/ ? 'disk' :
                     $name eq 'clone' ? 'clone' : $name eq 'migrate' ? 'migrate' :

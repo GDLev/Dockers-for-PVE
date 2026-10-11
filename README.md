@@ -1,5 +1,10 @@
 # Proxmox BetterDockers
 
+[![Version 0.19.0](https://img.shields.io/badge/version-0.19.0-blue?style=flat-square)](packaging/build-deb.sh)
+[![Proxmox VE 9.1 and 9.2](https://img.shields.io/badge/Proxmox_VE-9.1_%7C_9.2-E57000?style=flat-square&logo=proxmox&logoColor=white)](#installation)
+
+[Install](#installation) · [Features](#available-features) · [CLI and API](API_DOCS.md) · [Contributing](CONTRIBUTING.md)
+
 BetterDockers lets you manage Docker projects from the Proxmox VE web interface: deploy Compose files or images, control services, view logs, open consoles, set limits and take snapshots.
 
 Projects appear as **DCT** in the resource tree, with a guest ID and their own IPv4 address. Docker runs directly on the Proxmox node.
@@ -103,6 +108,7 @@ The installer also updates `/usr/share/pve-manager/index.html.tpl`, `/usr/share/
 | `/var/lib/betterdocker/projects/<id>/compose.source.yaml` | Imported Compose configuration. |
 | `/var/lib/betterdocker/projects/<id>/.env` | Imported environment variables. |
 | `/var/lib/betterdocker/projects/<id>/compose.runtime.json` | Generated configuration used to run the services. |
+| `/var/lib/betterdocker/projects/<id>/limits.json` | Administrator-owned aggregate CPU, memory and PID ceilings. |
 | `/var/lib/betterdocker/projects/<id>/pending.json` | Service settings waiting for Start or Reboot. |
 | `/var/lib/betterdocker/projects/<id>/ha.json` | Local HA enrollment marker. Docker restart policies stay disabled while enrolled. |
 | `/var/lib/betterdocker/ha-recoveries/<id>.json` | Interrupted HA recovery ownership journal. |
@@ -160,6 +166,12 @@ Grant guest privileges on `/vms/<vmid>` or through a native resource pool. Creat
 Selecting a bridge requires native `SDN.Use` access to that bridge. Restricted API tokens use the intersection of user and token permissions. Interactive consoles require a user session.
 
 Delegated Compose supports project-owned bind mounts, local volumes and bridge networks. Host namespaces, privileged mode, added capabilities, devices, Docker sockets, external resources and custom drivers require administrator access. Only the imported `.env` may be referenced as an environment file. Delegated pulls do not use the administrator's Docker credentials. Existing deployments with unsafe settings stay administrator-only for deployment, console and state-management operations.
+
+New and edited deployments default to local `json-file` logging with `max-size=10m` and `max-file=3`. Explicit local logging options are preserved. Delegated deployments must use positive rotation limits, at most 100 MiB per file and 10 files per container. These are per-container limits, not a project disk quota. Existing containers keep their logging settings until recreated through deployment editing.
+
+Delegated deployments cannot disable the OOM killer or set a negative `oom_score_adj`. Saved containers with these settings also require administrator access. Administrators retain control over explicit logging and OOM settings.
+
+Administrators can set aggregate CPU, memory and PID budgets with `dct limits <vmid>`. The sum of service limits, including replicas, must fit the budget. Services need finite caps for each active ceiling. See [API_DOCS.md](API_DOCS.md#project-resource-budgets) for configuration and permissions.
 
 Deployment editors can read imported environment variables and source files. Console users can see application secrets through logs or a shell. Backup access includes the secrets stored in that backup. Audit-only responses do not include deployment source or environment variables.
 

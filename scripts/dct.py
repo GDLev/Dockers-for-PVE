@@ -237,6 +237,19 @@ def dispatch(command, params):
         else:
             output(api('get', base + '/status'), params)
         return
+    if command == 'limits':
+        path = guest(params['vmid'])
+        keys = {'cpus', 'memory', 'pids'} & params.keys()
+        if keys:
+            old = api('get', path + '/limits')
+            values = {key: params.get(key, old[key]) for key in ('cpus', 'memory', 'pids')}
+            values['cpus'] = float(values['cpus'])
+            values.update(memory=int(values['memory']), pids=int(values['pids']), digest=old['digest'])
+            result = api('set', path + '/limits', **values)
+        else:
+            result = api('get', path + '/limits')
+        print('\n'.join(f'{key}: {result[key]}' for key in ('cpus', 'memory', 'pids')))
+        return
     if command == 'create':
         finish_task(create(params), params)
         return

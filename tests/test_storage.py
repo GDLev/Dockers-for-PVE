@@ -11,6 +11,13 @@ ID = 'a' * 32
 
 
 class StorageTests(TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        lock = patch.object(worker, 'LOCK', Path(temporary.name) / 'node.lock')
+        lock.start()
+        self.addCleanup(lock.stop)
+
     def test_refresh_skips_migrated_ownership_without_hiding_other_write_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'projects'

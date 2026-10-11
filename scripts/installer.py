@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 
-from installer_ui import Cancelled, Choice, Terminal
+from installer_ui import Cancelled, Choice, MESSAGES, Terminal
 
 SOURCE = Path(__file__).resolve().parent.parent
 CACHE = Path('/var/lib/betterdocker/installer')
@@ -240,7 +240,7 @@ class Runner:
                             line, buffer = buffer.split(b'\n', 1)
                             if line.startswith(b'[betterdocker-stage] '):
                                 code = line.decode(errors='replace').split(' ', 1)[1].strip()
-                                if 'stage_' + code in self.ui.words:
+                                if 'stage_' + code in MESSAGES:
                                     current = code
                                     if not self.ui.cursor:
                                         self.ui.output('  ' + node + '  ' + self.ui.t('stage_' + current))

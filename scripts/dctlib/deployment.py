@@ -162,6 +162,7 @@ def prepare(data, identifier, directory, project_directory=None):
         location = ' (' + ', '.join(locations) + ')' if locations else ''
         raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
     config = worker.bind_ports(config, data['address'], identifier)
+    worker.apply_log_defaults(config)
     if node_runtime.load().rootless:
         for service in config['services'].values():
             for mount in service.get('volumes', []):
@@ -171,6 +172,7 @@ def prepare(data, identifier, directory, project_directory=None):
         worker.validate_delegated_config(config, identifier)
     worker.apply_settings(config, worker.load_settings(project_directory))
     worker.apply_storage(config, identifier)
+    worker.project_limits.check_directory(project_directory, config)
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
     def escape(value):
         if isinstance(value, str):
@@ -193,7 +195,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
             raise ValueError('Changing the hookscript is only allowed for root@pam')
         worker.pve_hook(hookscript)
     identifier = worker.project_id(identifier) if identifier else uuid.uuid4().hex
-    with worker.locked():
+    with worker.locked(identifier):
         if (worker.METADATA / (identifier + ".json")).exists() or (worker.ROOT / identifier).exists():
             raise ValueError("Project ID already exists")
         vmid = next((vmid for vmid, entry in worker.reserved_ids().items() if entry['id'] == identifier), None)
@@ -244,7 +246,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
 
 
 def update(identifier, node, data, digest=None):
-    with worker.locked():
+    with worker.locked(identifier):
         existing = worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         if data.get('vmid') and data['vmid'] != existing.get('vmid'):
@@ -323,7 +325,7 @@ def preview(data, identifier=None):
 
 
 def reset_settings(identifier, node, service, digest=None):
-    with worker.locked():
+    with worker.locked(identifier):
         info = worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         directory = worker.ROOT / identifier

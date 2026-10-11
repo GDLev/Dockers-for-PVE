@@ -16,6 +16,39 @@ def route_source(name):
 
 
 class PerlAPITests(unittest.TestCase):
+    def test_project_limits_require_node_permission_and_preserve_numeric_json(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker/Settings.pm').read_text()
+        start = source.index("name => 'set_project_limits'")
+        start = source.index('        code => sub {', start)
+        end = source.index('\n        },', start)
+        body = source[start:end].removeprefix('        code => sub {').replace("DIR => '/run'", 'DIR => $tmpdir').replace('PVE::API2::BetterDocker::', '')
+        with tempfile.TemporaryDirectory() as folder:
+            code = r'''use JSON::PP qw(decode_json encode_json);
+use File::Temp qw(tempfile);
+my $tmpdir = $ARGV[0]; our $allow = 0;
+sub output {
+ my ($args) = @_; open(my $fh, '<', $args->[3]) or die $!; local $/; my $text = <$fh>;
+ die 'Numeric fields serialized as strings' if $text =~ /"(?:cpus|memory|pids)":"/;
+ return $text;
+}
+package PVE::RPCEnvironment;
+sub get { bless {}, __PACKAGE__ }
+sub get_user { 'admin@pve' }
+sub check { die 'Permission denied' unless $main::allow; die 'Wrong scope' unless $_[2] eq '/nodes/pve' && $_[3]->[0] eq 'Sys.Modify'; }
+package main;
+my $write = sub { BODY };
+my $args = {id=>'a' x 32,node=>'pve',cpus=>'0.4',memory=>'64',pids=>'32'};
+eval { $write->($args); };
+die 'Permission bypass' unless $@ =~ /Permission denied/;
+die 'Denied write left files' if glob "$tmpdir/betterdocker-limits-*";
+$allow = 1; my $result = $write->($args);
+die 'Incorrect limits' unless $result->{cpus} == 0.4 && $result->{memory} == 64 && $result->{pids} == 32;
+die 'Temporary file leaked' if glob "$tmpdir/betterdocker-limits-*";
+print 'PASS';
+'''.replace('BODY', body)
+            result = subprocess.run(['perl', '-e', code, folder], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, 'PASS')
+
     def test_preview_error_returns_worker_reason_without_command_noise(self):
         source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
         function = source[source.index('sub output {'):source.index('\nsub check_digest {')]

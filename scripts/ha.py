@@ -30,7 +30,7 @@ def pause_restart(identifier):
 
 
 def enroll(identifier, node):
-    with worker.operation(identifier, 'ha-enroll'), worker.locked():
+    with worker.operation(identifier, 'ha-enroll'), worker.locked(identifier):
         current = worker.detail(identifier, node)
         if current.get('template') or current.get('migration'):
             raise ValueError('HA requires an ordinary, stationary DCT')
@@ -45,7 +45,7 @@ def enroll(identifier, node):
 
 
 def release(identifier, node):
-    with worker.operation(identifier, 'ha-release', wait_timeout=300), worker.locked():
+    with worker.operation(identifier, 'ha-release', wait_timeout=300), worker.locked(identifier):
         current = info(identifier)
         if current['node'] != node or node != worker.current_node():
             raise ValueError('HA guest ownership changed')
@@ -102,7 +102,7 @@ def recover_guest(identifier, node):
             if (worker.ROOT / identifier).exists():
                 if not (worker.ROOT / identifier / 'ha.json').exists() and previous.get('token') != recovery['token']:
                     raise ValueError('HA recovery found an unowned local deployment')
-                with worker.locked():
+                with worker.locked(identifier):
                     transfer.clean_local(identifier, current)
             state.write(journal, {'token': recovery['token']})
             # The storage bridge accepts private metadata only in the transfer root.

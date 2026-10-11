@@ -10,6 +10,34 @@ sub register_api {
     my ($helper, $node, $id, $digest, $root) = PVE::API2::BetterDocker::method_defaults();
 
     PVE::API2::BetterDocker::register_docker_method({
+        name => 'project_limits', path => '{id}/limits', method => 'GET', protected => 1, proxyto => 'node',
+        description => 'Read administrator-owned aggregate resource ceilings.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+        returns => { type => 'object' },
+        code => sub { my ($p) = @_; return decode_json(PVE::API2::BetterDocker::output(['project-limits', $p->{id}, $p->{node}])); },
+    });
+    PVE::API2::BetterDocker::register_docker_method({
+        name => 'set_project_limits', path => '{id}/limits', method => 'PUT', protected => 1, proxyto => 'node',
+        description => 'Set aggregate ceilings for a stopped DCT. Requires node Sys.Modify.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
+            cpus => { type => 'number', minimum => 0, maximum => 8192 },
+            memory => { type => 'integer', minimum => 0, maximum => 1048576 },
+            pids => { type => 'integer', minimum => 0, maximum => 4194304 } } },
+        returns => { type => 'object' },
+        code => sub {
+            my ($p) = @_;
+            my $rpc = PVE::RPCEnvironment::get();
+            $rpc->check($rpc->get_user(), '/nodes/' . $p->{node}, ['Sys.Modify']);
+            my ($fh, $path) = tempfile('betterdocker-limits-XXXXXX', DIR => '/run', UNLINK => 0);
+            chmod 0600, $path;
+            print $fh encode_json({ map { $_ => 0 + $p->{$_} } qw(cpus memory pids) }); close $fh;
+            my $result = eval { decode_json(PVE::API2::BetterDocker::output(['project-limits', $p->{id}, $p->{node}, $path, $p->{digest} // ''])); };
+            my $err = $@; unlink $path; die $err if $err;
+            return $result;
+        },
+    });
+
+    PVE::API2::BetterDocker::register_docker_method({
         name => 'pending', path => '{id}/pending', method => 'GET', protected => 1, proxyto => 'node',
         description => 'Read current and pending settings for one Compose service.',
         parameters => { additionalProperties => 0, properties => {

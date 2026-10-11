@@ -15,9 +15,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import runtime as node_runtime
+from . import limits as project_limits
 
 HELPERS = Path(__file__).resolve().parent.parent
 ROOT = Path('/var/lib/betterdocker/projects')
@@ -28,6 +30,7 @@ CGROUP = Path('/sys/fs/cgroup')
 PVE_NODES = Path('/etc/pve/nodes')
 
 from .policy import (
+    apply_log_defaults,
     trusted_management,
     safe_bind,
     validate_delegated_source,
@@ -221,6 +224,21 @@ def release_id(identifier):
 
 
 def run(args, **kwargs):
+    if args[:2] == ['docker', 'compose']:
+        index = 2
+        while index < len(args):
+            word = args[index]
+            if word in ('--project-name', '--project-directory', '--env-file', '-f', '--file'):
+                index += 2
+            elif word.startswith('-'):
+                index += 1
+            else:
+                break
+        command = args[index] if index < len(args) else ''
+        if command in ('up', 'start', 'restart', 'run'):
+            for index, word in enumerate(args[:-1]):
+                if word in ('-f', '--file') and Path(args[index + 1]).name == 'compose.runtime.json':
+                    project_limits.check_directory(Path(args[index + 1]).parent)
     kwargs.setdefault('timeout', 60)
     kwargs.setdefault('env', {'PATH': os.environ.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin'), 'HOME': '/root'})
     if args and args[0] == 'docker' and not trusted_management():
@@ -270,12 +288,42 @@ def write_json(path, value, allow_migration_change=False):
             os.unlink(temporary)
 
 
+_held_locks = threading.local()
+
+
 @contextlib.contextmanager
-def locked():
-    LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with LOCK.open('w') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+def locked(identifier=None):
+    # Configuration locks are distinct from the non-reentrant operation lock.
+    # Guest -> node is the only permitted nesting order.
+    path = ROOT.parent / 'config-locks' / (project_id(identifier) + '.lock') if identifier else LOCK
+    held = getattr(_held_locks, 'paths', set())
+    if path in held:
         yield
+        return
+    if identifier and LOCK in held:
+        raise ValueError('Cannot acquire a guest lock while holding the node lock')
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'w') as handle:
+        owner = os.fstat(handle.fileno())
+        if owner.st_uid != os.geteuid() or not stat.S_ISREG(owner.st_mode):
+            raise ValueError('Invalid lock file owner or type')
+        os.fchmod(handle.fileno(), 0o600)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        _held_locks.paths = held | {path}
+        try:
+            yield
+        finally:
+            _held_locks.paths = held
+
+
+def node_locked(function):
+    from functools import wraps
+    @wraps(function)
+    def call(*args, **kwargs):
+        with locked():
+            return function(*args, **kwargs)
+    return call
 
 
 def project_id(value):
@@ -346,6 +394,8 @@ def configuration_digest(directory, deployment, protection=False, tags='', lifec
     # Runtime files include assigned IPs and Docker state, not source configuration.
     state = {'deployment': deployment, 'settings': load_settings(directory),
              'storage': json.loads((directory / 'storage.json').read_text()) if (directory / 'storage.json').exists() else None}
+    if (directory / 'limits.json').exists():
+        state['project_limits'] = project_limits.load(directory)
     if lifecycle:
         state['lifecycle'] = lifecycle
     if protection:
@@ -430,7 +480,7 @@ def project_config(identifier, node, changes, digest=None):
         if changes['protection'] not in (0, 1):
             raise ValueError('Protection must be 0 or 1')
         changes = dict(changes, protection=int(changes['protection']))
-    with locked():
+    with locked(identifier):
         info = detail(identifier, node)
         assert_configuration_digest(identifier, node, digest)
         if info.get('template') and changes.get('onboot'):
@@ -470,7 +520,7 @@ def check_protection(info, message="can't remove DCT"):
 
 
 def project_protection(identifier, node, value=None, digest=None):
-    with locked():
+    with locked(identifier):
         info = detail(identifier, node)
         if value is not None:
             if str(value) not in ('0', '1'):
@@ -565,7 +615,7 @@ def refresh(node):
 
 
 def action(identifier, node, operation, timeout=60):
-    with locked():
+    with locked(identifier):
         recover_network_transaction(identifier, node)
         info = detail(identifier, node)
         recover_storage_transaction(identifier)
@@ -760,8 +810,35 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
             write_json(path, state)
 
 
+def project_limit_config(identifier, node, values=None, digest=None):
+    with locked(identifier):
+        info = detail(identifier, node)
+        directory = ROOT / project_id(identifier)
+        if values is None:
+            return dict(project_limits.load(directory), digest=info['digest'])
+        actor = os.environ.get('BETTERDOCKER_TASK_USER', 'root@pam')
+        if os.environ.get('BETTERDOCKER_TASK_SYS_MODIFY', '1' if actor == 'root@pam' else '0') != '1':
+            raise ValueError('Permission denied: project budgets require node Sys.Modify')
+        assert_configuration_digest(identifier, node, digest)
+        require_stopped(container_records(identifier))
+        if info.get('template') or info.get('ha', {}).get('managed'):
+            raise ValueError('Project budgets require an unmanaged non-template DCT')
+        ceilings = project_limits.validate(values)
+        config = json.loads((directory / 'compose.runtime.json').read_text())
+        project_limits.check(config, ceilings)
+        apply_settings(config, load_pending(directory))
+        project_limits.check(config, ceilings)
+        records = container_records(identifier)
+        if records and any(ceilings.values()):
+            inspected = json.loads(capture(['docker', 'inspect', *[item['id'] for item in records]]))
+            project_limits.check_containers(inspected, ceilings)
+        write_json(directory / 'limits.json', ceilings)
+        os.chmod(directory / 'limits.json', 0o600)
+        return ceilings
+
+
 def project_tags(identifier, node, tags=None):
-    with locked():
+    with locked(identifier):
         info = detail(identifier, node)
         info.pop('deployment', None)
         if tags is not None:
@@ -774,7 +851,7 @@ def project_tags(identifier, node, tags=None):
 
 
 def service_action(identifier, node, service, verb, timeout=60):
-    with locked():
+    with locked(identifier):
         recover_snapshot_transaction(identifier)
         recover_network_transaction(identifier, node)
         info = detail(identifier, node)
@@ -885,11 +962,18 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
-    if args.operation == 'reserve-id':
+    if args.operation == 'project-limits':
+        if len(values) > 2:
+            with operation(values[0], 'settings'):
+                result = project_limit_config(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3] if len(values) > 3 else None)
+        else:
+            result = project_limit_config(*values)
+        print(json.dumps(result))
+    elif args.operation == 'reserve-id':
         print(reserve_id(values[0], values[1], values[2] if len(values) > 2 else None))
     elif args.operation == 'release-id':
         if not (METADATA / (project_id(values[0]) + '.json')).exists():
@@ -1000,3 +1084,9 @@ def main():
     elif args.operation == 'refresh':
         with locked():
             refresh(current_node())
+
+# Network allocation touches shared node addresses; guest work remains independent.
+network_preflight = node_locked(network_preflight)
+ensure_address = node_locked(ensure_address)
+remove_network = node_locked(remove_network)
+pve_storage = node_locked(pve_storage)

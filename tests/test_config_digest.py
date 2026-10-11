@@ -61,7 +61,7 @@ class ConfigurationDigestTests(unittest.TestCase):
         old=self.digest()
         worker.assert_configuration_digest(ID,'pve',old)
         @contextlib.contextmanager
-        def changed_before_lock():
+        def changed_before_lock(*args):
             worker.write_json(self.directory/'settings.json',{'app':{'memory':64}})
             yield
         with patch.object(worker,'locked',changed_before_lock),patch.object(worker,'run') as run:

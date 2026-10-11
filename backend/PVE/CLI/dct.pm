@@ -45,6 +45,10 @@ my %resources = (
     'restart-policy' => option('string', 'Docker restart policy.'),
 );
 my %commands = (
+    limits => ['Read or set administrator-owned aggregate DCT limits.', ['vmid'], {
+        vmid => $vmid, cpus => option('number', 'Aggregate CPU ceiling; 0 means unlimited.', minimum => 0, maximum => 8192),
+        memory => option('integer', 'Aggregate memory ceiling in MiB; 0 means unlimited.', minimum => 0, maximum => 1048576),
+        pids => option('integer', 'Aggregate PID ceiling; 0 means unlimited.', minimum => 0, maximum => 4194304) }],
     list => ['List DCTs on this node.', [], { cluster => option('boolean', 'List guests on all cluster nodes.') }],
     create => ['Create a DCT from a Compose file, deployment JSON file or Docker image.', ['vmid', 'source'], {
         vmid => $vmid, source => { type => 'string', description => 'Compose file, deployment JSON file or Docker image.' },

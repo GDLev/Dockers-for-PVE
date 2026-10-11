@@ -1,8 +1,37 @@
 """Delegated deployment policy."""
 import json
 import os
+import re
 from pathlib import Path
 import runtime as node_runtime
+
+LOG_DEFAULTS = {'max-size': '10m', 'max-file': '3'}
+
+
+def apply_log_defaults(config):
+    """Bound local logs without changing explicitly selected drivers or limits."""
+    for service in config.get('services', {}).values():
+        logging = service.setdefault('logging', {})
+        if logging.get('driver', 'json-file') in ('json-file', 'local'):
+            logging.setdefault('driver', 'json-file')
+            options = logging.setdefault('options', {})
+            for key, value in LOG_DEFAULTS.items():
+                options.setdefault(key, value)
+
+
+def validate_log_limits(options):
+    size = str(options.get('max-size', LOG_DEFAULTS['max-size']))
+    match = re.fullmatch(r'([0-9]+)([kmg]?)', size, re.I)
+    if not match or not 0 < int(match[1]) * 1024 ** ('', 'k', 'm', 'g').index(match[2].lower()) <= 100 * 1024 * 1024:
+        raise ValueError('Delegated logs require max-size between 1 byte and 100 MiB')
+    count = str(options.get('max-file', LOG_DEFAULTS['max-file']))
+    if not re.fullmatch(r'[0-9]+', count) or not 1 <= int(count) <= 10:
+        raise ValueError('Delegated logs require max-file between 1 and 10')
+
+
+def validate_oom(disabled, score):
+    if disabled or score < 0:
+        raise ValueError('Changing OOM protection requires administrator access')
 
 
 def trusted_management():
@@ -19,7 +48,7 @@ def safe_bind(source, identifier):
     relative = path.resolve().relative_to(base)
     # Deployment files contain credentials and must never be writable by a workload.
     if not relative.parts or relative.parts[0] in {
-        'request.json', 'compose.source.yaml', 'compose.runtime.json', '.env',
+        'limits.json', 'request.json', 'compose.source.yaml', 'compose.runtime.json', '.env',
         'settings.json', 'pending.json', 'pending-network.json', 'storage.json', 'ha.json', 'snapshots',
         'export-transaction.json', 'notes.txt', 'allocated-volume.json', 'storage.ext4',
         'snapshot-restored.json', 'snapshot-tree.json', 'snapshot-transaction.json',
@@ -67,6 +96,7 @@ def validate_delegated_config(config, identifier):
     for service in config.get('services', {}).values():
         if not isinstance(service, dict) or set(service) - allowed:
             raise ValueError('Delegated configuration contains unsafe or unsupported service options')
+        validate_oom(service.get('oom_kill_disable', False), service.get('oom_score_adj', 0))
         if service.get('container_name') and not service['container_name'].startswith('bd-' + identifier + '-'):
             raise ValueError('Delegated container names must belong to the project')
         for mount in service.get('volumes', []):
@@ -92,6 +122,7 @@ def validate_delegated_config(config, identifier):
         logging = service.get('logging') or {}
         if logging.get('driver', 'json-file') not in ('json-file', 'local') or set(logging.get('options') or {}) - {'max-size', 'max-file', 'compress', 'labels', 'env'}:
             raise ValueError('Delegated logging must use a local bounded driver')
+        validate_log_limits(logging.get('options') or {})
     for kind in ('volumes', 'networks'):
         for key, value in config.get(kind, {}).items():
             value = value or {}
@@ -108,6 +139,7 @@ def validate_delegated_config(config, identifier):
 def validate_delegated_containers(containers, identifier):
     for container in containers:
         host = container.get('HostConfig') or {}
+        validate_oom(host.get('OomKillDisable', False), host.get('OomScoreAdj', 0))
         for key in ('Privileged', 'CapAdd', 'Devices', 'DeviceRequests', 'DeviceCgroupRules',
                     'VolumesFrom', 'SecurityOpt', 'CgroupParent', 'Cgroup', 'Sysctls', 'ExtraHosts'):
             if host.get(key):

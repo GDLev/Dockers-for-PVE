@@ -150,7 +150,7 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
     size_mib = int(size_mib)
     if not 256 <= size_mib <= 1048576:
         raise ValueError('Data disk must be between 256 and 1048576 MiB')
-    with worker.locked():
+    with worker.locked(identifier):
         info = worker.detail(identifier, node)
         worker.require_stopped(worker.container_records(identifier))
         worker.recover_storage_transaction(identifier)
@@ -332,7 +332,7 @@ def project_storage_status(identifier):
 def purge_retained_storage(identifier):
     """Explicit root maintenance after guest deletion; never called by DELETE DCT."""
     worker.project_id(identifier)
-    with worker.locked():
+    with worker.locked(identifier):
         if (worker.METADATA / (identifier + '.json')).exists():
             raise ValueError('Remove the DCT before permanently freeing retained disks')
         if any(worker.snapshot_root(identifier).glob('*/manifest.json')):
@@ -360,7 +360,7 @@ def project_storage_limit(identifier, node, size_mib, digest=None, storage=''):
     size_mib = int(size_mib)
     if not 256 <= size_mib <= 1048576:
         raise ValueError('Project data disk must be between 256 and 1048576 MiB')
-    with worker.locked():
+    with worker.locked(identifier):
         worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         if any(item['state'] not in ('created', 'exited', 'dead') for item in worker.container_records(identifier)):

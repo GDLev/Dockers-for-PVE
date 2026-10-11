@@ -20,7 +20,7 @@ def record(identifier):
 
 
 def ensure(identifier, node, lock_fd=None):
-    with state.operation(identifier, 'replication-configure', lock_fd), worker.locked():
+    with state.operation(identifier, 'replication-configure', lock_fd), worker.locked(identifier):
         info = worker.detail(identifier, node)
         info.pop('deployment', None)
         directory = worker.ROOT / identifier
@@ -67,7 +67,7 @@ def prepare(identifier, node, lock_fd=None):
             state.pack_state(temporary / 'state', temporary / 'state.tar')
             size = max(256, (2 * (temporary / 'state.tar').stat().st_size + 64 * 1048576 + 1048575) // 1048576)
             if size > volume['size_mib']:
-                with worker.locked():
+                with worker.locked(identifier):
                     inspected = worker.pve_storage(identifier, 'resize', volid=volume['volid'], size_mib=size)
                     check = worker.run(['e2fsck', '-p', inspected['path']], check=False, capture_output=True)
                     if check.returncode not in (0, 1):
@@ -90,7 +90,7 @@ def prepare(identifier, node, lock_fd=None):
 
 
 def publish(identifier, node, target, jobid, timestamp, lock_fd=None):
-    with state.operation(identifier, 'replication', lock_fd), worker.locked():
+    with state.operation(identifier, 'replication', lock_fd), worker.locked(identifier):
         info = worker.detail(identifier, node)
         info.pop('deployment', None)
         if not re.fullmatch(str(info['vmid']) + r'-[0-9]{1,9}', jobid) or target == node:
@@ -109,7 +109,7 @@ def publish(identifier, node, target, jobid, timestamp, lock_fd=None):
 
 
 def cleanup(identifier, node, lock_fd=None):
-    with state.operation(identifier, 'replication-cleanup', lock_fd), worker.locked():
+    with state.operation(identifier, 'replication-cleanup', lock_fd), worker.locked(identifier):
         info = worker.detail(identifier, node)
         info.pop('deployment', None)
         program = 'use PVE::ReplicationConfig; my $c=PVE::ReplicationConfig->new(); die "Remove replication jobs first\\n" if grep {$_->{guest} == $ARGV[0]} values %{$c->{ids}};'

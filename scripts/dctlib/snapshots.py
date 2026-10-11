@@ -130,7 +130,7 @@ def snapshot_edit(identifier, node, name, description, digest=None):
     worker.snapshot_name(name)
     if len(description) > 4096:
         raise ValueError('Snapshot description cannot exceed 4096 characters')
-    with worker.locked():
+    with worker.locked(identifier):
         current = worker.snapshot_config(identifier, node, name)
         if digest and digest != current['digest']:
             raise ValueError('detected modified configuration - file checksum changed, please try again')
@@ -449,6 +449,8 @@ def snapshot_apply(identifier, node, name, check_only=False):
                 worker.safe_bind(mount['source'], identifier)
         if (folder / 'networks.json').exists():
             worker.validate_delegated_networks(json.loads((folder / 'networks.json').read_text()))
+    worker.project_limits.check_directory(worker.ROOT / identifier, json.loads((configs / 'compose.runtime.json').read_text()))
+    worker.project_limits.check_containers(saved, worker.project_limits.load(worker.ROOT / identifier))
     before_storage = worker.storage_config(identifier)
     native = manifest.get('native_storage')
     saved_storage = json.loads((configs / 'storage.json').read_text()) if (configs / 'storage.json').exists() else {}
@@ -603,7 +605,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
 
 def project_snapshot(identifier, node, verb, name, description=''):
     worker.snapshot_name(name)
-    with worker.locked():
+    with worker.locked(identifier):
         worker.detail(identifier, node)
         worker.recover_storage_transaction(identifier)
         worker.recover_snapshot_transaction(identifier, restoring=verb == 'restore')

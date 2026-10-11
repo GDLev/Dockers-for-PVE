@@ -27,6 +27,13 @@ INTERFACES = [{'ifname': 'vmbr0', 'addr_info': [{'local': '192.0.2.28', 'prefixl
 
 
 class WorkerTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        lock = patch.object(worker, 'LOCK', Path(temporary.name) / 'node.lock')
+        lock.start()
+        self.addCleanup(lock.stop)
+
     def test_compose_does_not_require_image_or_redundant_port_setup(self):
         data = worker.validate(dict(BASE, image='', ports='invalid stale image field'))
         self.assertEqual(data['mode'], 'compose')
