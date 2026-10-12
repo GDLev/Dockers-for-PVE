@@ -123,7 +123,7 @@ class ManagementTests(unittest.TestCase):
                     self.assertIn('-d' if state == 'running' else '--no-start', args)
                     self.assertEqual(args[-1], 'web')
                     self.assertIn('--no-deps', args)
-                    self.assertEqual(worker.load_settings(directory)['web'], VALUES)
+                    self.assertEqual(worker.load_settings(directory)['web'], dict(VALUES, user='', read_only=False, cap_drop=[], no_new_privileges=False, apparmor=''))
 
     def test_failed_change_restores_runtime_and_does_not_persist_override(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -179,7 +179,7 @@ class LiveSettingsTests(unittest.TestCase):
                 worker.service_settings(ID, 'pve', 'web', values)
                 update.assert_called_once()
                 run.assert_not_called()
-                self.assertEqual(worker.load_settings(directory)['web'], values)
+                self.assertEqual(worker.load_settings(directory)['web'], dict(values, user='', read_only=False, cap_drop=[], no_new_privileges=False, apparmor=''))
                 self.assertEqual(json.loads(runtime.read_text())['services']['web']['cpus'], 1.5)
 
     def test_all_transitional_states_require_stop(self):

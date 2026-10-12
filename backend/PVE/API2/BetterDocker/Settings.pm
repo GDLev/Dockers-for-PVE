@@ -10,6 +10,53 @@ sub register_api {
     my ($helper, $node, $id, $digest, $root) = PVE::API2::BetterDocker::method_defaults();
 
     PVE::API2::BetterDocker::register_docker_method({
+        name => 'image_state', path => '{id}/images', method => 'GET', protected => 1, proxyto => 'node',
+        description => 'Read the prepared image update and its recovery snapshot.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+        returns => { type => 'object' },
+        code => sub { my ($p) = @_; return decode_json(PVE::API2::BetterDocker::output(['image-state', $p->{id}, $p->{node}])); },
+    });
+    PVE::API2::BetterDocker::register_docker_method({
+        name => 'image_preview', path => '{id}/images/preview', method => 'POST', protected => 1, proxyto => 'node',
+        description => 'Pull selected images and prepare an immutable change preview without recreating containers.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
+            images => { type => 'string', maxLength => 8192 } } },
+        returns => { type => 'string' },
+        code => sub {
+            my ($p) = @_;
+            PVE::API2::BetterDocker::check_digest($p);
+            my $data = decode_json($p->{images});
+            die "Images must be a JSON object\n" unless ref($data) eq 'HASH';
+            my ($fh, $path) = tempfile('betterdocker-images-XXXXXX', DIR => '/run', UNLINK => 0);
+            chmod 0600, $path; print $fh encode_json($data); close $fh;
+            my $rpc = PVE::RPCEnvironment::get();
+            my $upid = eval { $rpc->fork_worker('betterdockerimagepreview', PVE::API2::BetterDocker::task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+                eval { PVE::Tools::run_command([$helper, 'image-preview', $p->{id}, $p->{node}, $path, $p->{digest} // '']); };
+                my $err = $@; unlink $path; die $err if $err;
+            }); };
+            if (my $err = $@) { unlink $path; die $err; }
+            return $upid;
+        },
+    });
+    PVE::API2::BetterDocker::register_docker_method({
+        name => 'image_apply', path => '{id}/images', method => 'POST', protected => 1, proxyto => 'node',
+        description => 'Update stopped services to previewed images after creating a named recovery snapshot.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
+            token => { type => 'string', pattern => '^[0-9a-f]{32}$' },
+            recovery => { type => 'string', maxLength => 40 } } },
+        returns => { type => 'string' },
+        code => sub {
+            my ($p) = @_;
+            PVE::API2::BetterDocker::check_digest($p);
+            raise_perm_exc('VM.Snapshot') unless PVE::API2::BetterDocker::capabilities($p->{id}, $p->{node})->{snapshot};
+            my $rpc = PVE::RPCEnvironment::get();
+            return $rpc->fork_worker('betterdockerimageupdate', PVE::API2::BetterDocker::task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+                PVE::Tools::run_command([$helper, 'image-apply', $p->{id}, $p->{node}, $p->{token}, $p->{recovery}, $p->{digest} // '']);
+            });
+        },
+    });
+
+    PVE::API2::BetterDocker::register_docker_method({
         name => 'project_limits', path => '{id}/limits', method => 'GET', protected => 1, proxyto => 'node',
         description => 'Read administrator-owned aggregate resource ceilings.',
         parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },

@@ -10,6 +10,8 @@
   "logs.js",
   "diagnostics.js",
   "snapshots.js",
+  "security.js",
+  "images.js",
   "config.js",
   "integration.js"
 ]

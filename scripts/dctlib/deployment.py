@@ -147,7 +147,7 @@ def compose_base(directory, identifier, filename='compose.runtime.json'):
     return command
 
 
-def prepare(data, identifier, directory, project_directory=None):
+def prepare(data, identifier, directory, project_directory=None, use_images=True):
     project_directory = project_directory or directory
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
@@ -181,6 +181,9 @@ def prepare(data, identifier, directory, project_directory=None):
     if not worker.trusted_management():
         worker.validate_delegated_config(config, identifier)
     worker.apply_settings(config, worker.load_settings(project_directory))
+    from .images import overrides
+    if use_images:
+        overrides(config, project_directory)
     worker.apply_storage(config, identifier)
     worker.project_limits.check_directory(project_directory, config)
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
@@ -192,6 +195,7 @@ def prepare(data, identifier, directory, project_directory=None):
         if isinstance(value, dict):
             return {k: escape(v) for k, v in value.items()}
         return value
+    node_runtime.check_resources(config)
     worker.write_json(directory / 'compose.runtime.json', escape(config))
     os.chmod(directory / 'compose.runtime.json', 0o600)
     return config
@@ -284,12 +288,14 @@ def update(identifier, node, data, digest=None):
             raise ValueError('Apply or revert pending changes before editing deployment')
         with tempfile.TemporaryDirectory(prefix='betterdocker-update-', dir=worker.ROOT) as folder:
             staging = Path(folder)
-            config = worker.prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory)
+            config = worker.prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory, use_images=False)
             worker.check_protected_layout(existing, json.loads((directory / 'compose.runtime.json').read_text()),
                                    json.loads((staging / 'compose.runtime.json').read_text()))
             for filename in ('compose.source.yaml', '.env', 'compose.runtime.json'):
                 os.replace(staging / filename, directory / filename)
         (directory / 'snapshot-restored.json').unlink(missing_ok=True)
+        (directory / 'images.json').unlink(missing_ok=True)
+        (directory / 'image-update.json').unlink(missing_ok=True)
         worker.write_json(directory / 'request.json', data)
         info = {key: value for key, value in existing.items() if key != 'deployment'}
         info['expected'] = sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values())

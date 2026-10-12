@@ -4,6 +4,26 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Changing security settings recreates the service. Store persistent data in volumes.": "Changing security settings recreates the service. Store persistent data in volumes.",
+            "Preview images": "Preview images",
+            "Roll back the recovery snapshot": "Roll back the recovery snapshot",
+            "Security": "Security",
+            "User": "User",
+            "Image default": "Image default",
+            "Read-only filesystem": "Read-only filesystem",
+            "Dropped capabilities": "Dropped capabilities",
+            "No new privileges": "No new privileges",
+            "AppArmor profile": "AppArmor profile",
+            "Inactive": "Inactive",
+            "healthy": "healthy",
+            "unhealthy": "unhealthy",
+            "starting": "starting",
+            "Update images": "Update images",
+            "Current image": "Current image",
+            "New image": "New image",
+            "Recovery snapshot": "Recovery snapshot",
+            "Updating images requires a stopped DCT. Roll back the recovery snapshot to restore containers and data.": "Updating images requires a stopped DCT. Roll back the recovery snapshot to restore containers and data.",
+
             "Remove owned disks, volumes and project files": "Remove owned disks, volumes and project files",
             "External mounts are retained.": "External mounts are retained.",
             "Remove disk": "Remove disk",

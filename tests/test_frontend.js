@@ -1700,3 +1700,22 @@ context.Proxmox.Utils.API2Request = acceptanceSaved.request;
 context.Ext.Msg.alert = acceptanceSaved.alert;
 context.Proxmox.UserName = acceptanceSaved.user;
 console.log('Acceptance: Edit/Enter/double-click, read-only/locked state, retained input, conflict retry and quiet saves passed');
+
+// Native Edit requires an API URL, and the shared editor guard permits pristine
+// submissions only for create-style operations such as an already reviewed image plan.
+const imageButtonState = { disabled: false };
+const imageFormEvents = [];
+const imageForm = { isValid: () => true, on: event => imageFormEvents.push(event) };
+const imageEditor = Object.assign({}, definitions['PVE.betterdocker.ImageUpdate'], {
+    apiUrl: '/nodes/pve1/docker/test', services: [{ name: 'app', image: 'busybox:1.37' }],
+    formPanel: { getForm: () => imageForm }, lookup: () => ({ setDisabled: value => { imageButtonState.disabled = value; } }),
+    callParent: function () {
+        assert.equal(this.url, this.apiUrl + '/images');
+        assert.equal(this.method, 'POST');
+        assert.equal(this.isCreate, true);
+    },
+});
+imageEditor.initComponent();
+assert.equal(imageButtonState.disabled, true);
+assert.deepEqual(imageFormEvents, ['dirtychange', 'validitychange']);
+console.log('Image update editor satisfies native Edit URL and submission contracts');

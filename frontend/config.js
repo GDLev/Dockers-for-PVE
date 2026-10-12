@@ -21,6 +21,8 @@ Ext.define('PVE.betterdocker.Config', {
         const can = scope => current && current.capabilities ? Boolean(current.capabilities[scope] ?? current.capabilities.configure) : Proxmox.UserName === 'root@pam';
         const editable = () => can('configure');
         const rowEditable = (key, group) => {
+            if (key === 'Recovery snapshot') { return false; }
+            if (key === 'Security') { return can('options') && !current?.ha?.managed && !current?.template; }
             if (key === 'Hookscript') { return can('hookscript'); }
             if (current?.ha?.managed && !['Protection', 'Start at boot', 'Start/Shutdown order'].includes(key)) { return false; }
             if (current?.template && !['Protection', 'Start at boot', 'Start/Shutdown order'].includes(key)) { return false; }
@@ -33,7 +35,7 @@ Ext.define('PVE.betterdocker.Config', {
             if (key) { return editable(); }
             return group === 'resources' ? ['cpu', 'memory', 'options', 'disk', 'configure'].some(can) : can(group === 'dns' ? 'network' : 'options');
         };
-        const locked = () => Boolean(me.pendingTask || current?.migration || current && current.operation && current.operation.active);
+        const locked = () => Boolean(me.pendingTask || current?.migration || current?.image_update?.phase === 'applying' || current && current.operation && current.operation.active);
         const canOverrule = service => Boolean(current?.capabilities?.overrule_shutdown &&
             (current.operation?.service || null) === (service || null));
         const set = (id, value) => { const item = me.down('#' + id); if (item && item.getValue() !== value) { item.setValue(value); } };
@@ -64,14 +66,14 @@ Ext.define('PVE.betterdocker.Config', {
             applyGuestAction(me.down('#removeButton'), actions.remove);
             const op = current.operation || {};
             const operationLabel = me.down('#operationLabel');
-            if (operationLabel) { operationLabel.setText(op.active || me.pendingTask ? '<i class="fa fa-lock"></i> ' + Ext.htmlEncode(translate('Operation in progress')) : op.failed ? Ext.htmlEncode(translate(op.message)) : ''); }
+            if (operationLabel) { operationLabel.setText(current.image_update?.phase === 'applying' ? Ext.htmlEncode(translate('Roll back the recovery snapshot') + ': ' + current.image_update.recovery) : op.active || me.pendingTask ? '<i class="fa fa-lock"></i> ' + Ext.htmlEncode(translate('Operation in progress')) : op.failed ? Ext.htmlEncode(translate(op.message)) : ''); }
             me.snapshotState = current;
             const snapshots = me.down('#snapshots');
             if (visible(snapshots) && snapshots.rendered) { snapshots.updateActions(); }
             const tags = me.down('#dockerTags');
             if (tags) { tags.loadTags(current.tags || ''); tags.canEdit = can('options'); if (tags.getViewModel) { tags.getViewModel().set('canEdit', can('options') && !locked()); } }
             rows('serviceGrid', current.containers.concat(current.services.filter(service => !current.containers.some(container => container.service === service.name)).map(service => ({
-                id: 'service:' + service.name, name: '', service: service.name, image: service.image, state: 'stopped', health: 'none', restarts: 0, exitcode: '',
+                id: 'service:' + service.name, name: '', service: service.name, image: service.image, state: 'stopped', health: service.healthcheck ? 'inactive' : 'none', restarts: 0, exitcode: '',
             }))).map(container => Object.assign({}, container, { ports: (current.services.find(service => service.name === container.service)?.ports || [])
                 .map(port => port.published + ':' + port.target + '/' + port.protocol).join(', ') })));
             selectedService = service() ? selectedService : (current.services[0] || {}).name;
@@ -107,7 +109,7 @@ Ext.define('PVE.betterdocker.Config', {
                     { key: 'Project data disk', value: current.storage?.limit_mib ? (current.storage.volid ? current.storage.volid + ', ' : '') + Proxmox.Utils.format_size(current.storage.limit_mib * 1024 * 1024) + (current.storage.mounted ? ' (' + Proxmox.Utils.format_size(current.storage.used) + ' / ' + Proxmox.Utils.format_size(current.storage.available) + ' ' + translate('Available') + ')' : ' — ' + translate('Unavailable')) : 'Unlimited' },
                 ]).concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
                 rows('dnsGrid', ['DNS servers', 'Search domains'].map(key => pendingRow(key, values, active.pending)));
-                rows('optionGrid', [{ key: 'Start at boot', value: Proxmox.Utils.format_boolean(current.onboot || 0) }, { key: 'Start/Shutdown order', value: current.startup || 'order=any' }, { key: 'Protection', value: Proxmox.Utils.format_boolean(current.protection) }, { key: 'Hookscript', value: current.hookscript || Proxmox.Utils.noneText }, pendingRow('Restart policy', values, active.pending), { key: 'Image', value: active.image }]);
+                rows('optionGrid', [{ key: 'Start at boot', value: Proxmox.Utils.format_boolean(current.onboot || 0) }, { key: 'Start/Shutdown order', value: current.startup || 'order=any' }, { key: 'Protection', value: Proxmox.Utils.format_boolean(current.protection) }, { key: 'Hookscript', value: current.hookscript || Proxmox.Utils.noneText }, pendingRow('Restart policy', values, active.pending), pendingRow('Security', values, active.pending), { key: 'Image', value: active.image }, ...(current.image_update?.recovery ? [{ key: 'Recovery snapshot', value: current.image_update.recovery }] : [])]);
                 ['resourceGrid', 'dnsGrid', 'optionGrid'].forEach(id => {
                     const grid = me.down('#' + id), button = me.down('#' + id + 'Revert');
                     const row = grid?.getSelectionModel().getSelection()[0];
@@ -220,6 +222,10 @@ Ext.define('PVE.betterdocker.Config', {
             if (!active || !rowEditable(selectedKey, group) || locked()) { return; }
             if (selectedKey === 'Settings source') { return; }
             if (selectedKey === 'Project data disk') { editDataDisk(); return; }
+            if (selectedKey === 'Security') {
+                return openEditor(me, 'security:' + active.name, () => Ext.create('PVE.betterdocker.SecurityEdit', {
+                    ownerPanel: me, url: url + '/settings', service: active, security: current.security, digest: current.digest }));
+            }
             return openEditor(me, 'setting:' + active.name + ':' + ({ Memory: 'memory', Swap: 'memory', 'CPU limit': 'cpu', 'CPU units': 'cpu', 'DNS servers': 'dns', 'Search domains': 'dns' }[selectedKey] || selectedKey), () => {
                 if (selectedKey === 'Hookscript') {
                     const digest = current.digest;
@@ -328,9 +334,12 @@ Ext.define('PVE.betterdocker.Config', {
         const properties = id => ({ xtype: 'pveBetterDockerPendingProperties', itemId: id, ownerPanel: me });
         const settingKeys = { Memory: ['memory', 'swap'], Swap: ['swap', 'memory'], 'CPU limit': ['cpus'],
             'CPU units': ['cpuunits'], 'PID limit': ['pids'], 'Container disk limit': ['disk'],
-            'DNS servers': ['dns'], 'Search domains': ['dns_search'], 'Restart policy': ['restart'] };
+            'DNS servers': ['dns'], 'Search domains': ['dns_search'], 'Restart policy': ['restart'], Security: ['user', 'read_only', 'cap_drop', 'no_new_privileges', 'apparmor'] };
         const pendingRow = (key, values, pending) => {
             const format = values => ({
+                Security: [values.user ? 'user=' + values.user : '', values.read_only ? translate('Read-only filesystem') : '',
+                    (values.cap_drop || []).length ? 'cap_drop=' + values.cap_drop.join(',') : '', values.no_new_privileges ? translate('No new privileges') : '',
+                    values.apparmor ? 'apparmor=' + values.apparmor : ''].filter(Boolean).join('; ') || translate('Docker default'),
                 Memory: values.memory ? Proxmox.Utils.format_size(values.memory * 1024 * 1024) : 'Unlimited',
                 Swap: values.memory ? values.swap === -1 ? translate('Unlimited') : Proxmox.Utils.format_size(values.swap * 1024 * 1024) : 'Docker default',
                 'CPU limit': values.cpus || 'Unlimited', 'CPU units': values.cpuunits || 'Docker default',
@@ -402,10 +411,11 @@ Ext.define('PVE.betterdocker.Config', {
             card('Services', 'services', 'cubes', [grid('serviceGrid', [
                 { text: translate('Service'), dataIndex: 'service' }, { text: translate('Instance'), dataIndex: 'name' },
                 { text: translate('Image'), dataIndex: 'image' }, { text: translate('Published ports'), dataIndex: 'ports' }, { text: translate('Status'), dataIndex: 'state', renderer: value => Ext.htmlEncode(statusText(value)) },
-                { text: translate('Health'), dataIndex: 'health', renderer: value => Ext.htmlEncode(translate(value === 'none' ? 'No healthcheck' : value)) },
+                { text: translate('Health'), dataIndex: 'health', renderer: value => Ext.htmlEncode(translate(({ none: 'No healthcheck', inactive: 'Inactive', healthy: 'healthy', unhealthy: 'unhealthy', starting: 'starting' })[value] || value)) },
+                { text: translate('AppArmor profile'), dataIndex: 'apparmor', renderer: value => Ext.htmlEncode(value || Proxmox.Utils.noneText) },
                 { text: translate('Restarts'), dataIndex: 'restarts', width: 85, flex: 0 },
                 { text: translate('Exit code'), dataIndex: 'exitcode', width: 85, flex: 0 },
-            ], ['id', 'name', 'service', 'image', 'ports', 'state', 'health', 'restarts', 'exitcode'])],
+            ], ['id', 'name', 'service', 'image', 'ports', 'state', 'health', 'apparmor', 'restarts', 'exitcode'])],
                 ['start', 'shutdown', 'reboot', 'force-stop'].map(verb => ({ text: translate({ start: 'Start', shutdown: 'Shutdown', reboot: 'Restart', 'force-stop': 'Stop' }[verb]),
                     itemId: 'service-' + verb, disabled: true, handler: () => {
                         const selected = me.down('#serviceGrid').getSelectionModel().getSelection()[0];
@@ -426,6 +436,10 @@ Ext.define('PVE.betterdocker.Config', {
                         const record = me.down('#serviceGrid').getSelectionModel().getSelection()[0];
                         me.selectById('logs'); const view = me.down('#logs');
                         if (record && view) { view.setTarget(record.get('service'), record.get('id')); }
+                    } }, { text: translate('Update images'), bdWrite: true, bdScope: 'images', handler: () => {
+                        if (!can('images') || locked() || current.template || current.ha?.managed) { return; }
+                        openEditor(me, 'images', () => Ext.create('PVE.betterdocker.ImageUpdate', { ownerPanel: me, apiUrl: url, nodename: info.node,
+                            services: current.services, digest: current.digest, stopped: !current.containers.some(c => ['running', 'restarting', 'paused'].includes(c.state)) }));
                     } }]), { layout: 'fit' }),
             card('Resources', 'resources', 'cube', [properties('resourceGrid')],
                 [{ text: translate('Edit'), itemId: 'resourceEdit', disabled: true, handler: () => {

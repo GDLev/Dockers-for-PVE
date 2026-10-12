@@ -204,6 +204,7 @@ done
 for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     TARGETS+=("/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")")
 done
+TARGETS+=(/usr/local/lib/betterdocker/service_security.py)
 TARGETS+=(/usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py /usr/local/lib/betterdocker/rrd.pl)
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -260,6 +261,7 @@ done
 for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     install -m 0644 "$source" "/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")"
 done
+install -m 0644 "$PROJECT_DIR/scripts/service_security.py" /usr/local/lib/betterdocker/service_security.py
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
 install -d -m 0755 /usr/share/perl5/PVE/CLI
 install -m 0644 "$PROJECT_DIR/backend/PVE/CLI/dct.pm" /usr/share/perl5/PVE/CLI/dct.pm

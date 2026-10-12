@@ -20,7 +20,7 @@ from urllib.parse import quote
 from dctlib import projects as worker
 
 CONFIG_FILES = ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json',
-                'settings.json', 'pending.json', 'pending-network.json', 'notes.txt', 'limits.json')
+                'images.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt', 'limits.json')
 
 
 def read(path):
@@ -229,7 +229,8 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
                     worker.run(['docker', 'unpause', cid], capture_output=True)
                 state['paused'] = []
             write(path, state)
-            worker.run(['docker', 'image', 'save', '-o', str(folder / 'images.tar'), *state['tags']], timeout=86400)
+            from dctlib.images import saved_images
+            worker.run(['docker', 'image', 'save', '-o', str(folder / 'images.tar'), *state['tags'], *saved_images(worker.ROOT / identifier)], timeout=86400)
             os.chmod(folder / 'images.tar', 0o600)
             write(folder / 'containers.json', containers)
             if worker.node_runtime.load().rootless:
@@ -409,6 +410,8 @@ def adapted_state(folder, identifier, address):
 def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False, trusted_hook=False, live_firewall=None):
     folder = Path(folder)
     manifest = check_state(folder)
+    import service_security
+    service_security.check(read(folder / 'configuration' / 'compose.runtime.json'), worker.node_runtime.load())
     check_portable_networks(read(folder / 'configuration' / 'compose.runtime.json'))
     worker.project_id(identifier)
     if not worker.trusted_management():

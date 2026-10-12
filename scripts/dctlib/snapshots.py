@@ -189,7 +189,7 @@ def snapshot_mounts(identifier, containers, allow_missing=False):
             if mount['Type'] == 'bind':
                 if source.is_symlink() or not source.resolve().is_relative_to(folder.resolve()) or source.resolve() == folder.resolve():
                     raise ValueError('Snapshots require project-owned writable mounts; external host paths are not supported')
-                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'settings.json', 'pending.json', 'pending-network.json', 'storage.json'):
+                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'images.json', 'settings.json', 'pending.json', 'pending-network.json', 'storage.json'):
                     raise ValueError('Deployment files cannot also be writable application mounts')
             elif mount['Type'] == 'volume':
                 volume = json.loads(worker.capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
@@ -395,7 +395,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             mounts = [entry for entry in mounts if Path(entry['source']) != point]
         files = temporary / 'configuration'
         files.mkdir(mode=0o700)
-        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'storage.json', 'notes.txt'):
+        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'settings.json', 'pending.json', 'storage.json', 'notes.txt'):
             source = worker.ROOT / identifier / filename
             if source.exists():
                 shutil.copy2(source, files / filename)
@@ -417,7 +417,8 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             container['SnapshotTag'] = tag
         if resume:
             resume()
-        worker.run(['docker', 'image', 'save', '-o', str(temporary / 'images.tar'), *tags], timeout=86400)
+        from .images import saved_images
+        worker.run(['docker', 'image', 'save', '-o', str(temporary / 'images.tar'), *tags, *saved_images(worker.ROOT / identifier)], timeout=86400)
         os.chmod(temporary / 'images.tar', 0o600)
         network_names = sorted({network for container in containers for network in container.get('NetworkSettings', {}).get('Networks', {})})
         networks = json.loads(worker.capture(['docker', 'network', 'inspect', *network_names])) if network_names else []
@@ -468,6 +469,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
                 worker.safe_bind(mount['source'], identifier)
         if (folder / 'networks.json').exists():
             worker.validate_delegated_networks(json.loads((folder / 'networks.json').read_text()))
+    node_runtime.check_resources(json.loads((configs / 'compose.runtime.json').read_text()))
     worker.project_limits.check_directory(worker.ROOT / identifier, json.loads((configs / 'compose.runtime.json').read_text()))
     worker.project_limits.check_containers(saved, worker.project_limits.load(worker.ROOT / identifier))
     before_storage = worker.storage_config(identifier)
@@ -568,7 +570,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
                 else:
                     os.unlink(name, dir_fd=fd)
         node_runtime.restore_data(folder / entry['copy'], target, runner=worker.run)
-    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt'):
+    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt'):
         source, target = configs / filename, project / filename
         if source.exists():
             shutil.copy2(source, target)
@@ -623,6 +625,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
     for filename in ('network-transaction.json', 'network-reconcile.json', 'network-resume.json'):
         (project / filename).unlink(missing_ok=True)
     (project / 'snapshot-transaction.json').unlink(missing_ok=True)
+    (project / 'image-update.json').unlink(missing_ok=True)
     worker.refresh(node)
     if replaced_disk:
         replaced_disk.unlink()
@@ -661,6 +664,9 @@ def project_snapshot(identifier, node, verb, name, description=''):
                 state['current'] = parent
             shutil.rmtree(folder)
             worker.snapshot_tree_write(identifier, state)
+            from .images import state as image_state
+            if image_state(worker.ROOT / identifier).get('recovery') == name:
+                (worker.ROOT / identifier / 'image-update.json').unlink(missing_ok=True)
             print('Snapshot removed: ' + name)
         elif verb == 'restore':
             # LXC validates the target, stops the guest, then rolls back without another snapshot.

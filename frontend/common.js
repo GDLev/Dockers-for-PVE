@@ -196,7 +196,7 @@ const task = response => {
     response.dockerTaskVisible = true;
     return Ext.create('Proxmox.window.TaskViewer', { autoShow: true, upid: response.result.data });
 };
-const dockerTaskLabels = { create: 'Create', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
+const dockerTaskLabels = { imagepreview: 'Preview images', imageupdate: 'Update images', create: 'Create', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
     diskdelete: 'Remove disk', restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Destroy', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Delete Snapshot', restore: 'Restore', clone: 'Clone', template: 'Convert to template', migrate: 'Migrate' };
 const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
 Object.entries(dockerTaskLabels).forEach(([action, label]) => {
@@ -217,7 +217,7 @@ const guestActions = (info, state, pendingTask) => {
     const template = Boolean(data.template);
     const running = Boolean(data.active_containers || data.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state)) ||
         ['running', 'partial'].includes(data.status));
-    const busy = Boolean(pendingTask || data.operation?.active || data.migration);
+    const busy = Boolean(pendingTask || data.operation?.active || data.migration || data.image_update?.phase === 'applying');
     const ha = Boolean(state ? data.ha?.managed : data.hastate && data.hastate !== 'unmanaged');
     const override = !ha && !data.operation?.service && Boolean(data.capabilities?.overrule_shutdown);
     const pendingNetwork = Boolean(data.pending_network && Object.keys(data.pending_network).length);

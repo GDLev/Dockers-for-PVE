@@ -345,6 +345,15 @@ def summaries():
     return results
 
 
+def health_state(container):
+    test = (container['Config'].get('Healthcheck') or {}).get('Test') or []
+    if not test or test[0] == 'NONE':
+        return 'none'
+    if container['State']['Status'] != 'running':
+        return 'inactive'
+    return (container['State'].get('Health') or {}).get('Status', 'starting')
+
+
 def container_records(identifier):
     ids = capture(['docker', 'ps', '-aq', '--filter', 'label=betterdocker.id=' + identifier]).split()
     if not ids:
@@ -361,7 +370,8 @@ def container_records(identifier):
                         'state': item['State']['Status'], 'started': item['State'].get('StartedAt', ''),
                         'image': item['Config']['Image'], 'pid': item['State'].get('Pid', 0),
                         'stop_signal': item['Config'].get('StopSignal') or 'SIGTERM',
-                        'health': item['State'].get('Health', {}).get('Status', 'none'),
+                        'health': health_state(item),
+                        'apparmor': item.get('AppArmorProfile', ''),
                         'restarts': item.get('RestartCount', 0), 'exitcode': item['State'].get('ExitCode', 0)})
     return records
 
@@ -396,6 +406,8 @@ def configuration_digest(directory, deployment, protection=False, tags='', lifec
     # Runtime files include assigned IPs and Docker state, not source configuration.
     state = {'deployment': deployment, 'settings': load_settings(directory),
              'storage': json.loads((directory / 'storage.json').read_text()) if (directory / 'storage.json').exists() else None}
+    if (directory / 'images.json').exists():
+        state['images'] = json.loads((directory / 'images.json').read_text())
     if (directory / 'limits.json').exists():
         state['project_limits'] = project_limits.load(directory)
     if lifecycle:
@@ -768,6 +780,10 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
         raise ValueError('DCT migration is in progress; recover it before another operation')
     if info.get('template') and name in ('update', 'settings', 'network', 'snapshot-restore'):
         raise ValueError('A DCT template is immutable; clone it before changing its deployment')
+    from .images import state as image_state
+    image_update = image_state(ROOT / identifier)
+    if image_update.get('phase') == 'applying' and name not in ('snapshot-restore', 'snapshot-edit', 'force-stop'):
+        raise ValueError('Interrupted image update: roll back snapshot ' + image_update['recovery'])
     folder = ROOT.parent / 'operations'
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (folder / (identifier + '.lock')).open('w') as handle:
@@ -982,11 +998,22 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['storage-volume-state', 'delete-storage-volume', 'project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['image-state', 'image-preview', 'image-apply', 'storage-volume-state', 'delete-storage-volume', 'project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
-    if args.operation == 'project-limits':
+    if args.operation == 'image-state':
+        detail(*values)
+        from .images import state
+        print(json.dumps(state(ROOT / values[0])))
+    elif args.operation in ('image-preview', 'image-apply'):
+        from . import images
+        with operation(values[0], 'update'):
+            if args.operation == 'image-preview':
+                images.preview(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3])
+            else:
+                images.apply(*values)
+    elif args.operation == 'project-limits':
         if len(values) > 2:
             with operation(values[0], 'settings'):
                 result = project_limit_config(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3] if len(values) > 3 else None)

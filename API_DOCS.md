@@ -24,6 +24,9 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | GET / PUT | `G/network` | Endpoint settings, pending changes and firewall flag. PUT `revert=1` with `digest` to discard pending network changes. |
 | GET / PUT | `G/pending` | Service effective/pending values. PUT `service`, comma-separated `revert` keys and `digest` to discard selected changes. |
 | PUT | `G/settings` | Service settings; send `service`, JSON-encoded `settings` and `digest`. |
+| POST | `G/images/preview` | Pull images and prepare a preview; send JSON-encoded `images` mapping service names to image references, plus `digest`. |
+| GET | `G/images` | Read the prepared image IDs, token and recovery state. |
+| POST | `G/images` | Update stopped services; send preview `token`, `digest` and a new `recovery` snapshot name. Requires configuration, snapshot and rollback privileges. |
 | POST | `G/action` | `action`: `start`, `shutdown`, `force-stop` or `reboot`. Optional `timeout` in seconds. |
 | POST | `G/migrate` | Move to `target`; running DCTs require `restart=1`. Optional `storage`, `timeout` and `digest`. HA uses native relocation. |
 | POST | `G/clone` | Clone with `newid`, JSON-encoded destination `deployment`, optional `pool`, `storage` and `digest`. |
@@ -172,3 +175,13 @@ curl --fail --silent --show-error -X PUT \
 ```
 
 Use the returned task ID to follow completion. To disconnect the interface, PUT `net=net1`, `link_down=1` and a fresh digest. To remove it, send `delete=1` instead.
+
+## Service security and image updates
+
+PUT `G/settings` with `service`, `digest` and a JSON-encoded `settings` object. Security fields are `user` (name or UID[:GID]), `read_only` (boolean), `cap_drop` (array), `no_new_privileges` (boolean) and `apparmor` (profile name, or an empty string for Docker defaults). Security edits require `VM.Config.Options`; running services keep them pending until recreated after stopping. Recreation discards files in the container writable layer, so persistent application data belongs in volumes. Writable volumes remain writable unless their own mount is read-only. Clearing `user` restores the image's default user.
+
+AppArmor requires rootful Docker and an enabled host AppArmor module. Custom profiles must already be loaded in enforce mode on every destination node. The extension does not install profiles. Guest administrators can use `docker-default` and `no-new-privileges`; custom profiles and `unconfined` require node administrator access. `/management` reports available profiles and the applied profile per container.
+
+To update images, POST `G/images/preview` with `images={"web":"nginx:stable"}` and the current configuration digest. Wait for the returned task, then GET `G/images` to compare current and candidate image IDs. Pulling does not recreate services. Stop the DCT and apply or revert pending settings, then POST `G/images` with the preview's `token`, `digest` and a new snapshot name in `recovery`. Previews expire after one hour and reject changed configurations or containers.
+
+The update creates that snapshot and recreates only changed services using immutable local image IDs. It leaves the DCT stopped. Start it and check its healthchecks. Rollback uses the normal snapshot endpoint and restores both containers and captured data, discarding data changes made since the snapshot. A failed or interrupted update requires this rollback before another update or Start. Recovery snapshots remain until explicitly removed. Existing snapshot ownership and storage restrictions apply.

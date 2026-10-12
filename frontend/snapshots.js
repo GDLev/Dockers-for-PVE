@@ -130,7 +130,7 @@ Ext.define('PVE.betterdocker.Snapshots', {
         const me = this, vm = me.getViewModel(), owner = me.ownerPanel, data = owner.snapshotState;
         const unlocked = Boolean(data && !data.operation?.active && !data.migration && !owner.pendingTask);
         const supported = Boolean(data?.containers?.length && data.containers.length === data.expected && data.containers.every(item => ['created', 'exited', 'running'].includes(item.state)));
-        vm.set('snapshotAllowed', unlocked && Boolean(data?.capabilities?.snapshot));
+        vm.set('snapshotAllowed', unlocked && data?.image_update?.phase !== 'applying' && Boolean(data?.capabilities?.snapshot));
         vm.set('rollbackAllowed', unlocked && !data.template && !data.ha?.managed && Boolean(data?.capabilities?.rollback));
         vm.set('snapshotFeature', supported);
     },

@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 import runtime as node_runtime
+import service_security
 
 LOG_DEFAULTS = {'max-size': '10m', 'max-file': '3'}
 
@@ -90,12 +91,13 @@ def validate_delegated_config(config, identifier):
                   'init tty stdin_open read_only tmpfs cap_drop cpus cpu_shares cpu_period cpu_quota '
                   'mem_limit mem_reservation memswap_limit mem_swappiness pids_limit ulimits dns dns_search '
                   'dns_opt shm_size deploy logging pull_policy platform attach container_name name '
-                  'blkio_config oom_score_adj oom_kill_disable storage_opt'.split())
+                  'blkio_config oom_score_adj oom_kill_disable storage_opt security_opt'.split())
     if not isinstance(config, dict) or set(config) - {'name', 'version', 'services', 'volumes', 'networks'}:
         raise ValueError('Delegated configuration contains unsupported resources')
     for service in config.get('services', {}).values():
         if not isinstance(service, dict) or set(service) - allowed:
             raise ValueError('Delegated configuration contains unsafe or unsupported service options')
+        service_security.delegated(service_security.options(service))
         validate_oom(service.get('oom_kill_disable', False), service.get('oom_score_adj', 0))
         if service.get('container_name') and not service['container_name'].startswith('bd-' + identifier + '-'):
             raise ValueError('Delegated container names must belong to the project')
@@ -139,9 +141,10 @@ def validate_delegated_config(config, identifier):
 def validate_delegated_containers(containers, identifier):
     for container in containers:
         host = container.get('HostConfig') or {}
+        service_security.delegated(host.get('SecurityOpt') or [])
         validate_oom(host.get('OomKillDisable', False), host.get('OomScoreAdj', 0))
         for key in ('Privileged', 'CapAdd', 'Devices', 'DeviceRequests', 'DeviceCgroupRules',
-                    'VolumesFrom', 'SecurityOpt', 'CgroupParent', 'Cgroup', 'Sysctls', 'ExtraHosts'):
+                    'VolumesFrom', 'CgroupParent', 'Cgroup', 'Sysctls', 'ExtraHosts'):
             if host.get(key):
                 raise ValueError('This deployment requires node administrator access: ' + key)
         for key in ('PidMode', 'IpcMode', 'UTSMode', 'UsernsMode', 'CgroupnsMode'):

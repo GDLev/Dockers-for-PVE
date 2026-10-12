@@ -4,6 +4,7 @@ import json
 import os
 import re
 import runtime as node_runtime
+import service_security
 
 
 def load_settings(directory):
@@ -12,7 +13,7 @@ def load_settings(directory):
 
 
 def validate_settings(value):
-    if not isinstance(value, dict) or set(value) - {'cpus', 'memory', 'swap', 'cpuunits', 'pids', 'dns', 'dns_search', 'restart', 'disk'}:
+    if not isinstance(value, dict) or set(value) - ({'cpus', 'memory', 'swap', 'cpuunits', 'pids', 'dns', 'dns_search', 'restart', 'disk'} | service_security.KEYS):
         raise ValueError('Invalid service settings')
     result = {}
     for key, maximum in [('cpus', 8192), ('memory', 1048576), ('swap', 1048576), ('cpuunits', 262144), ('pids', 4194304)]:
@@ -41,6 +42,7 @@ def validate_settings(value):
     if not isinstance(restart, str) or not re.fullmatch(r'(?:no|always|unless-stopped|on-failure(?::[1-9][0-9]*)?)', restart):
         raise ValueError('Invalid restart policy')
     result['restart'] = restart
+    result.update(service_security.validate(value))
     return result
 
 
@@ -81,6 +83,7 @@ def apply_settings(config, settings):
         service['dns'] = values['dns']
         service['dns_search'] = values['dns_search']
         service['restart'] = values['restart']
+        service_security.apply(service, values)
     return config
 
 
@@ -95,6 +98,7 @@ def service_values(service):
               'restart': service.get('restart', 'no')}
     if service.get('storage_opt', {}).get('size'):
         values['disk'] = worker.disk_mib(service['storage_opt']['size'])
+    values.update(service_security.values(service))
     return values
 
 
@@ -119,6 +123,7 @@ def pending_settings(identifier, node, service):
     if service not in config['services']:
         raise ValueError('Unknown Compose service')
     values = worker.load_settings(directory).get(service, worker.service_values(config['services'][service]))
+    values = dict(service_security.values(config['services'][service]), **values)
     values = dict(values, disk=values.get('disk', 0))
     pending = worker.load_pending(directory).get(service, {})
     return [dict(key=key, value=value, **({'pending': pending[key]} if key in pending else {}))
@@ -134,6 +139,7 @@ def revert_settings(identifier, node, service, keys, digest=None):
         if service not in config['services']:
             raise ValueError('Unknown Compose service')
         values = worker.load_settings(directory).get(service, worker.service_values(config['services'][service]))
+        values = dict(service_security.values(config['services'][service]), **values)
         values = dict(values, disk=values.get('disk', 0))
         names = keys.split(',')
         worker.authorize_config_keys(names)
@@ -160,11 +166,18 @@ def management(identifier, node, shared_stats=None):
     directory = worker.ROOT / identifier
     config = json.loads((directory / 'compose.runtime.json').read_text())
     settings = worker.load_settings(directory)
+    info['security'] = service_security.availability(node_runtime.load())
+    from .images import state as image_state
+    info['image_update'] = image_state(directory)
+    image_path = directory / 'images.json'
+    image_overrides = json.loads(image_path.read_text()) if image_path.exists() else {}
     info['services'] = []
     for name, service in config['services'].items():
         values = worker.service_values(service)
         info['services'].append({'name': name, 'image': service.get('image', ''),
-                                 'settings': settings.get(name, values), 'replicas': service.get('deploy', {}).get('replicas', 1),
+                                 'image_reference': image_overrides.get(name, {}).get('reference', service.get('image', '')) if isinstance(image_overrides.get(name, {}), dict) else service.get('image', ''),
+                                 'settings': dict(values, **settings.get(name, {})), 'replicas': service.get('deploy', {}).get('replicas', 1),
+                                 'healthcheck': bool(service.get('healthcheck') and not service['healthcheck'].get('disable') and (service['healthcheck'].get('test') or ['CMD'])[0] != 'NONE'),
                                  'mounts': service.get('volumes', []), 'ports': service.get('ports', []),
                                  'overridden': name in settings, 'pending': worker.load_pending(directory).get(name, {})})
     if info.get('template'):
@@ -288,6 +301,8 @@ def service_settings(identifier, node, service, values, digest=None):
         worker.apply_settings(candidate, {service: proposed})
         worker.project_limits.check_directory(worker.ROOT / identifier, candidate)
         node_runtime.check_resources(candidate)
+        if not worker.trusted_management():
+            worker.validate_delegated_config(candidate, identifier)
         if 'disk' not in values and not proposed.get('disk'):
             proposed.pop('disk', None)
         worker.authorize_config_keys(key for key in proposed if proposed[key] != effective.get(key))
@@ -306,7 +321,7 @@ def _service_settings(identifier, node, service, values):
     worker.apply_settings(candidate, {service: values})
     worker.project_limits.check_directory(directory, candidate)
     settings = worker.load_settings(directory)
-    current = settings.get(service, worker.service_values(config['services'][service]))
+    current = dict(worker.service_values(config['services'][service]), **settings.get(service, {}))
     pending = worker.load_pending(directory)
     containers = [c for c in worker.container_records(identifier) if c['service'] == service]
     active = any(c['state'] not in ('created', 'exited', 'dead', 'stopped') for c in containers)
@@ -380,7 +395,7 @@ def apply_pending_settings(identifier, node, service=None):
         config = json.loads((directory / 'compose.runtime.json').read_text())
         if name not in config['services']:
             raise ValueError('Unknown Compose service in pending settings')
-        current = worker.load_settings(directory).get(name, worker.service_values(config['services'][name]))
+        current = dict(worker.service_values(config['services'][name]), **worker.load_settings(directory).get(name, {}))
         worker._service_settings(identifier, node, name, worker.validate_settings(dict(current, **changes)))
 
 

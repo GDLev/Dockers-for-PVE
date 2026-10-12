@@ -149,6 +149,7 @@ sub capabilities {
         remove => ($allocate && $safe) ? 1 : 0,
         cpu => $cpu, memory => $memory, network => $network, options => $options, hookscript => $root_user ? 1 : 0,
         settings => ($cpu || $memory || $network || $options || $disk) ? 1 : 0,
+        images => ($configure && $safe && $granted->('VM.Snapshot') && $granted->('VM.Snapshot.Rollback')) ? 1 : 0,
         snapshot => $granted->('VM.Snapshot'),
         rollback => $granted->('VM.Snapshot.Rollback'),
         power => $granted->('VM.PowerMgmt'),
@@ -448,15 +449,15 @@ sub register_docker_method {
         } else {
             $caps = capabilities($param->{id}, $param->{node});
         }
-        if ($param->{id} && $param->{node} && $name =~ /^(?:update|template|destroy|service_action|settings|set_project_limits|reset_settings|snapshot)$/ &&
+        if ($param->{id} && $param->{node} && $name =~ /^(?:image_preview|image_apply|update|template|destroy|service_action|settings|set_project_limits|reset_settings|snapshot)$/ &&
             ($name ne 'snapshot' || ($param->{action} // '') eq 'restore') && ha_managed($param->{id}, $param->{node})) {
             die "Remove the DCT from HA before changing its deployment, services or persistent state\n";
         }
         my $scope = $name eq 'list' && $param->{diagnostics} ? 'trusted' :
-                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config|project_limits)$/ ? 'audit' :
+                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config|project_limits|image_state)$/ ? 'audit' :
                     $name =~ /^(termproxy|vncwebsocket|logs)$/ ? 'console' :
                     $name =~ /^(storage_limit|storage_config)$/ ? 'disk' :
-                    $name eq 'clone' ? 'clone' : $name eq 'migrate' ? 'migrate' :
+                    $name eq 'image_apply' ? 'images' : $name eq 'clone' ? 'clone' : $name eq 'migrate' ? 'migrate' :
                     $name eq 'template' ? 'template' :
                     ($name eq 'destroy' || ($name eq 'action' && ($param->{action} // '') eq 'delete')) ? 'remove' :
                     ($name eq 'settings' || $name eq 'revert_settings') ? 'settings' :
@@ -477,13 +478,13 @@ sub register_docker_method {
         my $user = $rpc->get_user();
         local $ENV{BETTERDOCKER_TASK_USER} = $user;
         local $ENV{BETTERDOCKER_TRUSTED} = $caps->{trusted} ? '1' : '0';
-        local $ENV{BETTERDOCKER_REQUIRE_SAFE} = (!$caps->{trusted} && ($scope =~ /^(configure|console|disk|clone|migrate|template|remove)$/ || $name eq 'set_network' || $scope eq 'rollback')) ? '1' : '0';
+        local $ENV{BETTERDOCKER_REQUIRE_SAFE} = (!$caps->{trusted} && ($scope =~ /^(configure|images|settings|console|disk|clone|migrate|template|remove)$/ || $name eq 'set_network' || $scope eq 'rollback')) ? '1' : '0';
         # Passed only by this wrapper; the worker checks changed fields under its lock.
         my @keys;
         push @keys, qw(cpus cpuunits) if $caps->{cpu};
         push @keys, qw(memory swap) if $caps->{memory};
         push @keys, qw(dns dns_search bridge ipv4mode cidr hwaddr mtu firewall) if $caps->{network};
-        push @keys, qw(pids restart protection description tags onboot startup) if $caps->{options};
+        push @keys, qw(pids restart protection description tags onboot startup user read_only cap_drop no_new_privileges apparmor) if $caps->{options};
         push @keys, 'hookscript' if $user eq 'root@pam';
         push @keys, 'disk' if $caps->{disk};
         local $ENV{BETTERDOCKER_CONFIG_KEYS} = $caps->{configure} ? '*' : join(',', @keys);

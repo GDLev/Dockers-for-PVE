@@ -196,6 +196,8 @@ def prepare_compose(args, runtime):
 
 def check_resources(config, selected=None):
     selected = selected or load()
+    import service_security
+    service_security.check(config, selected)
     if not selected.rootless:
         return
     path = Path('/sys/fs/cgroup/user.slice') / ('user-' + str(selected.uid) + '.slice') / ('user@' + str(selected.uid) + '.service/cgroup.controllers')
@@ -221,6 +223,10 @@ def run(args, *, delegated=False, **kwargs):
         return subprocess.run(args, **kwargs)
     args = list(args)
     kwargs['env'] = runtime.environment(delegated)
+    if len(args) > 1 and args[1] == 'compose' and not runtime.rootless:
+        for index, word in enumerate(args[:-1]):
+            if word in ('-f', '--file') and Path(args[index + 1]).name == 'compose.runtime.json':
+                check_resources(json.loads(Path(args[index + 1]).read_text()), runtime)
     if runtime.rootless:
         if delegated:
             client = Path(kwargs['env']['DOCKER_CONFIG'])
