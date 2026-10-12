@@ -28,9 +28,17 @@ def saved_images(directory):
     return [value['id'] if isinstance(value, dict) else value for value in (json.loads(path.read_text()) if path.exists() else {}).values()]
 
 
-def inspect(image):
+def inspect(image, platform=None):
     from . import projects as w
-    return json.loads(w.capture(['docker', 'image', 'inspect', image]))[0]
+    command = ['docker', 'image', 'inspect']
+    if platform:
+        command += ['--platform', platform]
+    return json.loads(w.capture(command + [image]))[0]
+
+
+def deployed_image(container):
+    base = (container['Config'].get('Labels') or {}).get('com.docker.compose.image', '')
+    return base if re.fullmatch(r'sha256:[0-9a-f]{64}', base) else container['Image']
 
 
 def preview(identifier, node, changes, digest):
@@ -50,7 +58,9 @@ def preview(identifier, node, changes, digest):
             if not isinstance(image, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,254}', image):
                 raise ValueError('Invalid image reference')
             service = config['services'][name]
-            old = sorted({c['Image'] for c in containers if c['Config']['Labels'].get('com.docker.compose.service') == name})
+            # Filesystem preservation changes the container image ID, while its
+            # deployed base image remains the one recorded by Compose.
+            old = sorted({deployed_image(c) for c in containers if c['Config']['Labels'].get('com.docker.compose.service') == name})
             if not old:
                 old = [inspect(service['image'])['Id']]
             command = ['docker', 'pull']
@@ -58,8 +68,15 @@ def preview(identifier, node, changes, digest):
                 command += ['--platform', service['platform']]
             w.run(command + [image], timeout=1800, capture_output=True)
             candidate = inspect(image)
+            base = candidate['Id']
+            if (candidate.get('Descriptor') or {}).get('mediaType', '') in (
+                    'application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json'):
+                # containerd exposes an index ID by default; Compose records the
+                # platform manifest. Compare like IDs, but pin the usable index.
+                platform = service.get('platform') or '/'.join(filter(None, (candidate['Os'], candidate['Architecture'], candidate.get('Variant'))))
+                base = inspect(image, platform)['Id']
             rows.append({'service': name, 'image': image, 'current': old, 'candidate': candidate['Id'],
-                'digests': candidate.get('RepoDigests') or [], 'changed': old != [candidate['Id']]})
+                'candidate_base': base, 'digests': candidate.get('RepoDigests') or [], 'changed': old != [base]})
         plan = {'token': uuid.uuid4().hex, 'digest': w.detail(identifier, node)['digest'],
                 'created': int(time.time()), 'phase': 'preview', 'changes': rows,
                 'containers': sorted(c['Id'] for c in containers)}

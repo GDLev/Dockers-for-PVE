@@ -41,6 +41,12 @@ def trusted_management():
     return os.environ.get('BETTERDOCKER_TRUSTED', '1') == '1'
 
 
+def owned_local_volume(volume, name, identifier):
+    labels = volume.get('Labels') or {}
+    anonymous = (not labels or set(labels) == {'com.docker.volume.anonymous'}) and re.fullmatch(r'[0-9a-f]{64}', name)
+    return volume.get('Driver') == 'local' and not volume.get('Options') and bool(anonymous or labels.get('com.docker.compose.project') == 'bd-' + identifier)
+
+
 def safe_bind(source, identifier):
     base = (worker.ROOT / worker.project_id(identifier)).resolve()
     path = Path(source)
@@ -50,7 +56,7 @@ def safe_bind(source, identifier):
     # Deployment files contain credentials and must never be writable by a workload.
     if not relative.parts or relative.parts[0] in {
         'limits.json', 'request.json', 'compose.source.yaml', 'compose.runtime.json', '.env',
-        'settings.json', 'pending.json', 'pending-network.json', 'storage.json', 'ha.json', 'snapshots',
+        'settings.json', 'service-defaults.json', 'settings-transaction.json', 'images.json', 'image-update.json', 'pending.json', 'pending-network.json', 'storage.json', 'ha.json', 'snapshots',
         'export-transaction.json', 'notes.txt', 'allocated-volume.json', 'storage.ext4',
         'snapshot-restored.json', 'snapshot-tree.json', 'snapshot-transaction.json',
         'storage-transaction.json', 'network-transaction.json', 'network-resume.json',

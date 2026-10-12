@@ -147,7 +147,7 @@ def compose_base(directory, identifier, filename='compose.runtime.json'):
     return command
 
 
-def prepare(data, identifier, directory, project_directory=None, use_images=True):
+def prepare(data, identifier, directory, project_directory=None, use_images=True, settings=None):
     project_directory = project_directory or directory
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
@@ -180,7 +180,7 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
                     worker.safe_bind(mount.get('source', ''), identifier)
     if not worker.trusted_management():
         worker.validate_delegated_config(config, identifier)
-    worker.apply_settings(config, worker.load_settings(project_directory))
+    worker.apply_settings(config, worker.load_settings(project_directory) if settings is None else settings)
     from .images import overrides
     if use_images:
         overrides(config, project_directory)
@@ -361,35 +361,30 @@ def reset_settings(identifier, node, service, digest=None):
                 worker.save_pending(directory, pending)
             return
         original = (directory / 'compose.runtime.json').read_text()
-        previous = dict(settings)
         settings.pop(service)
         worker.require_stopped([c for c in worker.container_records(identifier) if c['service'] == service])
-        marker = directory / 'snapshot-restored.json'
-        if marker.exists():
-            restored = json.loads(marker.read_text())
-            restored['containers'] = [row['id'] for row in worker.container_records(identifier)]
-            worker.write_json(marker, restored)
-        worker.write_json(directory / 'settings.json', settings)
-        os.chmod(directory / 'settings.json', 0o600)
-        try:
-            with tempfile.TemporaryDirectory(prefix='betterdocker-reset-', dir=worker.ROOT) as folder:
-                staging = Path(folder)
-                worker.prepare(dict(info['deployment'], address=info.get('address') or '0.0.0.0'), identifier, staging, directory)
-                worker.check_protected_layout(info, json.loads(original), json.loads((staging / 'compose.runtime.json').read_text()))
-                os.replace(staging / 'compose.runtime.json', directory / 'compose.runtime.json')
-            worker.run(worker.compose_base(directory, identifier) + ['up', '--no-start', '--no-deps', service], timeout=1800)
-            marker = directory / 'snapshot-restored.json'
-            if marker.exists():
-                restored = json.loads(marker.read_text())
-                restored['containers'] = [row['id'] for row in worker.container_records(identifier)]
-                worker.write_json(marker, restored)
-        except Exception:
-            worker.write_json(directory / 'settings.json', previous)
-            (directory / 'compose.runtime.json').write_text(original)
-            raise
+        with tempfile.TemporaryDirectory(prefix='betterdocker-reset-', dir=worker.ROOT) as folder:
+            staging = Path(folder)
+            worker.prepare(dict(info['deployment'], address=info.get('address') or '0.0.0.0'), identifier, staging, directory, settings=settings)
+            candidate = json.loads((staging / 'compose.runtime.json').read_text())
+            worker.check_protected_layout(info, json.loads(original), candidate)
+        # Only the selected service returns to Compose defaults.
+        config = json.loads(original)
+        config['services'][service] = candidate['services'][service]
         pending = worker.load_pending(directory)
         pending.pop(service, None)
-        worker.save_pending(directory, pending)
+        if any(c['service'] == service for c in worker.container_records(identifier)):
+            from .service_recreate import replace
+            replace(info, service, config, settings, pending)
+        else:
+            worker.write_json(directory / 'compose.runtime.json', config)
+            try:
+                worker.run(worker.compose_base(directory, identifier) + ['up', '--no-start', '--no-deps', service], timeout=1800)
+            except Exception:
+                (directory / 'compose.runtime.json').write_text(original)
+                raise
+            worker.write_json(directory / 'settings.json', settings)
+            worker.save_pending(directory, pending)
         worker.refresh(node)
 
 

@@ -5,7 +5,6 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
-            "Changing security settings recreates the service. Store persistent data in volumes.": "Zmiana zabezpieczeń odtwarza usługę. Dane aplikacji przechowuj w wolumenach.",
             "Preview images": "Podgląd obrazów",
             "Roll back the recovery snapshot": "Przywróć migawkę odzyskiwania",
             "Security": "Zabezpieczenia",

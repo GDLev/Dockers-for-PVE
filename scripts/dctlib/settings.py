@@ -368,21 +368,21 @@ def _service_settings(identifier, node, service, values):
         pending[service] = changed
         worker.save_pending(directory, pending)
         worker.apply_settings(config, {service: values})
-        worker.write_json(runtime, config)
-        try:
-            worker.run(worker.compose_base(directory, identifier) + ['up', '--no-start', '--no-deps', service], timeout=1800)
-        except Exception:
-            runtime.write_text(original)
-            raise
         settings[service] = values
-        worker.write_json(directory / 'settings.json', settings)
         pending.pop(service, None)
-        worker.save_pending(directory, pending)
-        marker = directory / 'snapshot-restored.json'
-        if marker.exists():
-            restored = json.loads(marker.read_text())
-            restored['containers'] = [row['id'] for row in worker.container_records(identifier)]
-            worker.write_json(marker, restored)
+        if containers:
+            from .service_recreate import replace
+            replace({'id': identifier}, service, config, settings, pending)
+        else:
+            # Initial creation has no writable layer to preserve.
+            worker.write_json(runtime, config)
+            try:
+                worker.run(worker.compose_base(directory, identifier) + ['up', '--no-start', '--no-deps', service], timeout=1800)
+            except Exception:
+                runtime.write_text(original)
+                raise
+            worker.write_json(directory / 'settings.json', settings)
+            worker.save_pending(directory, pending)
     worker.refresh(node)
 
 

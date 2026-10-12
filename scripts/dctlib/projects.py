@@ -359,8 +359,17 @@ def container_records(identifier):
     if not ids:
         return []
     inspected = json.loads(capture(['docker', 'inspect', *ids]))
+    recovery = ROOT / identifier / 'settings-transaction.json'
+    backups = {}
+    if recovery.exists():
+        journal = json.loads(recovery.read_text())
+        from .service_recreate import validate_journal
+        validate_journal(identifier, journal)
+        backups = {entry['source']['Id']: entry['backup'] for entry in journal['entries']}
     records = []
     for item in inspected:
+        if backups.get(item['Id']) == item['Name'].lstrip('/'):
+            continue
         labels = item['Config'].get('Labels') or {}
         if labels.get('betterdocker.id') != identifier:
             continue
@@ -574,7 +583,7 @@ def refresh(node):
     # Rebinding may recreate containers, so refresh the state list afterwards.
     projects = [info for info in summaries() if info['node'] == node and not info.get('ha_recovery')]
     for info in projects:
-        if operation_state(info['id']).get('active'):
+        if operation_state(info['id']).get('active') or (ROOT / info['id'] / 'settings-transaction.json').exists():
             continue
         with locked(info['id']):
             if not (METADATA / (info['id'] + '.json')).exists():
@@ -604,7 +613,7 @@ def refresh(node):
     entries = json.loads('[' + ','.join(capture(['docker', 'ps', '-a', '--filter', 'label=betterdocker.id',
                                               '--format', '{{json .}}']).splitlines()) + ']')
     for info in projects:
-        if operation_state(info['id']).get('active'):
+        if operation_state(info['id']).get('active') or (ROOT / info['id'] / 'settings-transaction.json').exists():
             continue
         with locked(info['id']):
             if not (METADATA / (info['id'] + '.json')).exists():
@@ -711,6 +720,8 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
         if operation in ('start', 'restart', 'reboot'):
             restore_restart_policy(identifier)
         if operation == 'delete':
+            from .service_recreate import prune_images
+            prune_images(identifier)
             # Reserve the metadata until the owned alias is successfully released.
             remove_network(info)
             if storage_config(identifier):
@@ -835,6 +846,9 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
         write_json(path, state)
         os.chmod(path, 0o600)
         try:
+            from .service_recreate import recover as recover_settings
+            with locked(identifier):
+                recover_settings(identifier)
             if os.environ.get('BETTERDOCKER_REQUIRE_SAFE') == '1' and (ROOT / identifier / 'compose.runtime.json').exists():
                 delegated_access(identifier, current_node())
             yield handle

@@ -30,6 +30,11 @@ class ModuleLoadingTests(unittest.TestCase):
                 )
                 subprocess.run([sys.executable, '-c', code], cwd=ROOT, check=True, capture_output=True)
 
+    def test_preservation_helpers_load_before_dispatcher(self):
+        subprocess.run([sys.executable, '-c',
+            'import sys; sys.path.insert(0,"scripts"); from dctlib import service_recreate, rebind, projects; '
+            'assert service_recreate.preserved_body is rebind.preserved_body'], cwd=ROOT, check=True, capture_output=True)
+
     def test_command_entry_point_loads_without_host_operations(self):
         result = subprocess.run(
             [sys.executable, 'scripts/provision.py', '--help'], cwd=ROOT,

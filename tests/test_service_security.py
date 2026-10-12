@@ -75,6 +75,39 @@ class ServiceSecurityTests(unittest.TestCase):
             self.assertNotEqual(old, w.configuration_digest(directory, {'name': 'test'}))
             self.assertEqual(images.saved_images(directory), ['sha256:' + 'a' * 64])
 
+    def test_preserved_replica_layers_do_not_look_like_base_image_updates(self):
+        identifier, base = 'a'*32, 'sha256:'+'b'*64
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); directory = root/identifier; directory.mkdir()
+            w.write_json(directory/'compose.runtime.json', {'services': {'app': {'image': 'busybox:1.37'}}})
+            containers = [{'Id': str(i)*64, 'Image': 'sha256:'+str(i)*64, 'Config': {'Labels': {
+                'com.docker.compose.service': 'app', 'com.docker.compose.image': base}}} for i in (1,2)]
+            with patch.object(w, 'ROOT', root), patch.object(w, 'locked'), patch.object(w, 'detail', return_value={'digest': 'digest'}), \
+                    patch.object(w, 'assert_configuration_digest'), patch.object(w, 'snapshot_containers', return_value=containers), \
+                    patch.object(w, 'run'), patch.object(images, 'inspect', return_value={'Id': base}):
+                result = images.preview(identifier,'pve',{'app':'busybox:1.37'},'digest')
+            self.assertFalse(result['changes'][0]['changed'])
+            self.assertEqual(result['changes'][0]['current'], [base])
+
+    def test_preview_compares_platform_manifests_and_pins_the_image_index(self):
+        identifier, base, index = 'a'*32, 'sha256:'+'b'*64, 'sha256:'+'c'*64
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); directory = root/identifier; directory.mkdir()
+            w.write_json(directory/'compose.runtime.json', {'services': {'app': {'image': 'busybox:1.37'}}})
+            containers = [{'Id': 'd'*64, 'Image': 'sha256:'+'e'*64, 'Config': {'Labels': {
+                'com.docker.compose.service': 'app', 'com.docker.compose.image': base}}}]
+            def inspect(image, platform=None):
+                return {'Id': base} if platform else {'Id': index, 'Os': 'linux', 'Architecture': 'amd64',
+                    'Descriptor': {'mediaType': 'application/vnd.oci.image.index.v1+json'}}
+            with patch.object(w, 'ROOT', root), patch.object(w, 'locked'), patch.object(w, 'detail', return_value={'digest': 'digest'}), \
+                    patch.object(w, 'assert_configuration_digest'), patch.object(w, 'snapshot_containers', return_value=containers), \
+                    patch.object(w, 'run'), patch.object(images, 'inspect', side_effect=inspect):
+                result = images.preview(identifier,'pve',{'app':'busybox:1.37'},'digest')
+            change = result['changes'][0]
+            self.assertFalse(change['changed'])
+            self.assertEqual(change['candidate_base'], base)
+            self.assertEqual(change['candidate'], index)
+
     def test_stale_preview_never_recreates_containers(self):
         with tempfile.TemporaryDirectory() as folder:
             identifier = 'a' * 32

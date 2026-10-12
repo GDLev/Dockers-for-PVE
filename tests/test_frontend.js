@@ -928,6 +928,17 @@ function loadDigest(digest, capabilities = { configure: 1, power: 1 }, extra = {
     }
     throw new Error('management refresh did not settle');
 }
+// Preserved filesystem images retain the deployed reference in the service list.
+let preservedServiceRows;
+const previousImageDigestDown = digestPanel.down;
+const preservedServiceGrid = { setRows(rows) { preservedServiceRows = rows; }, getSelectionModel() { return { getSelection: () => [] }; } };
+digestPanel.down = function (id) { return id === '#serviceGrid' ? preservedServiceGrid : previousImageDigestDown.call(this, id); };
+loadDigest(editorDigest, undefined, {
+    services: [{ name: 'app', image: 'sha256:' + 'b'.repeat(64), image_reference: 'nginx:stable', ports: [], mounts: [], settings: { cpus: 0, memory: 0, swap: 0, cpuunits: 0, pids: 0, dns: [], dns_search: [], restart: 'no' } }],
+    containers: [{ id: 'preserved', service: 'app', image: 'sha256:' + 'c'.repeat(64), state: 'stopped' }],
+});
+assert.equal(preservedServiceRows[0].image, 'nginx:stable');
+digestPanel.down = previousImageDigestDown;
 for (const [group, key] of [['resources', 'Memory'], ['dns', 'DNS servers'], ['options', 'Restart policy'], ['resources', 'Project data disk']]) {
     loadDigest(editorDigest, undefined, key === 'Project data disk' ? { containers: [] } : {});
     const grid = digestPanel.items.find(item => item.itemId === group).items[0];

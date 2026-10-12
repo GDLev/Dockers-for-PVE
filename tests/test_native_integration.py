@@ -89,7 +89,7 @@ class NativeIntegrationTests(unittest.TestCase):
                 worker.write_json(directory / 'settings.json', {'web': VALUES})
                 worker.write_json(directory / 'compose.runtime.json', {'services': {'web': {'cpus': 1.5}}})
                 original = (directory / 'compose.runtime.json').read_text()
-                def prepare(data, identifier, staging, project_directory):
+                def prepare(data, identifier, staging, project_directory, settings=None):
                     worker.write_json(staging / 'compose.runtime.json', {'services': {'web': {}}})
                 with patch.object(worker, 'ROOT', root), patch.object(worker, 'locked'), \
                      patch.object(worker, 'detail', return_value={'deployment': BASE}), \

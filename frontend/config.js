@@ -74,8 +74,13 @@ Ext.define('PVE.betterdocker.Config', {
             if (tags) { tags.loadTags(current.tags || ''); tags.canEdit = can('options'); if (tags.getViewModel) { tags.getViewModel().set('canEdit', can('options') && !locked()); } }
             rows('serviceGrid', current.containers.concat(current.services.filter(service => !current.containers.some(container => container.service === service.name)).map(service => ({
                 id: 'service:' + service.name, name: '', service: service.name, image: service.image, state: 'stopped', health: service.healthcheck ? 'inactive' : 'none', restarts: 0, exitcode: '',
-            }))).map(container => Object.assign({}, container, { ports: (current.services.find(service => service.name === container.service)?.ports || [])
-                .map(port => port.published + ':' + port.target + '/' + port.protocol).join(', ') })));
+            }))).map(container => {
+                const configured = current.services.find(service => service.name === container.service);
+                return Object.assign({}, container, {
+                    image: configured?.image_reference || configured?.image || container.image,
+                    ports: (configured?.ports || []).map(port => port.published + ':' + port.target + '/' + port.protocol).join(', '),
+                });
+            }));
             selectedService = service() ? selectedService : (current.services[0] || {}).name;
             me.query('[itemId=serviceSelector]').filter(combo => visible(combo.up('panel'))).forEach(combo => {
                 syncStore(combo.getStore(), current.services.map(item => ({ name: item.name })), row => row.name);

@@ -18,9 +18,10 @@ import uuid
 from urllib.parse import quote
 
 from dctlib import projects as worker
+from dctlib.policy import owned_local_volume
 
 CONFIG_FILES = ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json',
-                'images.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt', 'limits.json')
+                'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt', 'limits.json')
 
 
 def read(path):
@@ -63,13 +64,11 @@ def owned_mounts(identifier, containers):
             if mount['Type'] == 'bind':
                 if path.is_symlink() or not path.resolve().is_relative_to(base.resolve()) or path.resolve() == base.resolve():
                     raise ValueError('Portable state requires project-owned bind mounts')
-                if path.name in CONFIG_FILES + ('storage.json', 'storage.ext4'):
+                if path.name in CONFIG_FILES + ('settings-transaction.json', 'storage.json', 'storage.ext4'):
                     raise ValueError('Deployment files cannot be application mounts')
             elif mount['Type'] == 'volume':
                 volume = json.loads(worker.capture(['docker','volume','inspect',mount['Name']]))[0]
-                labels = volume.get('Labels') or {}
-                anonymous = (not labels or set(labels) == {'com.docker.volume.anonymous'}) and re.fullmatch(r'[0-9a-f]{64}', mount['Name'])
-                if volume.get('Driver') != 'local' or volume.get('Options') or not (anonymous or labels.get('com.docker.compose.project') == 'bd-'+identifier):
+                if not owned_local_volume(volume, mount['Name'], identifier):
                     raise ValueError('Portable state requires owned local Docker volumes')
                 users = set(worker.capture(['docker','ps','--no-trunc','-aq','--filter','volume='+mount['Name']]).split())
                 if users - owned or path.resolve() != Path(volume['Mountpoint']).resolve():
@@ -166,6 +165,8 @@ def check_portable_networks(runtime):
 def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_journal=False, digest=None):
     folder = Path(folder)
     with operation(identifier, 'backup', lock_fd), worker.locked(identifier):
+        from dctlib.service_recreate import recover as recover_settings
+        recover_settings(identifier)
         info = worker.detail(identifier, node)
         if digest:
             worker.assert_configuration_digest(identifier, node, digest)

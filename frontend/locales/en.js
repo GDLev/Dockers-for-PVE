@@ -4,7 +4,6 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
-            "Changing security settings recreates the service. Store persistent data in volumes.": "Changing security settings recreates the service. Store persistent data in volumes.",
             "Preview images": "Preview images",
             "Roll back the recovery snapshot": "Roll back the recovery snapshot",
             "Security": "Security",

@@ -111,7 +111,7 @@ class ManagementTests(unittest.TestCase):
                 (directory / 'compose.runtime.json').write_text(json.dumps({'services': {'web': {}, 'db': {}}}))
                 with patch.object(worker, 'ROOT', root), patch.object(worker, 'locked') as lock, \
                      patch.object(worker, 'detail', return_value={}), patch.object(worker, 'refresh'), \
-                     patch.object(worker, 'container_records', return_value=[{'service': 'web', 'state': state}]), \
+                     patch.object(worker, 'container_records', return_value=[{'service': 'web', 'state': state}] if state == 'running' else []), \
                      patch.object(worker, 'update_live_containers'), patch.object(worker, 'run') as run:
                     if state == 'running':
                         worker.service_settings(ID, 'pve', 'web', VALUES)

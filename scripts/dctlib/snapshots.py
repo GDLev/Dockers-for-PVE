@@ -178,6 +178,7 @@ def snapshot_quiesce(identifier):
 
 def snapshot_mounts(identifier, containers, allow_missing=False):
     """Resolve actual Docker mounts, never assume that a Compose volume is private."""
+    from .policy import owned_local_volume
     folder = worker.ROOT / identifier
     owned = {row['Id'] for row in containers}
     sources = {}
@@ -189,11 +190,11 @@ def snapshot_mounts(identifier, containers, allow_missing=False):
             if mount['Type'] == 'bind':
                 if source.is_symlink() or not source.resolve().is_relative_to(folder.resolve()) or source.resolve() == folder.resolve():
                     raise ValueError('Snapshots require project-owned writable mounts; external host paths are not supported')
-                if source.name in ('storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'images.json', 'settings.json', 'pending.json', 'pending-network.json', 'storage.json'):
+                if source.name in ('settings-transaction.json', 'storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'pending-network.json', 'storage.json'):
                     raise ValueError('Deployment files cannot also be writable application mounts')
             elif mount['Type'] == 'volume':
                 volume = json.loads(worker.capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
-                if volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                if not owned_local_volume(volume, mount['Name'], identifier):
                     raise ValueError('Snapshots require local volumes owned by this DCT')
                 users = set(worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + mount['Name']]).split())
                 if users - owned:
@@ -395,7 +396,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             mounts = [entry for entry in mounts if Path(entry['source']) != point]
         files = temporary / 'configuration'
         files.mkdir(mode=0o700)
-        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'settings.json', 'pending.json', 'storage.json', 'notes.txt'):
+        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'storage.json', 'notes.txt'):
             source = worker.ROOT / identifier / filename
             if source.exists():
                 shutil.copy2(source, files / filename)
@@ -453,6 +454,7 @@ def docker_engine(method, path, body):
 
 
 def snapshot_apply(identifier, node, name, check_only=False):
+    from .policy import owned_local_volume
     from urllib.parse import quote
     folder, manifest = worker.snapshot_check(identifier, name)
     current = worker.detail(identifier, node)
@@ -491,7 +493,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
             raise ValueError('Snapshot mount ownership changed')
         if entry['type'] == 'volume':
             volume = json.loads(worker.capture(['docker', 'volume', 'inspect', entry['volume']]))[0]
-            if volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+            if not owned_local_volume(volume, entry['volume'], identifier):
                 raise ValueError('Snapshot volume ownership changed')
             users = set(worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + entry['volume']]).split())
             if users - {row['Id'] for row in existing}:
@@ -570,7 +572,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
                 else:
                     os.unlink(name, dir_fd=fd)
         node_runtime.restore_data(folder / entry['copy'], target, runner=worker.run)
-    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt'):
+    for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt'):
         source, target = configs / filename, project / filename
         if source.exists():
             shutil.copy2(source, target)
@@ -582,9 +584,8 @@ def snapshot_apply(identifier, node, name, check_only=False):
     worker.rebind_runtime(project, metadata['address'])
     created = []
     for container in saved:
-        body = dict(container['Config'])
-        body['Image'] = container['SnapshotImage']
-        body['HostConfig'] = dict(container['HostConfig'])
+        from .rebind import preserved_body
+        body = preserved_body(container, container['SnapshotImage'])
         if saved_storage:
             service_name = (container['Config'].get('Labels') or {}).get('com.docker.compose.service')
             runtime_config = json.loads((project / 'compose.runtime.json').read_text())
@@ -598,11 +599,6 @@ def snapshot_apply(identifier, node, name, check_only=False):
                 binds.append(mount['source'] + ':' + destination + (':ro' if mount.get('read_only') else ':rw'))
                 body['HostConfig']['Mounts'] = [item for item in body['HostConfig'].get('Mounts') or [] if item.get('Target') != destination]
             body['HostConfig']['Binds'] = binds
-        # Keep ephemeral Docker IDs/IP assignments out of create requests.
-        networks = {}
-        for network, endpoint in container.get('NetworkSettings', {}).get('Networks', {}).items():
-            networks[network] = {key: endpoint[key] for key in ('Aliases', 'IPAMConfig', 'Links', 'DriverOpts') if endpoint.get(key)}
-        body['NetworkingConfig'] = {'EndpointsConfig': networks}
         for bindings in (body['HostConfig'].get('PortBindings') or {}).values():
             for binding in bindings or []:
                 if binding.get('HostIp') == current.get('address') or binding.get('HostIp') == json.loads((configs / 'metadata.json').read_text()).get('address'):

@@ -38,7 +38,7 @@ Ext.define('PVE.betterdocker.ImageUpdate', {
                                 request({ url: me.apiUrl + '/images', method: 'GET', success: result => {
                                     if (me.destroyed) { return; }
                                     me.busy = false; plan = result.result.data;
-                                    grid.getStore().loadData(plan.changes.map(row => Object.assign({}, row, { current: row.current.join(', ') })));
+                                    grid.getStore().loadData(plan.changes.map(row => Object.assign({}, row, { current: row.current.join(', '), candidate: row.candidate_base || row.candidate })));
                                     grid.setDisabled(true); this.setDisabled(true); me.formPanel.getForm().isValid();
                                     me.lookup('submitbutton')?.setDisabled(!me.stopped || !plan.changes.some(row => row.changed));
                                 }, failure: release });

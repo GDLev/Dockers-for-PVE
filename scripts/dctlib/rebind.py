@@ -38,24 +38,13 @@ def reconcile(info):
                 entry['created'] = existing['Id']; w.write_json(marker, saved)
                 continue
             w.run(['docker', 'rm', row['Id']], capture_output=True)
-        body = copy.deepcopy(row['Config'])
-        body['Image'] = entry['image']
+        body = preserved_body(row, entry['image'])
         body.setdefault('Labels', {})['betterdocker.rebind'] = row['Id']
-        host = copy.deepcopy(row['HostConfig'])
+        host = body['HostConfig']
         service = body['Labels']['com.docker.compose.service']
         from .endpoints import port_bindings
         host['PortBindings'] = port_bindings(runtime['services'][service].get('ports', [])) if not w.node_runtime.load().rootless else {}
         storage_bindings(host, runtime['services'][service], w.storage_config(info['id']))
-        body['HostConfig'] = host
-        body['NetworkingConfig'] = {'EndpointsConfig': {name: {'Aliases': [a for a in net.get('Aliases') or [] if a != row['Id'][:12]]}
-            for name, net in row.get('NetworkSettings', {}).get('Networks', {}).items()}}
-        # Anonymous volume mounts must survive removing the original container.
-        destinations = {b.split(':')[1] for b in host.get('Binds') or []}
-        destinations.update(m['Target'] for m in host.get('Mounts') or [])
-        for mount in row.get('Mounts', []):
-            if mount['Type'] == 'volume' and mount['Destination'] not in destinations:
-                host['Mounts'] = host.get('Mounts') or []
-                host['Mounts'].append({'Type': 'volume', 'Source': mount['Name'], 'Target': mount['Destination'], 'ReadOnly': not mount.get('RW', True)})
         entry['created'] = w.docker_engine('POST', '/containers/create?name=' + quote(name, safe=''), body)['Id']
         w.write_json(marker, saved)
     restored = directory / 'snapshot-restored.json'
@@ -66,6 +55,34 @@ def reconcile(info):
     marker.unlink()
     for entry in saved['containers']:
         w.run(['docker', 'image', 'rm', entry['tag']], check=False, capture_output=True)
+
+
+def preserved_body(row, image):
+    """Retain process configuration, network aliases and anonymous volume identity."""
+    body = copy.deepcopy(row['Config'])
+    body['Image'] = image
+    host = body['HostConfig'] = copy.deepcopy(row['HostConfig'])
+    body['NetworkingConfig'] = {'EndpointsConfig': network_endpoints(row)}
+    # Compose stores anonymous mounts with an empty Source. Reusing that
+    # request would allocate a new volume instead of retaining the old one.
+    volumes = {m['Destination']: m['Name'] for m in row.get('Mounts', []) if m['Type'] == 'volume'}
+    for mount in host.get('Mounts') or []:
+        if mount.get('Type') == 'volume' and mount['Target'] in volumes:
+            mount['Source'] = volumes[mount['Target']]
+    destinations = {b.split(':')[1] for b in host.get('Binds') or [] if ':' in b}
+    destinations.update(m['Target'] for m in host.get('Mounts') or [])
+    for mount in row.get('Mounts', []):
+        if mount['Type'] == 'volume' and mount['Destination'] not in destinations:
+            host['Mounts'] = host.get('Mounts') or []
+            host['Mounts'].append({'Type': 'volume', 'Source': mount['Name'], 'Target': mount['Destination'], 'ReadOnly': not mount.get('RW', True)})
+    return body
+
+
+def network_endpoints(row):
+    return {name: {key: copy.deepcopy(value) for key, value in endpoint.items()
+        if key in ('IPAMConfig', 'Links', 'DriverOpts') and value} | {
+            'Aliases': [a for a in endpoint.get('Aliases') or [] if a != row['Id'][:12]]}
+        for name, endpoint in row.get('NetworkSettings', {}).get('Networks', {}).items()}
 
 
 def storage_bindings(host, service, storage):

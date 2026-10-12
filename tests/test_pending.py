@@ -91,7 +91,7 @@ class PendingTests(unittest.TestCase):
 
     def test_start_applies_only_selected_stopped_service(self):
         worker.save_pending(self.directory, {'app': {'dns': ['1.1.1.1']}, 'peer': {'dns': ['8.8.8.8']}})
-        self.containers.return_value[0]['state'] = 'exited'
+        self.containers.return_value = [self.containers.return_value[1]]
         worker.apply_pending_settings(ID, 'pve', 'app')
         self.assertEqual(worker.load_pending(self.directory), {'peer': {'dns': ['8.8.8.8']}})
         self.assertEqual(self.run.call_args.args[0][-4:], ['up', '--no-start', '--no-deps', 'app'])
@@ -99,7 +99,7 @@ class PendingTests(unittest.TestCase):
 
     def test_failed_apply_keeps_queue_and_current_file(self):
         worker.save_pending(self.directory, {'app': {'dns': ['1.1.1.1']}})
-        self.containers.return_value[0]['state'] = 'exited'
+        self.containers.return_value = [self.containers.return_value[1]]
         original = self.runtime.read_bytes()
         self.run.side_effect = ValueError('Recreation failed')
         with self.assertRaisesRegex(ValueError, 'Recreation failed'):

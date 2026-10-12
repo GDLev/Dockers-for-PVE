@@ -89,6 +89,16 @@ class SnapshotTests(unittest.TestCase):
         with patch.object(worker, 'capture', side_effect=[json.dumps([volume]), 'own\nother\n']), self.assertRaisesRegex(ValueError, 'shared'):
             worker.snapshot_mounts(ID, [row])
 
+    def test_anonymous_volume_snapshot_requires_exclusive_guest_ownership(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            name = 'b'*64
+            row = {'Id': 'own', 'Mounts': [{'Type': 'volume', 'Source': temporary, 'Name': name, 'RW': True}]}
+            volume = {'Driver': 'local', 'Labels': {'com.docker.volume.anonymous': ''}, 'Mountpoint': temporary}
+            with patch.object(worker, 'capture', side_effect=[json.dumps([volume]), 'own']), patch('runtime.check_volume_path'):
+                self.assertEqual(worker.snapshot_mounts(ID, [row])[0]['volume'], name)
+            with patch.object(worker, 'capture', side_effect=[json.dumps([volume]), 'own\nforeign']), self.assertRaisesRegex(ValueError, 'shared'):
+                worker.snapshot_mounts(ID, [row])
+
     def test_restore_can_recover_missing_owned_directory_without_accepting_external_paths(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(worker, 'ROOT', Path(temporary)):
             source = Path(temporary) / ID / 'missing-data'

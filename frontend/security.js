@@ -13,7 +13,6 @@ Ext.define('PVE.betterdocker.SecurityEdit', {
                 disabled: !me.security.supported, store: [['', translate('Docker default')],
                     ...me.security.profiles.filter(p => p !== 'unconfined').map(p => [p, p])],
                 emptyText: translate(me.security.supported ? 'Docker default' : 'Not supported by host') }),
-            { xtype: 'displayfield', value: translate('Changing security settings recreates the service. Store persistent data in volumes.') },
         ], fieldDefaults: { labelWidth: 170 } }];
         me.items[0].items.forEach(item => { if (item.fieldLabel) { item.labelWidth = 170; } });
         me.submit = function () {
