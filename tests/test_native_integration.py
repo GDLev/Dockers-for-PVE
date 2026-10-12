@@ -74,8 +74,12 @@ class NativeIntegrationTests(unittest.TestCase):
 
     def test_instance_logs_include_stderr_and_check_ownership(self):
         container = 'b' * 64
+        def write_logs(command, **kwargs):
+            kwargs['stdout'].write(b'2026 info\n')
+            kwargs['stderr'].write(b'2025 error\n')
+            return subprocess.CompletedProcess(command, 0)
         with patch.object(worker, 'detail'), patch.object(worker, 'container_records', return_value=[{'id': container}]), \
-             patch.object(worker, 'run', return_value=subprocess.CompletedProcess([], 0, '2026 info\n', '2025 error\n')):
+             patch.object(worker, 'run', side_effect=write_logs):
             self.assertEqual(worker.project_logs(ID, 'pve', container=container), '2025 error\n2026 info\n')
             with self.assertRaises(ValueError):
                 worker.project_logs(ID, 'pve', container='c' * 64)

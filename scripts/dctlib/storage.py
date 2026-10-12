@@ -48,8 +48,11 @@ def pve_storage(identifier, action, **values):
     payload = dict(values, id=worker.project_id(identifier), action=action)
     if worker.METADATA != Path('/etc/pve/betterdocker'):
         payload['metadata'] = str(worker.METADATA)
+    descriptor = getattr(worker._operation_fds, 'values', {}).get(identifier)
+    if descriptor is not None:
+        payload['operation_fd'] = descriptor
     try:
-        result = worker.run(['perl', str(worker.HELPERS / 'storage.pl')], input=json.dumps(payload),
+        result = worker.run(['perl', str(worker.HELPERS / 'storage.pl')], input=json.dumps(payload), pass_fds=(descriptor,) if descriptor is not None else (),
                      capture_output=True, timeout=1800)
     except subprocess.CalledProcessError as error:
         raise ValueError('PVE storage: ' + (error.stderr or 'operation failed').strip()) from error
@@ -80,6 +83,9 @@ def storage_unit(identifier, settings):
 
 
 def storage_unmount(identifier):
+    from .disks import records, unmount
+    for key in records(worker.storage_config(identifier)):
+        unmount(identifier, key)
     point = worker.ROOT / identifier / 'storage-data'
     unit = worker.capture(['systemd-escape', '--path', '--suffix=mount', str(point)]).strip()
     # Drop this disk's Requires link before stopping its mount unit.
@@ -234,18 +240,20 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
             for index, (key, source) in enumerate(sources.items()):
                 target = staging / ('data-' + str(index))
                 if node_runtime.load().rootless and source.exists():
-                    node_runtime.copy_data(source, target)
+                    from .transfer_io import bandwidth
+                    node_runtime.copy_data(source, target, rate_kib=bandwidth('move', [before.get('storage'), storage]) // 1024)
                 elif node_runtime.load().rootless:
                     node_runtime.data_directory(target)
                 else:
                     target.mkdir()
                 if source.exists() and not node_runtime.load().rootless:
-                    worker.run(['cp', '-a', '--', str(source) + '/.', str(target)], timeout=86400)
+                    from .transfer_io import bandwidth
+                    node_runtime.copy_data(source, target, runner=worker.run, rate_kib=bandwidth('move', [before.get('storage'), storage]) // 1024, contents=True)
                 mapping[key] = str(folder / 'storage-data' / target.name)
             worker.run(['umount', str(staging)])
             worker.storage_unmount(identifier)
             allocated.pop('path', None)
-            allocated.update(vmid=info['vmid'], node=node, mapping=mapping, unused=before.get('unused', []) + ([before['volid']] if before.get('volid') else []))
+            allocated.update(vmid=info['vmid'], node=node, mapping=mapping, additional=before.get('additional', {}), unused=before.get('unused', []) + ([before['volid']] if before.get('volid') else []))
             worker.write_json(folder / 'storage.json', allocated)
             worker.storage_mount(identifier)
             # Existing runtime contains mapped source paths, so replace those explicitly.
@@ -281,6 +289,9 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
 def storage_mount(identifier):
     folder = worker.ROOT / worker.project_id(identifier)
     config = worker.storage_config(identifier)
+    from .disks import records, mount
+    for key, disk in records(config).items():
+        mount(identifier, key, disk)
     if not config:
         return
     mountpoint = folder / 'storage-data'
@@ -301,6 +312,8 @@ def storage_mount(identifier):
 
 def apply_storage(config, identifier):
     settings = worker.storage_config(identifier)
+    from .disks import records, source, apply
+    extra = {str(source(identifier, key)) for key in records(settings)}
     if settings:
         worker.storage_mount(identifier)
         mapping = settings['mapping']
@@ -311,15 +324,17 @@ def apply_storage(config, identifier):
                     mount.update(type='bind', source=mapping[key])
                     mount.pop('volume', None)
                     mount.pop('bind', None)
-                elif not mount.get('read_only') and mount.get('type') != 'tmpfs' and mount.get('source') not in mapping.values():
+                elif not mount.get('read_only') and mount.get('type') != 'tmpfs' and mount.get('source') not in mapping.values() and mount.get('source') not in extra:
                     raise ValueError('New writable mounts require a separate data migration; existing data disk cannot be bypassed')
-    return config
+    return apply(config, identifier, settings)
 
 
 def project_storage_status(identifier):
     settings = worker.storage_config(identifier)
     result = {'limit_mib': settings.get('size_mib', 0), 'rootfs': worker.rootfs_quota_support(), 'mounted': False, 'volid': settings.get('volid', ''), 'storage': settings.get('storage', ''),
               'native_snapshots': settings.get('native_snapshots', False), 'unused': settings.get('unused', [])}
+    from .disks import status
+    result['disks'] = status(identifier, settings)
     if settings:
         point = worker.ROOT / identifier / 'storage-data'
         result['mounted'] = os.path.ismount(point)
@@ -341,7 +356,8 @@ def purge_retained_storage(identifier):
         if not settings.get('volid'):
             raise ValueError('No retained PVE disks')
         worker.storage_unmount(identifier)
-        for volid in settings.get('unused', []) + [settings['volid']]:
+        from .disks import volume_ids
+        for volid in volume_ids(settings):
             worker.pve_storage(identifier, 'free', volid=volid)
             if volid in settings.get('unused', []):
                 settings['unused'].remove(volid)

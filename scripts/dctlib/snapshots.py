@@ -144,7 +144,7 @@ def snapshot_containers(identifier, allow_running=False, quiesced=False):
     allowed = {'created', 'exited'} | ({'running', 'paused'} if allow_running else set()) | ({'paused'} if quiesced else set())
     if any(row['state'] not in allowed for row in records):
         raise ValueError('DCT is changing state; wait until its services are stable')
-    return json.loads(worker.capture(['docker', 'inspect', *[row['id'] for row in records]])) if records else []
+    return json.loads(worker.capture(['docker', 'inspect', '--size', *[row['id'] for row in records]])) if records else []
 
 
 @contextlib.contextmanager
@@ -179,6 +179,7 @@ def snapshot_quiesce(identifier):
 def snapshot_mounts(identifier, containers, allow_missing=False):
     """Resolve actual Docker mounts, never assume that a Compose volume is private."""
     from .policy import owned_local_volume
+    from .paths import control_path
     folder = worker.ROOT / identifier
     owned = {row['Id'] for row in containers}
     sources = {}
@@ -190,7 +191,7 @@ def snapshot_mounts(identifier, containers, allow_missing=False):
             if mount['Type'] == 'bind':
                 if source.is_symlink() or not source.resolve().is_relative_to(folder.resolve()) or source.resolve() == folder.resolve():
                     raise ValueError('Snapshots require project-owned writable mounts; external host paths are not supported')
-                if source.name in ('settings-transaction.json', 'storage.ext4', 'request.json', 'compose.runtime.json', 'compose.source.yaml', '.env', 'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'pending-network.json', 'storage.json'):
+                if control_path(source.resolve().relative_to(folder.resolve())):
                     raise ValueError('Deployment files cannot also be writable application mounts')
             elif mount['Type'] == 'volume':
                 volume = json.loads(worker.capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
@@ -394,9 +395,14 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             worker.pve_storage(identifier, 'snapshot', **native)
             point = worker.ROOT / identifier / 'storage-data'
             mounts = [entry for entry in mounts if Path(entry['source']) != point]
+        from .capacity import require_space
+        estimated = sum(max(0, row.get('SizeRootFs', 0)) for row in containers)
+        estimated += sum(int(worker.capture(['du', '-sx', '-B1', entry['source']]).split()[0]) for entry in mounts)
+        require_space(temporary, estimated)
         files = temporary / 'configuration'
         files.mkdir(mode=0o700)
-        for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'storage.json', 'notes.txt'):
+        from .paths import CONFIG_FILES
+        for filename in CONFIG_FILES + ('storage.json',):
             source = worker.ROOT / identifier / filename
             if source.exists():
                 shutil.copy2(source, files / filename)
@@ -409,6 +415,11 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             node_runtime.copy_data(entry['source'], temporary / entry['copy'], runner=worker.run)
             node_runtime.remap_tree(temporary / entry['copy'], node_runtime.load(), node_runtime.Runtime())
         for index, container in enumerate(containers):
+            from .capacity import preserve_quota
+            import copy
+            service_name = container['Config']['Labels']['com.docker.compose.service']
+            container['HostConfig']['StorageOpt'] = copy.deepcopy(config['services'][service_name].get('storage_opt') or {})
+            preserve_quota(container, {'Labels': container['Config'].setdefault('Labels', {}), 'HostConfig': container['HostConfig']})
             tag = 'betterdocker-snapshot/' + identifier + ':' + uuid.uuid4().hex
             tags.append(tag)
             transaction['tags'] = tags
@@ -450,7 +461,8 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
 
 def docker_engine(method, path, body):
     """Only the local Docker socket is used; never log Config/Env or daemon responses."""
-    return node_runtime.request(method, path, body)
+    descriptors = tuple(getattr(worker._operation_fds, 'values', {}).values())
+    return node_runtime.request(method, path, body, pass_fds=descriptors)
 
 
 def snapshot_apply(identifier, node, name, check_only=False):
@@ -477,6 +489,10 @@ def snapshot_apply(identifier, node, name, check_only=False):
     before_storage = worker.storage_config(identifier)
     native = manifest.get('native_storage')
     saved_storage = json.loads((configs / 'storage.json').read_text()) if (configs / 'storage.json').exists() else {}
+    if saved_storage:
+        from .disks import volume_ids
+        current_volumes = volume_ids(worker.storage_config(identifier))
+        saved_storage.setdefault('unused', []).extend(sorted(set(current_volumes) - set(volume_ids(saved_storage))))
     if saved_storage.get('volid') != before_storage.get('volid'):
         raise ValueError('Snapshot data disk differs from the current disk')
     if native:

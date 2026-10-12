@@ -226,6 +226,9 @@ def release_id(identifier):
 
 
 def run(args, **kwargs):
+    inherited = set(kwargs.get('pass_fds', ())) | set(getattr(_operation_fds, 'values', {}).values())
+    if inherited:
+        kwargs['pass_fds'] = tuple(sorted(inherited))
     if args[:2] == ['docker', 'compose']:
         index = 2
         while index < len(args):
@@ -284,13 +287,23 @@ def write_json(path, value, allow_migration_change=False):
     try:
         with os.fdopen(fd, 'w') as output:
             output.write(content)
+            if not path.is_relative_to(METADATA):
+                output.flush()
+                os.fsync(output.fileno())
         os.replace(temporary, path)
+        if not path.is_relative_to(METADATA):
+            directory_fd = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
 
 _held_locks = threading.local()
+_operation_fds = threading.local()
 
 
 @contextlib.contextmanager
@@ -365,7 +378,7 @@ def container_records(identifier):
         journal = json.loads(recovery.read_text())
         from .service_recreate import validate_journal
         validate_journal(identifier, journal)
-        backups = {entry['source']['Id']: entry['backup'] for entry in journal['entries']}
+        backups = {entry['source']['Id']: entry['backup'] for entry in journal['entries'] if entry.get('source')}
     records = []
     for item in inspected:
         if backups.get(item['Id']) == item['Name'].lstrip('/'):
@@ -707,8 +720,9 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
             prepare_firewall(info)
             if not restored_start(identifier):
                 containers = container_records(identifier)
-                if containers and (operation in ('restart', 'reboot') or len(containers) == info.get('expected')):
-                    run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
+                if containers:
+                    from .service_start import start
+                    start(identifier)
                 else:
                     run(compose_base(directory, identifier) + ['up', '-d'], timeout=1800)
             finish_network_start(info)
@@ -717,6 +731,13 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
             run(compose_base(directory, identifier) + ['stop'], timeout=1800)
         elif operation == 'delete':
             run(compose_base(directory, identifier) + ['down'], timeout=1800)
+            # Older Engine-created replicas may lack Compose's config-hash label.
+            # They still belong to this guest and must not outlive its deletion.
+            remaining = container_records(identifier)
+            if remaining:
+                ids = [row['id'] for row in remaining]
+                run(['docker', 'stop', '--time', '0', *ids], timeout=1800, capture_output=True)
+                run(['docker', 'rm', *ids], capture_output=True)
         if operation in ('start', 'restart', 'reboot'):
             restore_restart_policy(identifier)
         if operation == 'delete':
@@ -778,7 +799,18 @@ def operation_state(identifier):
         except (OSError, IndexError):
             alive = False
         if not alive:
-            state.update(active=False, failed=True, message='Operation interrupted. Open Task History.')
+            lock_path = ROOT.parent / 'operations' / (identifier + '.lock')
+            held = False
+            if lock_path.exists():
+                with lock_path.open('r') as handle:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        held = True
+            if held:
+                state.update(active=True, message='Operation helper is still running.')
+            else:
+                state.update(active=False, failed=True, message='Operation interrupted. Open Task History.')
     return state
 
 
@@ -793,7 +825,7 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
         raise ValueError('A DCT template is immutable; clone it before changing its deployment')
     from .images import state as image_state
     image_update = image_state(ROOT / identifier)
-    if image_update.get('phase') == 'applying' and name not in ('snapshot-restore', 'snapshot-edit', 'force-stop'):
+    if image_update.get('phase') == 'applying' and name not in ('snapshot-restore', 'snapshot-edit', 'force-stop', 'recovery'):
         raise ValueError('Interrupted image update: roll back snapshot ' + image_update['recovery'])
     folder = ROOT.parent / 'operations'
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -849,9 +881,16 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
             from .service_recreate import recover as recover_settings
             with locked(identifier):
                 recover_settings(identifier)
+                from .disks import recover as recover_disks
+                recover_disks(identifier)
             if os.environ.get('BETTERDOCKER_REQUIRE_SAFE') == '1' and (ROOT / identifier / 'compose.runtime.json').exists():
                 delegated_access(identifier, current_node())
-            yield handle
+            previous_fds = getattr(_operation_fds, 'values', {})
+            _operation_fds.values = dict(previous_fds, **{identifier: handle.fileno()})
+            try:
+                yield handle
+            finally:
+                _operation_fds.values = previous_fds
         except Exception:
             state.update(active=False, failed=True, message='Operation failed. Open Task History.')
             raise
@@ -933,7 +972,8 @@ def service_action(identifier, node, service, verb, timeout=60):
                 containers = [c for c in container_records(identifier) if c['service'] == service] if verb == 'start' else []
                 expected = config['services'][service].get('deploy', {}).get('replicas', 1)
                 if containers and len(containers) == expected:
-                    run(['docker', 'start', *[c['id'] for c in containers]], timeout=1800)
+                    from .service_start import start
+                    start(identifier, selected=service)
                 else:
                     run(compose_base(directory, identifier) + command + [service], timeout=1800)
         clear_network_resume(identifier, service)
@@ -951,12 +991,13 @@ def project_logs(identifier, node, service='', container='', tail=200):
     if container:
         if not any(c['id'] == container for c in container_records(identifier)):
             raise ValueError('Container does not belong to this project')
-        result = run(['docker', 'logs', '--timestamps', '--tail', str(tail), container], capture_output=True)
-        return '\n'.join(sorted((result.stdout + result.stderr).splitlines())) + '\n'
+        from .log_output import bounded
+        return bounded(['docker', 'logs', '--timestamps', '--tail', str(tail), container])
     config = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
     if service and service not in config['services']:
         raise ValueError('Unknown service')
-    return capture(compose_base(ROOT / identifier, identifier) + ['logs', '--no-color', '--timestamps', '--tail', str(tail)] + ([service] if service else []))
+    from .log_output import bounded
+    return bounded(compose_base(ROOT / identifier, identifier) + ['logs', '--no-color', '--timestamps', '--tail', str(tail)] + ([service] if service else []))
 
 
 def diagnostics(node):
@@ -974,9 +1015,11 @@ def diagnostics(node):
                '/usr/share/perl5/PVE/API2/BetterDocker.pm', '/usr/local/lib/betterdocker/provision.py']
     markers = ['/usr/share/pve-manager/index.html.tpl', '/usr/share/perl5/PVE/API2/Nodes.pm',
                '/usr/share/perl5/PVE/API2/Cluster.pm', '/usr/share/perl5/PVE/Cluster.pm']
-    integration = all(Path(p).is_file() for p in targets) and all(Path(p).is_file() and 'BEGIN BETTERDOCKER' in Path(p).read_text() for p in markers)
+    result = run([sys.executable, str(HELPERS / 'patch.py'), 'status'], check=False, capture_output=True)
+    integration = all(Path(p).is_file() for p in targets) and result.returncode == 0
     selected = node_runtime.load()
-    return {'addon': '19', 'runtime': selected.mode, 'runtime_health': node_runtime.service('is-active', runner=run).stdout.strip(),
+    from .version import VERSION
+    return {'addon': VERSION, 'runtime': selected.mode, 'runtime_health': node_runtime.service('is-active', runner=run).stdout.strip(),
             'pve': probe(['pveversion']), 'engine': probe(['docker', '--version']),
             'compose': probe(['docker', 'compose', 'version', '--short']),
             'timer': probe(['systemctl', 'is-active', 'betterdocker-refresh.timer']),
@@ -1006,17 +1049,30 @@ def restored_start(identifier, service=None):
         raise ValueError('Restored DCT instances changed; redeploy before starting')
     ids = [row['id'] for row in records if not service or row['service'] == service]
     if ids:
-        run(['docker', 'start', *ids], timeout=1800)
+        from .service_start import start
+        start(identifier, selected=service)
     return True
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['image-state', 'image-preview', 'image-apply', 'storage-volume-state', 'delete-storage-volume', 'project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['retained-data', 'recover', 'dhcp6-client', 'dhcp6-release', 'disk', 'image-state', 'image-preview', 'image-apply', 'storage-volume-state', 'delete-storage-volume', 'project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
-    if args.operation == 'image-state':
+    if args.operation == 'retained-data':
+        from .data import retained_data
+        print(json.dumps(retained_data(values[0], destroy=len(values) > 1 and values[1] == '1')))
+    elif args.operation == 'recover':
+        from .recovery import recover
+        recover(*values)
+    elif args.operation in ('dhcp6-client', 'dhcp6-release'):
+        from .ipv6_dynamic import client
+        client(values[0], release=args.operation == 'dhcp6-release')
+    elif args.operation == 'disk':
+        from .disks import configure
+        configure(values[0], values[1], values[2], json.loads(values[3]), values[4] if len(values) > 4 else None)
+    elif args.operation == 'image-state':
         detail(*values)
         from .images import state
         print(json.dumps(state(ROOT / values[0])))

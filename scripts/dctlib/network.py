@@ -254,7 +254,9 @@ def dhcp_event(environment):
 def rebind_runtime(directory, address):
     if (directory / 'storage.json').exists():
         worker.storage_mount(directory.name)
-    if not address or address == '0.0.0.0':
+    metadata = worker.METADATA / (directory.name + '.json')
+    info = json.loads(metadata.read_text()) if metadata.exists() else {}
+    if (not address or address == '0.0.0.0') and 'interfaces' not in info:
         raise ValueError('A dedicated address must be acquired before deployment')
     path = directory / 'compose.runtime.json'
     config = json.loads(path.read_text())
@@ -263,8 +265,6 @@ def rebind_runtime(directory, address):
     for service in config['services'].values():
         for port in service.get('ports', []):
             port['host_ip'] = address
-    metadata = worker.METADATA / (directory.name + '.json')
-    info = json.loads(metadata.read_text()) if metadata.exists() else {}
     if 'interfaces' in info:
         from .endpoints import bind_runtime
         config = bind_runtime(config, info)

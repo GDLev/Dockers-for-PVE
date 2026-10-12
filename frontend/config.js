@@ -21,7 +21,9 @@ Ext.define('PVE.betterdocker.Config', {
         const can = scope => current && current.capabilities ? Boolean(current.capabilities[scope] ?? current.capabilities.configure) : Proxmox.UserName === 'root@pam';
         const editable = () => can('configure');
         const rowEditable = (key, group) => {
-            if (key === 'Recovery snapshot') { return false; }
+            if (/^Mount Point \(mp[0-9]+\)$/.test(key)) { return can('disk') && !current?.ha?.managed && !current?.template && !current?.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state)); }
+            if (['Recovery snapshot', 'Writable layers', 'Preserved files', 'Images (logical size)', 'Logs', 'Snapshots'].includes(key) || /^Mount Point \([0-9]+\)$/.test(key || '')) { return false; }
+            if (key === 'Image') { return can('images') && !current?.ha?.managed && !current?.template; }
             if (key === 'Security') { return can('options') && !current?.ha?.managed && !current?.template; }
             if (key === 'Hookscript') { return can('hookscript'); }
             if (current?.ha?.managed && !['Protection', 'Start at boot', 'Start/Shutdown order'].includes(key)) { return false; }
@@ -61,9 +63,11 @@ Ext.define('PVE.betterdocker.Config', {
             ['console', 'logs'].forEach(id => { const view = me.down('#' + id); if (view) { view.setDisabled(!can('console') || current.template); } });
             me.query('[bdWrite=true]').forEach(button => {
                 if (actions[button.bdScope]) { applyGuestAction(button, actions[button.bdScope]); }
-                else { button.setDisabled(locked() || !can(button.bdScope || 'configure') || current.template && !button.bdTemplateAllowed); }
+                else { button.setDisabled(locked() || !can(button.bdScope || 'configure') || current.template && !button.bdTemplateAllowed || button.bdNeedsStopped && current.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state))); }
             });
             applyGuestAction(me.down('#removeButton'), actions.remove);
+            const recovery = me.down('#recoverButton');
+            if (recovery) { recovery.setHidden(!current.recovery?.required); recovery.setDisabled(!can('configure') || !current.recovery?.available); }
             const op = current.operation || {};
             const operationLabel = me.down('#operationLabel');
             if (operationLabel) { operationLabel.setText(current.image_update?.phase === 'applying' ? Ext.htmlEncode(translate('Roll back the recovery snapshot') + ': ' + current.image_update.recovery) : op.active || me.pendingTask ? '<i class="fa fa-lock"></i> ' + Ext.htmlEncode(translate('Operation in progress')) : op.failed ? Ext.htmlEncode(translate(op.message)) : ''); }
@@ -94,6 +98,7 @@ Ext.define('PVE.betterdocker.Config', {
             const pendingNetworks = current.pending_network?.interfaces;
             rows('networkGrid', [...new Set([...Object.keys(networks), ...Object.keys(pendingNetworks || {})])].sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)))
                 .map(name => Object.assign({ id: name, name }, networks[name] || {}, {
+                    cidr6: networks[name]?.cidr6 || current.endpoint_ipv6?.[name]?.cidr6 || '',
                     address: networks[name]?.cidr || current.endpoint_addresses?.[name] || (name === 'net0' ? current.address : ''),
                     pending: pendingNetworks ? pendingNetworks[name] || { removed: true } : name === 'net0' ? current.pending_network : {},
                 })));
@@ -112,7 +117,12 @@ Ext.define('PVE.betterdocker.Config', {
                 rows('resourceGrid', ['Memory', 'Swap', 'CPU limit', 'CPU units', 'PID limit', 'Container disk limit']
                     .map(key => pendingRow(key, values, active.pending)).concat([
                     { key: 'Project data disk', value: current.storage?.limit_mib ? (current.storage.volid ? current.storage.volid + ', ' : '') + Proxmox.Utils.format_size(current.storage.limit_mib * 1024 * 1024) + (current.storage.mounted ? ' (' + Proxmox.Utils.format_size(current.storage.used) + ' / ' + Proxmox.Utils.format_size(current.storage.available) + ' ' + translate('Available') + ')' : ' — ' + translate('Unavailable')) : 'Unlimited' },
-                ]).concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
+                    { key: 'Writable layers', value: Number.isFinite(current.storage?.usage?.writable) ? Proxmox.Utils.format_size(current.storage.usage.writable) : '' },
+                    { key: 'Preserved files', value: Number.isFinite(current.storage?.usage?.preserved) ? Proxmox.Utils.format_size(current.storage.usage.preserved) : '' },
+                    { key: 'Images (logical size)', value: Number.isFinite(current.storage?.usage?.images_logical) ? Proxmox.Utils.format_size(current.storage.usage.images_logical) : '' },
+                    { key: 'Logs', value: Number.isFinite(current.storage?.usage?.logs) ? Proxmox.Utils.format_size(current.storage.usage.logs) : '' },
+                    { key: 'Snapshots', value: Number.isFinite(current.storage?.usage?.snapshots) ? Proxmox.Utils.format_size(current.storage.usage.snapshots) : '' },
+                ]).concat((current.storage?.disks || []).map(disk => ({ key: 'Mount Point (' + disk.name + ')', value: disk.volid + ',mp=' + disk.target + ',backup=' + Number(disk.backup !== false) + (disk.read_only ? ',ro=1' : '') }))).concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
                 rows('dnsGrid', ['DNS servers', 'Search domains'].map(key => pendingRow(key, values, active.pending)));
                 rows('optionGrid', [{ key: 'Start at boot', value: Proxmox.Utils.format_boolean(current.onboot || 0) }, { key: 'Start/Shutdown order', value: current.startup || 'order=any' }, { key: 'Protection', value: Proxmox.Utils.format_boolean(current.protection) }, { key: 'Hookscript', value: current.hookscript || Proxmox.Utils.noneText }, pendingRow('Restart policy', values, active.pending), pendingRow('Security', values, active.pending), { key: 'Image', value: active.image }, ...(current.image_update?.recovery ? [{ key: 'Recovery snapshot', value: current.image_update.recovery }] : [])]);
                 ['resourceGrid', 'dnsGrid', 'optionGrid'].forEach(id => {
@@ -222,7 +232,18 @@ Ext.define('PVE.betterdocker.Config', {
                 return win;
             });
         };
+        const editMount = diskName => {
+            if (!can('disk') || locked() || !current || current.template || current.ha?.managed || current.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state))) { return; }
+            const disk = (current.storage?.disks || []).find(value => value.name === diskName);
+            return openEditor(me, 'disk-' + diskName, () => Ext.create('PVE.betterdocker.DiskEdit', {
+                autoShow: true, isCreate: !disk, diskName, disk, services: current.services,
+                nodename: info.node, digest: current.digest, url: url + '/disks/' + diskName,
+                listeners: { destroy: reload },
+            }));
+        };
         const editSettings = (group, selectedKey) => {
+            const mount = /^Mount Point \((mp[0-9]+)\)$/.exec(selectedKey || '');
+            if (mount) { return editMount(mount[1]); }
             const active = service();
             if (!active || !rowEditable(selectedKey, group) || locked()) { return; }
             if (selectedKey === 'Settings source') { return; }
@@ -405,6 +426,9 @@ Ext.define('PVE.betterdocker.Config', {
                 { text: translate('Manage HA'), bdScope: 'ha', iconCls: 'fa fa-heartbeat', hidden: PVE.Utils.isStandaloneNode(), bdWrite: true,
                     handler: () => { if (!guestActions(info, current, me.pendingTask).ha.disabled) { Ext.create('PVE.ha.VMResourceEdit', { vmid: info.vmid,
                         guestType: 'docker', isCreate: !current?.ha?.managed, listeners: { destroy: reload } }).show(); } } },
+                { text: translate('Recover'), itemId: 'recoverButton', hidden: true, disabled: true, iconCls: 'fa fa-wrench', handler: () => {
+                    if (can('configure') && current?.recovery?.available) { request({ url: url + '/recover', method: 'POST', success: response => trackTask(response, me) }); }
+                } },
                 { text: translate('Remove'), itemId: 'removeButton', bdScope: 'remove', disabled: true, bdWrite: true, bdTemplateAllowed: true, iconCls: 'fa fa-trash-o',
                     handler: () => { if (!guestActions(info, current, me.pendingTask).remove.disabled) { removeProject(info, me); } } }] },
         ];
@@ -451,6 +475,18 @@ Ext.define('PVE.betterdocker.Config', {
                     const grid = me.down('#resourceGrid');
                     const selected = grid.getSelectionModel().getSelection()[0];
                     if (selected) { editSettings('resources', selected.get('key')); }
+                } }, { text: translate('Add'), bdWrite: true, bdScope: 'disk', bdNeedsStopped: true, handler: () => {
+                    const used = new Set((current?.storage?.disks || []).map(disk => disk.name));
+                    const name = Array.from({ length: 15 }, (_, i) => 'mp' + (i + 1)).find(value => !used.has(value));
+                    if (name) { editMount(name); }
+                } }, { text: translate('Detach'), bdWrite: true, bdScope: 'disk', bdNeedsStopped: true, handler: () => {
+                    const row = me.down('#resourceGrid').getSelectionModel().getSelection()[0];
+                    const mount = /^Mount Point \((mp[0-9]+)\)$/.exec(row?.get('key') || '');
+                    if (!mount || !rowEditable(row.get('key')) || locked()) { return; }
+                    Ext.Msg.confirm(translate('Confirm'), translate('Detach') + ' ' + mount[1] + '?', answer => {
+                        if (answer === 'yes') { request({ url: url + '/disks/' + mount[1], method: 'PUT', params: { detach: 1, digest: current.digest },
+                            success: response => trackTask(response, me) }); }
+                    });
                 } }, revertButton('resourceGrid'), { text: translate('Restore Compose'), itemId: 'restoreCompose', bdWrite: true, handler: () => {
                     const active = service(); if (!active || !active.overridden) { return; }
                     request({ url: url + '/reset-settings', method: 'POST', params: { service: active.name, digest: current.digest },

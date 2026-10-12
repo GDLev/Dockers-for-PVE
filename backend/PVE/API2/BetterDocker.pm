@@ -244,7 +244,9 @@ sub hook_storage_content {
                         }
                         $disk_states{$id} = $state;
                     }
-                    $item->{dct_status} = ($disk_states{$id}->{volid} // '') eq $item->{volid} ? 'in-use' : 'unused';
+                    my %attached = map { $_ => 1 } grep { defined($_) } ($disk_states{$id}->{volid},
+                        map { $_->{volid} } values %{$disk_states{$id}->{additional} // {}});
+                    $item->{dct_status} = $attached{$item->{volid}} ? 'in-use' : 'unused';
                 }
             }
             $item->{vmid} = int($item->{vmid}) if defined($item->{vmid});
@@ -449,16 +451,16 @@ sub register_docker_method {
         } else {
             $caps = capabilities($param->{id}, $param->{node});
         }
-        if ($param->{id} && $param->{node} && $name =~ /^(?:image_preview|image_apply|update|template|destroy|service_action|settings|set_project_limits|reset_settings|snapshot)$/ &&
+        if ($param->{id} && $param->{node} && $name =~ /^(?:image_preview|image_apply|update|template|destroy|service_action|set_disk|settings|set_project_limits|reset_settings|snapshot)$/ &&
             ($name ne 'snapshot' || ($param->{action} // '') eq 'restore') && ha_managed($param->{id}, $param->{node})) {
             die "Remove the DCT from HA before changing its deployment, services or persistent state\n";
         }
         my $scope = $name eq 'list' && $param->{diagnostics} ? 'trusted' :
                     $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config|project_limits|image_state)$/ ? 'audit' :
                     $name =~ /^(termproxy|vncwebsocket|logs)$/ ? 'console' :
-                    $name =~ /^(storage_limit|storage_config)$/ ? 'disk' :
+                    $name =~ /^(storage_limit|storage_config|set_disk)$/ ? 'disk' :
                     $name eq 'image_apply' ? 'images' : $name eq 'clone' ? 'clone' : $name eq 'migrate' ? 'migrate' :
-                    $name eq 'template' ? 'template' :
+                    $name eq 'template' ? 'template' : $name eq 'recover' ? 'configure' :
                     ($name eq 'destroy' || ($name eq 'action' && ($param->{action} // '') eq 'delete')) ? 'remove' :
                     ($name eq 'settings' || $name eq 'revert_settings') ? 'settings' :
                     $name eq 'set_network' ? 'network' : $name eq 'set_notes' ? 'options' :

@@ -103,7 +103,7 @@ sub start_vm {
 sub resume_vm { return shift->start_vm(@_); }
 sub snapshot {
     my ($self, $task, $vmid) = @_;
-    $self->helper('capture', $self->identifier($vmid), $self->{node}, $task->{dct_state}, '--keep-journal',
+    $self->helper('capture', $self->identifier($vmid), $self->{node}, $task->{dct_state}, '--keep-journal', '--backup-mode',
         $task->{dct_suspended} ? ('--paused') : ());
 }
 sub assemble {

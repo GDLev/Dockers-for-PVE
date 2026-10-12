@@ -14,7 +14,7 @@ ID = 'a' * 32
 class DeploymentSecurityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.project = self.root / ID
         self.project.mkdir()
         self.patch = patch.object(worker, 'ROOT', self.root)

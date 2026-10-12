@@ -186,6 +186,8 @@ def management(identifier, node, shared_stats=None):
         info['metrics'].update(worker.swap_usage([], info['services']))
         info['storage'] = worker.project_storage_status(identifier)
         info['operation'] = worker.operation_state(identifier)
+        from .recovery import status as recovery_status
+        info['recovery'] = recovery_status(identifier)
         return info
     info['containers'] = worker.container_records(identifier)
     active = [item['id'] for item in info['containers'] if item['state'] == 'running']
@@ -199,7 +201,11 @@ def management(identifier, node, shared_stats=None):
     info['metrics'].update(worker.swap_usage(info['containers'], info['services']))
     info['metrics'].update(worker.disk_usage(identifier, info['containers']))
     info['storage'] = worker.project_storage_status(identifier)
+    from .usage import measure
+    info['storage']['usage'] = measure(identifier, info['containers'])
     info['operation'] = worker.operation_state(identifier)
+    from .recovery import status as recovery_status
+    info['recovery'] = recovery_status(identifier)
     return info
 
 

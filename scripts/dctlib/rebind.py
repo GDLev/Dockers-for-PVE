@@ -1,10 +1,26 @@
 """Recreate stopped bindings without discarding a container's writable layer."""
 import copy
 import json
+import re
 from urllib.parse import quote
 
 
 def reconcile(info):
+    from . import projects as w
+    marker = w.ROOT / info['id'] / 'network-reconcile.json'
+    if not marker.exists():
+        return
+    w.require_stopped(w.container_records(info['id']))
+    if 'containers' in json.loads(marker.read_text()):
+        # Resume journals created by pre-transaction releases before upgrading.
+        return legacy_reconcile(info)
+    from .service_recreate import replace_bindings, prune_images
+    replace_bindings(info)
+    marker.unlink()
+    prune_images(info['id'])
+
+
+def legacy_reconcile(info):
     from . import projects as w
     directory = w.ROOT / info['id']
     marker = directory / 'network-reconcile.json'
@@ -24,12 +40,14 @@ def reconcile(info):
     for entry in saved['containers']:
         row = entry['source']
         if not entry.get('image'):
-            entry['image'] = w.capture(['docker', 'commit', row['Id'], entry['tag']]).strip()
+            entry['image'] = w.run(['docker', 'commit', row['Id'], entry['tag']], timeout=86400, capture_output=True).stdout.strip()
             w.write_json(marker, saved)
         if entry.get('created'):
             continue
         name = row['Name'].lstrip('/')
         current = w.run(['docker', 'inspect', name], check=False, capture_output=True)
+        if current.returncode and not re.search(r'no such (?:object|container)\b', current.stderr or '', re.IGNORECASE):
+            raise ValueError('Cannot inspect network recovery container: ' + name)
         if current.returncode == 0:
             existing = json.loads(current.stdout)[0]
             if existing['Id'] != row['Id']:
@@ -87,8 +105,16 @@ def network_endpoints(row):
 
 def storage_bindings(host, service, storage):
     """Apply pending managed-disk mounts when preserving a container image."""
+    from . import projects as w
+    from .disks import source, records
+    additional = {str(source(storage.get('id', service.get('labels', {}).get('betterdocker.id', '')), key)) for key in records(storage)}
     destinations = {mount['target']: mount for mount in service.get('volumes', [])
-        if mount.get('type') == 'bind' and mount.get('source') in storage.get('mapping', {}).values()}
+        if mount.get('type') == 'bind' and (mount.get('source') in storage.get('mapping', {}).values() or mount.get('source') in additional)}
+    def removed(value):
+        path = value.split(':')[0]
+        return path.startswith(str(w.ROOT)) and __import__('re').search(r'/mount-mp(?:[1-9]|1[0-5])$', path) and path not in {m['source'] for m in destinations.values()}
+    host['Binds'] = [value for value in host.get('Binds') or [] if not removed(value)]
+    host['Mounts'] = [value for value in host.get('Mounts') or [] if not (value.get('Type') == 'bind' and removed(value.get('Source', '')))]
     if not destinations:
         return
     host['Binds'] = [value for value in host.get('Binds') or [] if value.split(':')[1] not in destinations]

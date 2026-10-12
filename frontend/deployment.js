@@ -3,6 +3,7 @@ const deployment = values => {
         bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
         hwaddr: values.hwaddr || '', mtu: values.mtu || '', firewall: Number(values.firewall) === 1 ? 1 : 0 };
     if (values.vmid) { common.vmid = Number(values.vmid); }
+    if (values.interfaces) { common.interfaces = values.interfaces; }
     return Object.assign(common, values.mode === 'compose' ? { compose: values.compose } :
         { image: values.image, ports: values.ports || '' });
 };
@@ -82,15 +83,16 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                     emptyText: 'auto', vtype: 'MacAddress' }),
             ],
             column2: [
-                { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 2,
+                { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 3,
                     items: [
                         { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'),
                             checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'static', readOnly: Boolean(me.projectId) },
                         { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: translate('DHCP'),
                             checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp', readOnly: Boolean(me.projectId) },
+                        { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'none', boxLabel: translate('None'), checked: defaults.ipv4mode === 'none', readOnly: Boolean(me.projectId) },
                     ], listeners: { change: updateNetwork, afterrender: updateNetwork } },
                 field('address', 'IPv4/CIDR', defaults.cidr || defaults.address || '', { allowBlank: false, vtype: 'IPCIDRAddress',
-                    disabled: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'dhcp',
+                    disabled: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) !== 'static',
                     readOnly: Boolean(me.projectId), emptyText: '192.0.2.50/24' }),
                 { xtype: 'displayfield', fieldLabel: translate('Gateway (IPv4)'), value: translate('Inherited from host routing') },
             ],
@@ -129,7 +131,7 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                 // The create endpoint validates before allocating a VMID or starting its task.
                 request({ url: '/nodes/' + encodeURIComponent(values.nodename) + '/docker' + (wizard.projectId ? '/' + wizard.projectId : ''),
                     method: wizard.projectId ? 'PUT' : 'POST',
-                    params: Object.assign({ deployment: JSON.stringify(deployment(values)) }, !wizard.projectId ? { start: Number(values.start) === 1 ? 1 : 0, ...(values.pool ? { pool: values.pool } : {}) } : {}), waitMsgTarget: wizard,
+                    params: Object.assign({ deployment: JSON.stringify(deployment(Object.assign({}, values, me.projectId && defaults.interfaces ? { interfaces: defaults.interfaces } : {}))) }, !wizard.projectId ? { start: Number(values.start) === 1 ? 1 : 0, ...(values.pool ? { pool: values.pool } : {}) } : {}), waitMsgTarget: wizard,
                     success: response => { task(response); wizard.close(); } });
             },
         }];

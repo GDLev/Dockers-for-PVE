@@ -80,6 +80,10 @@ def apply_host_exceptions(bindings):
     import firewall
     import subprocess
     rules = host_exceptions(bindings)
+    native = subprocess.run(['nft', '-j', 'list', 'table', 'inet', 'proxmox-firewall'], capture_output=True, text=True)
+    if native.returncode == 0:
+        apply_native_host_exceptions(bindings, json.loads(native.stdout))
+        return
     existing = subprocess.run(['ip6tables', '-w', '-S', 'BD6-PUBLISHED'], capture_output=True, text=True)
     hook = ['-A INPUT -j BD6-PUBLISHED']
     input_rules = firewall.command(['ip6tables', '-w', '-S', 'INPUT']).splitlines()[1:]
@@ -91,3 +95,39 @@ def apply_host_exceptions(bindings):
         lines.append('-D INPUT -j BD6-PUBLISHED')
     lines.extend(['-I INPUT 1 -j BD6-PUBLISHED', 'COMMIT'])
     firewall.command(['ip6tables-restore', '--wait', '--noflush'], input='\n'.join(lines) + '\n')
+
+
+def apply_native_host_exceptions(bindings, state):
+    """DCT sockets pass guest policy before the native host INPUT/OUTPUT policy."""
+    import firewall
+    tag = 'betterdocker-published-v6'
+    import hashlib
+    fingerprint = tag + ':' + hashlib.sha256(json.dumps(sorted(set(bindings))).encode()).hexdigest()[:16]
+    commands = []
+    for direction in ('input', 'output'):
+        chain = 'betterdocker-published-' + direction
+        chains = [entry['chain'] for entry in state['nftables'] if 'chain' in entry]
+        rules = [entry['rule'] for entry in state['nftables'] if 'rule' in entry]
+        current = [rule for rule in rules if rule['chain'] == chain]
+        if any(not rule.get('comment', '').startswith(tag + ':') for rule in current):
+            raise ValueError('Native DCT exception chain belongs to another administrator')
+        hooks = [rule for rule in rules if rule['chain'] == direction and rule.get('comment') == tag]
+        base = [rule for rule in rules if rule['chain'] == direction]
+        if len(current) == len(set(bindings)) and all(rule.get('comment') == fingerprint for rule in current) and len(hooks) == 1 and base and base[0] == hooks[0]:
+            continue
+        if any(item['name'] == chain for item in chains):
+            commands.append('flush chain inet proxmox-firewall ' + chain)
+        else:
+            commands.append('add chain inet proxmox-firewall ' + chain)
+        for protocol, port, target, internal, address in sorted(set(bindings)):
+            selector = 'ip6 ' + ('daddr' if direction == 'input' else 'saddr') + ' ' + str(ipaddress.IPv6Address(address))
+            selector += ' ' + protocol + (' dport ' if direction == 'input' else ' sport ') + str(port)
+            commands.append('add rule inet proxmox-firewall ' + chain + ' ' + selector + ' accept comment "' + fingerprint + '"')
+        hooks = [rule for rule in rules if rule['chain'] == direction and rule.get('comment') == tag]
+        for hook in hooks:
+            commands.append('delete rule inet proxmox-firewall ' + direction + ' handle ' + str(hook['handle']))
+        commands.append('insert rule inet proxmox-firewall ' + direction + ' jump ' + chain + ' comment "' + tag + '"')
+    if not commands:
+        return
+    firewall.command(['nft', '--check', '-f', '-'], input='\n'.join(commands) + '\n')
+    firewall.command(['nft', '-f', '-'], input='\n'.join(commands) + '\n')

@@ -14,6 +14,11 @@ from dctlib import images, projects as w
 
 
 class ServiceSecurityTests(unittest.TestCase):
+    def setUp(self):
+        capacity = patch('dctlib.capacity.docker_space', return_value=1024**3)
+        capacity.start()
+        self.addCleanup(capacity.stop)
+
     def test_stopped_health_is_not_reported_as_current(self):
         item = {'Config': {'Healthcheck': {'Test': ['CMD', 'true']}}, 'State': {'Status': 'exited', 'Health': {'Status': 'healthy'}}}
         self.assertEqual(w.health_state(item), 'inactive')

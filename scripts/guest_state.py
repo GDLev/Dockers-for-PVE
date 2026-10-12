@@ -19,10 +19,7 @@ from urllib.parse import quote
 
 from dctlib import projects as worker
 from dctlib.policy import owned_local_volume
-
-CONFIG_FILES = ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json',
-                'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt', 'limits.json')
-
+from dctlib.paths import CONFIG_FILES, control_path
 
 def read(path):
     return json.loads(Path(path).read_text())
@@ -36,8 +33,8 @@ def write(path, value):
 @contextlib.contextmanager
 def operation(identifier, name, lock_fd=None):
     if lock_fd is None:
-        with worker.operation(identifier, name):
-            yield
+        with worker.operation(identifier, name) as handle:
+            yield handle
         return
     # The native vzdump plugin lends its locked descriptor to its child helper.
     path = worker.ROOT.parent / 'operations' / (identifier + '.lock')
@@ -45,7 +42,12 @@ def operation(identifier, name, lock_fd=None):
     if (stat.st_dev, stat.st_ino) != (expected.st_dev, expected.st_ino):
         raise ValueError('Invalid inherited DCT operation lock')
     fcntl.flock(int(lock_fd), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    yield
+    previous = getattr(worker._operation_fds, 'values', {})
+    worker._operation_fds.values = dict(previous, **{identifier: int(lock_fd)})
+    try:
+        yield
+    finally:
+        worker._operation_fds.values = previous
 
 
 def journal_path(identifier):
@@ -64,7 +66,7 @@ def owned_mounts(identifier, containers):
             if mount['Type'] == 'bind':
                 if path.is_symlink() or not path.resolve().is_relative_to(base.resolve()) or path.resolve() == base.resolve():
                     raise ValueError('Portable state requires project-owned bind mounts')
-                if path.name in CONFIG_FILES + ('settings-transaction.json', 'storage.json', 'storage.ext4'):
+                if control_path(path.resolve().relative_to(base.resolve())):
                     raise ValueError('Deployment files cannot be application mounts')
             elif mount['Type'] == 'volume':
                 volume = json.loads(worker.capture(['docker','volume','inspect',mount['Name']]))[0]
@@ -162,7 +164,7 @@ def check_portable_networks(runtime):
                     raise ValueError('Portable DCT state does not support fixed internal Docker addresses')
 
 
-def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_journal=False, digest=None):
+def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_journal=False, digest=None, backup_mode=False, copy_operation=None, copy_storage=''):
     folder = Path(folder)
     with operation(identifier, 'backup', lock_fd), worker.locked(identifier):
         from dctlib.service_recreate import recover as recover_settings
@@ -185,6 +187,14 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
         if len(containers) != expected or any(counts[s] != value.get('deploy', {}).get('replicas', 1) for s, value in runtime['services'].items()):
             raise ValueError('Deploy all DCT instances before creating a backup or clone')
         mounts = owned_mounts(identifier, containers)
+        if backup_mode:
+            from dctlib.disks import records, source
+            excluded = {source(identifier, key) for key, disk in records(worker.storage_config(identifier)).items() if not disk.get('backup', True)}
+            mounts = [mount for mount in mounts if not any(Path(mount['source']).is_relative_to(point) for point in excluded)]
+        from dctlib.capacity import require_space
+        required = sum(max(0, row.get('SizeRootFs', 0)) for row in containers)
+        required += sum(int(worker.capture(['du', '-sx', '-B1', mount['source']]).split()[0]) for mount in mounts)
+        require_space(folder, required)
         network_names = sorted({n for c in containers for n in c.get('NetworkSettings', {}).get('Networks', {})})
         networks = json.loads(worker.capture(['docker', 'network', 'inspect', *network_names])) if network_names else []
         if any((n.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier or n['Driver'] != 'bridge' for n in networks):
@@ -195,6 +205,10 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
         write(path, state)
         try:
             for container in containers:
+                from dctlib.capacity import preserve_quota
+                service_name = container['Config']['Labels']['com.docker.compose.service']
+                container['HostConfig']['StorageOpt'] = copy.deepcopy(runtime['services'][service_name].get('storage_opt') or {})
+                preserve_quota(container, {'Labels': container['Config'].setdefault('Labels', {}), 'HostConfig': container['HostConfig']})
                 if container['State']['Status'] == 'running' and not paused:
                     state['paused'].append(container['Id'])
                     write(path, state)
@@ -214,9 +228,13 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
             if settings:
                 write(config / 'storage.json', settings)
             (folder / 'data').mkdir(mode=0o700)
+            rate_kib = 0
+            if copy_operation:
+                from dctlib.transfer_io import bandwidth
+                rate_kib = bandwidth(copy_operation, [worker.storage_config(identifier).get('storage'), copy_storage]) // 1024
             for index, mount in enumerate(mounts):
                 mount['copy'] = 'data/' + str(index)
-                worker.node_runtime.copy_data(mount['source'], folder / mount['copy'], runner=worker.run)
+                worker.node_runtime.copy_data(mount['source'], folder / mount['copy'], runner=worker.run, rate_kib=rate_kib)
                 worker.node_runtime.remap_tree(folder / mount['copy'], worker.node_runtime.load(), worker.node_runtime.Runtime())
             for container in containers:
                 tag = 'betterdocker-export/' + identifier + ':' + uuid.uuid4().hex
@@ -322,8 +340,16 @@ def unpack_state(archive, folder, history=False):
         raise ValueError('Restore staging directory already exists')
     folder.mkdir(parents=True, mode=0o700)
     try:
+        from dctlib.capacity import require_space
+        capacity = require_space(folder)
         with tarfile.open(archive, 'r:*') as handle:
-            members = handle.getmembers()
+            members = []
+            total = 0
+            for member in handle:
+                total += member.size
+                if total > capacity or len(members) >= 100000:
+                    raise ValueError('DCT archive exceeds available capacity or the 100000-entry limit')
+                members.append(member)
             names = {}
             for member in members:
                 name = PurePosixPath(member.name)
@@ -408,7 +434,65 @@ def adapted_state(folder, identifier, address):
     return manifest, runtime, volumes, networks, source
 
 
-def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False, trusted_hook=False, live_firewall=None):
+def restore_request(request, saved_info, overrides, identifier, source_id, vmid):
+    """Select independent clone endpoints; migrations retain their existing identity."""
+    import copy
+    from dctlib.endpoints import KEYS, interfaces
+    if not isinstance(overrides, dict) or set(overrides) - ({'name', 'address', 'interfaces'} | set(KEYS)):
+        raise ValueError('Unsupported DCT restore override')
+    request = copy.deepcopy(request)
+    primary_override = overrides.get('interfaces', {}).get('net0', overrides)
+    chosen_v4 = primary_override.get('ipv4mode', 'static' if primary_override.get('cidr') or primary_override.get('address') else request.get('ipv4mode', 'static'))
+    if chosen_v4 == 'dhcp':
+        independent = True
+    elif chosen_v4 == 'none':
+        original = request.get('interfaces', {}).get('net0', {})
+        mode6 = primary_override.get('ipv6mode', original.get('ipv6mode', 'none'))
+        independent = mode6 in ('auto', 'dhcp') or mode6 == 'static' and bool(primary_override.get('cidr6'))
+        # An addressless guest is valid when it publishes no endpoint ports.
+        independent = independent or mode6 == 'none'
+    else:
+        independent = bool(primary_override.get('cidr') or primary_override.get('address'))
+    if not independent:
+        raise ValueError('Choose an independent address or a dynamic/addressless interface for the restored or cloned DCT')
+    extended = set(overrides) - {'name', 'bridge', 'address', 'cidr', 'ipv4mode', 'hwaddr', 'mtu'}
+    if 'interfaces' in overrides:
+        request['interfaces'] = copy.deepcopy(overrides['interfaces'])
+    elif 'interfaces' in request or extended:
+        request['interfaces'] = copy.deepcopy(request.get('interfaces') or interfaces(saved_info))
+        request['interfaces']['net0'].update({key: value for key, value in overrides.items() if key in KEYS})
+        if overrides.get('address') and not overrides.get('cidr'):
+            request['interfaces']['net0']['cidr'] = overrides['address']
+    for key in ('name', 'bridge', 'address', 'cidr', 'ipv4mode', 'hwaddr', 'mtu'):
+        if key in overrides:
+            request[key] = overrides[key]
+    if 'ipv4mode' not in primary_override and (primary_override.get('cidr') or primary_override.get('address')):
+        request['ipv4mode'] = 'static'
+        if 'interfaces' in request:
+            request['interfaces']['net0']['ipv4mode'] = 'static'
+    if overrides.get('address') and not overrides.get('cidr'):
+        request.pop('cidr', None)
+    if chosen_v4 in ('dhcp', 'none'):
+        request.update(address='', cidr='')
+    for endpoint in request.get('interfaces', {}).values():
+        for mode, address, gateway in (('ipv4mode', 'cidr', 'gw'), ('ipv6mode', 'cidr6', 'gw6')):
+            if endpoint.get(mode, 'static' if mode == 'ipv4mode' else 'none') != 'static':
+                endpoint[address] = ''
+                endpoint[gateway] = ''
+    request['vmid'] = vmid
+    if identifier != source_id:
+        request['hwaddr'] = overrides.get('hwaddr', '')
+        for name, endpoint in request.get('interfaces', {}).items():
+            explicit = overrides.get('interfaces', {}).get(name, {})
+            endpoint['hwaddr'] = explicit.get('hwaddr', overrides.get('hwaddr', '') if name == 'net0' else '')
+        if 'interfaces' in request:
+            from dctlib.endpoints import assign_macs
+            request['interfaces'] = assign_macs(request['interfaces'], identifier)
+            request['hwaddr'] = request['interfaces']['net0']['hwaddr']
+    return request
+
+
+def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False, trusted_hook=False, live_firewall=None, linked=False):
     folder = Path(folder)
     manifest = check_state(folder)
     import service_security
@@ -432,23 +516,9 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
         vmid = next((number for number, owner in worker.reserved_ids().items() if owner['id'] == identifier and owner['node'] == node), None)
         if not vmid:
             raise ValueError('Reserve the destination DCT ID before restoring')
-        request = read(folder / 'configuration' / 'request.json')
-        if not isinstance(overrides, dict) or set(overrides) - {'name', 'bridge', 'address', 'cidr', 'ipv4mode', 'hwaddr', 'mtu', 'interfaces'}:
-            raise ValueError('Unsupported DCT restore override')
-        request.update(overrides, vmid=vmid)
-        if 'interfaces' in request and 'interfaces' not in overrides:
-            from dctlib.endpoints import KEYS
-            request['interfaces']['net0'].update({key: value for key, value in overrides.items() if key in KEYS})
-            if overrides.get('address') and not overrides.get('cidr'):
-                request['interfaces']['net0']['cidr'] = overrides['address']
-        if overrides.get('address') and not overrides.get('cidr'):
-            request.pop('cidr', None)
-        if overrides.get('ipv4mode') == 'dhcp':
-            request.update(address='', cidr='')
-        elif not overrides.get('address') and not overrides.get('cidr'):
-            raise ValueError('Choose an independent IPv4 address for the restored or cloned DCT')
-        request['hwaddr'] = overrides.get('hwaddr', '')
         saved_info = read(folder / 'configuration' / 'metadata.json')
+        request = restore_request(read(folder / 'configuration' / 'request.json'), saved_info,
+                                  overrides, identifier, manifest['id'], vmid)
         # Migration/HA retain the current cluster policy, not an older backup.
         request['firewall'] = live_firewall if live_firewall is not None else saved_info.get('firewall', request.get('firewall', 0))
         request = worker.validate(request)
@@ -495,18 +565,40 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
             saved_disk = folder / 'configuration' / 'storage.json'
             if saved_disk.exists():
                 disk = read(saved_disk)
-                allocated = worker.pve_storage(identifier, 'allocate', storage=storage or disk.get('storage', 'local-lvm'), size_mib=disk['size_mib'])
+                allocation = {'storage': storage or disk.get('storage', 'local-lvm'), 'size_mib': disk['size_mib']}
+                if linked:
+                    allocation.update(source_id=manifest['id'], source_volume=disk['volid'], clone_tag='b' + uuid.uuid4().hex)
+                allocated = worker.pve_storage(identifier, 'linked-clone' if linked else 'allocate', **allocation)
                 state['volid'] = allocated['volid']; write(journal, state)
-                worker.run(['mkfs.ext4', '-q', '-m', '0', allocated['path']])
+                if not linked:
+                    worker.run(['mkfs.ext4', '-q', '-m', '0', allocated['path']])
                 allocated.pop('path', None)
                 allocated.update(vmid=vmid, node=node, unused=[], mapping={k.replace(str(worker.ROOT / manifest['id']), str(project)): remap_source(v) for k, v in disk.get('mapping', {}).items()})
                 write(project / 'storage.json', allocated)
+                (project / 'allocated-volume.json').unlink(missing_ok=True)
+                from dctlib.disks import records
+                for key, previous in records(disk).items():
+                    allocation = {'storage': storage or previous['storage'], 'size_mib': previous['size_mib']}
+                    if linked:
+                        allocation.update(source_id=manifest['id'], source_volume=previous['volid'], clone_tag='b' + uuid.uuid4().hex)
+                    extra = worker.pve_storage(identifier, 'linked-clone' if linked else 'allocate', **allocation)
+                    state.setdefault('extra_volumes', []).append(extra['volid']); write(journal, state)
+                    if not linked:
+                        worker.run(['mkfs.ext4', '-q', '-m', '0', extra['path']])
+                    extra.pop('path', None)
+                    extra.update({field: previous[field] for field in ('service', 'target', 'read_only', 'backup') if field in previous})
+                    allocated.setdefault('additional', {})[key] = extra
+                    write(project / 'storage.json', allocated)
+                    (project / 'allocated-volume.json').unlink(missing_ok=True)
                 worker.storage_mount(identifier)
                 worker.storage_unit(identifier, allocated)
             for old, name in volume_names.items():
                 state['volumes'].append(name); write(journal, state)
                 worker.docker_engine('POST', '/volumes/create', {'Name': name, 'Driver':'local', 'Labels':{'com.docker.compose.project':'bd-'+identifier}})
             for mount in manifest['mounts']:
+                if linked and mount['type'] == 'bind' and (Path(mount['source']).is_relative_to(worker.ROOT / manifest['id'] / 'storage-data') or
+                        any(Path(mount['source']).is_relative_to(worker.ROOT / manifest['id'] / ('mount-' + key)) for key in records(disk))):
+                    continue
                 if mount['type'] == 'volume':
                     name = volume_names[mount['volume']]
                     target = Path(json.loads(worker.capture(['docker', 'volume', 'inspect', name]))[0]['Mountpoint'])
@@ -518,7 +610,9 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                     worker.node_runtime.data_directory(target.parent)
                 else:
                     worker.node_runtime.data_directory(target)
-                worker.node_runtime.restore_data(folder / mount['copy'], target, file=bool(mount.get('file')), runner=worker.run)
+                from dctlib.transfer_io import bandwidth
+                worker.node_runtime.restore_data(folder / mount['copy'], target, file=bool(mount.get('file')), runner=worker.run,
+                    rate_kib=bandwidth('restore', [storage or worker.storage_config(identifier).get('storage')]) // 1024)
             for network in read(folder / 'networks.json'):
                 name = network_names[network['Name']]
                 body = {'Name':name, 'Driver':'bridge', 'Internal':network.get('Internal',False), 'Attachable':network.get('Attachable',False),
@@ -613,6 +707,15 @@ def cleanup_import(identifier, keep_reservation=False):
     if not journal.exists():
         return
     state = read(journal)
+    linked = worker.ROOT / identifier / 'linked-clone.json'
+    if linked.exists():
+        pending = read(linked)
+        from dctlib.disks import volume_ids
+        origin = worker.storage_config(worker.project_id(pending['source_id']))
+        if pending['source_volume'] not in volume_ids(origin) or not re.fullmatch(r'b[0-9a-f]{32}', pending['name']):
+            raise ValueError('Linked clone recovery ownership changed')
+        worker.pve_storage(pending['source_id'], 'snapshot-delete', volid=pending['source_volume'], name=pending['name'])
+        linked.unlink()
     if state.get('id') != identifier:
         raise ValueError('Invalid DCT import journal')
     if state.get('phase') == 'committed':
@@ -656,6 +759,8 @@ def cleanup_import(identifier, keep_reservation=False):
             worker.storage_unmount(identifier)
             volid = state.get('volid') or read(worker.ROOT / identifier / 'allocated-volume.json')['volid']
             worker.pve_storage(identifier,'free',volid=volid)
+            for extra in state.get('extra_volumes', []):
+                worker.pve_storage(identifier, 'free', volid=extra)
         unit=worker.capture(['systemd-escape','--path','--suffix=mount',str(worker.ROOT / identifier / 'storage-data')]).strip()
         worker.run(['systemctl','disable',unit],check=False,capture_output=True)
         (Path('/etc/systemd/system') / unit).unlink(missing_ok=True)
@@ -669,10 +774,19 @@ def cleanup_import(identifier, keep_reservation=False):
 
 
 def clone(identifier, node, destination, options):
-    with tempfile.TemporaryDirectory(prefix='betterdocker-clone-') as temporary:
+    linked = not options.get('full', True)
+    with operation(identifier, 'clone') as lock, tempfile.TemporaryDirectory(prefix='betterdocker-clone-') as temporary:
+        if linked:
+            info = worker.detail(identifier, node)
+            from dctlib.disks import records
+            disk = worker.storage_config(identifier)
+            if not info.get('template') or not disk.get('volid') or any(d.get('type') != 'lvmthin' for d in [disk, *records(disk).values()]):
+                raise ValueError('Linked clones require a template with LVM-thin managed disks')
+            if options.get('storage') and any(d['storage'] != options['storage'] for d in [disk, *records(disk).values()]):
+                raise ValueError('Linked clones must remain on their source storage')
         folder = Path(temporary) / 'state'
-        capture_state(identifier, node, folder, digest=options.get('digest'))
-        return restore_state(folder, destination, node, options.get('deployment', {}), options.get('storage', ''), trusted_hook=True)
+        capture_state(identifier, node, folder, lock_fd=lock.fileno(), digest=options.get('digest'), copy_operation='clone', copy_storage=options.get('storage', ''))
+        return restore_state(folder, destination, node, options.get('deployment', {}), options.get('storage', ''), trusted_hook=True, linked=linked)
 
 
 def make_template(identifier, node, digest=None):
@@ -706,9 +820,10 @@ def main():
     parser.add_argument('--lock-fd',type=int)
     parser.add_argument('--keep-journal',action='store_true')
     parser.add_argument('--paused',action='store_true')
+    parser.add_argument('--backup-mode',action='store_true')
     args=parser.parse_args()
     if args.action=='capture':
-        capture_state(*args.values,lock_fd=args.lock_fd,keep_journal=args.keep_journal,paused=args.paused)
+        capture_state(*args.values,lock_fd=args.lock_fd,keep_journal=args.keep_journal,paused=args.paused,backup_mode=args.backup_mode)
     elif args.action=='restore':
         folder,identifier,node,options=args.values
         value=read(options); restore_state(folder,identifier,node,value.get('deployment',{}),value.get('storage',''),lock_fd=args.lock_fd)

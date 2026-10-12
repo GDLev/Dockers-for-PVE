@@ -48,25 +48,37 @@ Ext.define('PVE.betterdocker.StateRestore', {
                     storageType: ['dir', 'lvmthin', 'zfspool'] },
             ],
             column2: [
+                { xtype: 'proxmoxcheckbox', name: 'full', fieldLabel: translate('Full clone'), value: true, uncheckedValue: 0, hidden: !clone, disabled: !clone || !me.isTemplate },
                 { xtype: 'pvePoolSelector', name: 'pool', fieldLabel: translate('Resource Pool'), allowBlank: true },
                 { xtype: 'pveBetterDockerBridgeSelector', name: 'bridge', nodename: me.nodename, bridgeType: 'any_bridge',
                     fieldLabel: translate('Bridge'), value: 'vmbr0', allowBlank: false },
-                { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 2,
+                { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 3,
                     items: [
                         { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'), checked: true },
                         { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: translate('DHCP') },
+                        { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'none', boxLabel: translate('None') },
                     ], listeners: { change: group => {
-                        group.up('window').down('[name=cidr]').setDisabled(group.getValue().ipv4mode === 'dhcp');
+                        group.up('window').down('[name=cidr]').setDisabled(group.getValue().ipv4mode !== 'static');
                     } } },
                 field('cidr', 'IPv4/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false }),
+                { xtype: 'radiogroup', fieldLabel: 'IPv6', columns: 2, items: [
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'static', boxLabel: translate('Static') },
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'auto', boxLabel: 'SLAAC' },
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'dhcp', boxLabel: 'DHCPv6' },
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'none', boxLabel: translate('None'), checked: true },
+                ], listeners: { change: group => {
+                    group.up('window').down('[name=cidr6]').setDisabled(group.getValue().ipv6mode !== 'static');
+                } } },
+                field('cidr6', 'IPv6/CIDR', '', { vtype: 'IPCIDRAddress', allowBlank: false, disabled: true }),
             ],
             onGetValues: function (values) {
-                const deployment = { name: values.name, bridge: values.bridge, ipv4mode: values.ipv4mode };
-                if (values.ipv4mode !== 'dhcp') { deployment.cidr = values.cidr; }
+                const deployment = { name: values.name, bridge: values.bridge, ipv4mode: values.ipv4mode, ipv6mode: values.ipv6mode || 'none' };
+                if (values.ipv4mode === 'static') { deployment.cidr = values.cidr; }
+                if (values.ipv6mode === 'static') { deployment.cidr6 = values.cidr6; }
                 const result = { newid: values.newid, deployment: JSON.stringify(deployment) };
                 if (values.storage) { result.storage = values.storage; }
                 if (values.pool) { result.pool = values.pool; }
-                if (clone) { if (me.digest) { result.digest = me.digest; } }
+                if (clone) { result.full = values.full === undefined ? 1 : Number(values.full); if (me.digest) { result.digest = me.digest; } }
                 else { result.archive = me.archive; }
                 return result;
             },

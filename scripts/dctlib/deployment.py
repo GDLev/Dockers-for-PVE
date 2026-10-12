@@ -49,7 +49,7 @@ def validate(data):
     if not isinstance(bridge, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', bridge):
         raise ValueError('Select a Linux bridge')
     ipv4mode = data.get('ipv4mode', 'static')
-    if ipv4mode not in ('static', 'dhcp'):
+    if ipv4mode not in ('static', 'dhcp', 'none'):
         raise ValueError('Choose static IPv4 or DHCP')
     address, cidr = '', ''
     if ipv4mode == 'static':
@@ -73,6 +73,8 @@ def validate(data):
         raise ValueError('MTU must be between 576 and 9216')
     if data.get('firewall', 0) not in (0, 1, False, True):
         raise ValueError('Firewall must be 0 or 1')
+    if ipv4mode == 'none' and 'interfaces' not in data:
+        data = dict(data, interfaces={'net0': {'bridge': bridge, 'ipv4mode': 'none', 'cidr': '', 'hwaddr': hwaddr, 'mtu': mtu, 'firewall': int(data.get('firewall', 0))}})
     return dict(data, mode=mode, environment=environment, address=address, cidr=cidr,
                 ipv4mode=ipv4mode, hwaddr=hwaddr, mtu=mtu, firewall=int(data.get('firewall', 0)))
 
@@ -129,7 +131,9 @@ def bind_ports(config, address, identifier, endpoints=None):
                 raise ValueError('Two services publish the same port on the project IP')
             published.add(binding)
         labels = service.get('labels') or {}
+        labels = {key: value for key, value in labels.items() if not key.startswith('betterdocker.')}
         labels['betterdocker.id'] = identifier
+        labels['betterdocker.preserved-bytes'] = '0'
         service['labels'] = labels
     return config
 
@@ -145,6 +149,28 @@ def compose_base(directory, identifier, filename='compose.runtime.json'):
         os.chmod(override, 0o600)
         command.extend(['-f', str(override)])
     return command
+
+
+def escape_literals(value):
+    """Canonical Compose values must survive another interpolation pass."""
+    if isinstance(value, str):
+        return value.replace('$', '$$')
+    if isinstance(value, list):
+        return [escape_literals(item) for item in value]
+    if isinstance(value, dict):
+        return {key: escape_literals(item) for key, item in value.items()}
+    return value
+
+
+def compose_values(value):
+    """Compose config output escapes dollars for reuse as another Compose file."""
+    if isinstance(value, str):
+        return value.replace('$$', '$')
+    if isinstance(value, list):
+        return [compose_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: compose_values(item) for key, item in value.items()}
+    return value
 
 
 def prepare(data, identifier, directory, project_directory=None, use_images=True, settings=None):
@@ -163,13 +189,13 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
     command[command.index('--project-directory') + 1] = str(project_directory)
     # Canonical config may contain passwords; never send it to the task log.
     try:
-        config = json.loads(worker.capture(command))
+        config = compose_values(json.loads(worker.capture(command)))
     except subprocess.CalledProcessError as error:
         locations = sorted(set(re.findall(r'line [0-9]+', error.stderr or '')))
         location = ' (' + ', '.join(locations) + ')' if locations else ''
         raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
     config = worker.bind_ports(config, data['address'], identifier, data['interfaces']) if 'interfaces' in data else worker.bind_ports(config, data['address'], identifier)
-    if 'interfaces' in data and all(endpoint['ipv4mode'] != 'dhcp' for endpoint in data['interfaces'].values()):
+    if 'interfaces' in data and all(endpoint['ipv4mode'] != 'dhcp' and endpoint.get('ipv6mode') not in ('auto', 'dhcp') for endpoint in data['interfaces'].values()):
         from .endpoints import bind_runtime
         config = bind_runtime(config, dict(data, id=identifier))
     worker.apply_log_defaults(config)
@@ -187,16 +213,8 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
     worker.apply_storage(config, identifier)
     worker.project_limits.check_directory(project_directory, config)
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
-    def escape(value):
-        if isinstance(value, str):
-            return value.replace('$', '$$')
-        if isinstance(value, list):
-            return [escape(v) for v in value]
-        if isinstance(value, dict):
-            return {k: escape(v) for k, v in value.items()}
-        return value
     node_runtime.check_resources(config)
-    worker.write_json(directory / 'compose.runtime.json', escape(config))
+    worker.write_json(directory / 'compose.runtime.json', escape_literals(config))
     os.chmod(directory / 'compose.runtime.json', 0o600)
     return config
 
@@ -218,6 +236,10 @@ def create(data, node, identifier=None, hookscript=None, start=True):
         if any((worker.PVE_NODES / host.name / kind / f'{vmid}.conf').exists()
                for host in worker.PVE_NODES.iterdir() for kind in ('qemu-server', 'lxc')):
             raise ValueError(f'Guest ID {vmid} is already in use by VM or LXC')
+        if 'interfaces' in data:
+            from .endpoints import assign_macs
+            data = dict(data, interfaces=assign_macs(data['interfaces'], identifier))
+            data['hwaddr'] = data['interfaces']['net0']['hwaddr']
         worker.network_preflight(data)
         directory = worker.ROOT / identifier
         try:
@@ -291,26 +313,18 @@ def update(identifier, node, data, digest=None):
             config = worker.prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory, use_images=False)
             worker.check_protected_layout(existing, json.loads((directory / 'compose.runtime.json').read_text()),
                                    json.loads((staging / 'compose.runtime.json').read_text()))
-            for filename in ('compose.source.yaml', '.env', 'compose.runtime.json'):
-                os.replace(staging / filename, directory / filename)
-        (directory / 'snapshot-restored.json').unlink(missing_ok=True)
-        (directory / 'images.json').unlink(missing_ok=True)
-        (directory / 'image-update.json').unlink(missing_ok=True)
-        worker.write_json(directory / 'request.json', data)
-        info = {key: value for key, value in existing.items() if key != 'deployment'}
-        info['expected'] = sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values())
-        info['status'] = 'creating'
-        worker.write_json(worker.METADATA / (identifier + '.json'), info)
-        try:
-            worker.ensure_address(info)
-            worker.rebind_runtime(directory, info['address'])
-            worker.write_json(worker.METADATA / (identifier + '.json'), info)
-            worker.run(worker.compose_base(directory, identifier) + ['up', '--no-start', '--remove-orphans'], timeout=1800)
-            worker.refresh(node)
-        except Exception:
-            info['status'] = 'error'
-            worker.write_json(worker.METADATA / (identifier + '.json'), info)
-            raise
+            resolving = json.loads((staging / 'compose.runtime.json').read_text())
+            for service in resolving['services'].values():
+                for entry in service.get('env_file') or []:
+                    if isinstance(entry, dict) and Path(entry.get('path', '')).name == '.env':
+                        entry['path'] = str(staging / '.env')
+            worker.write_json(staging / '.resolve-compose.json', resolving)
+            command = worker.compose_base(staging, identifier, '.resolve-compose.json') + ['config', '--format', 'json']
+            command[command.index('--project-directory') + 1] = str(directory)
+            resolved = compose_values(json.loads(worker.capture(command)))
+            from .deployment_edit import apply
+            apply(existing, data, config, resolved, staging)
+        worker.refresh(node)
 
 
 def restore(node):

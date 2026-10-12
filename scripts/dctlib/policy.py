@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 import runtime as node_runtime
 import service_security
+from .paths import control_path
 
 LOG_DEFAULTS = {'max-size': '10m', 'max-file': '3'}
 
@@ -54,16 +55,37 @@ def safe_bind(source, identifier):
         raise ValueError('Delegated access requires project-owned bind mounts')
     relative = path.resolve().relative_to(base)
     # Deployment files contain credentials and must never be writable by a workload.
-    if not relative.parts or relative.parts[0] in {
-        'limits.json', 'request.json', 'compose.source.yaml', 'compose.runtime.json', '.env',
-        'settings.json', 'service-defaults.json', 'settings-transaction.json', 'images.json', 'image-update.json', 'pending.json', 'pending-network.json', 'storage.json', 'ha.json', 'snapshots',
-        'export-transaction.json', 'notes.txt', 'allocated-volume.json', 'storage.ext4',
-        'snapshot-restored.json', 'snapshot-tree.json', 'snapshot-transaction.json',
-        'storage-transaction.json', 'network-transaction.json', 'network-resume.json',
-        'network-reconcile.json', 'dhcp-address.json', 'dhclient.conf', 'dhclient.leases',
-        'metrics.json', 'disk-usage.json', 'rootfs-quota.json', 'replication.json',
-    } or relative.parts[0].startswith('.'):
+    if control_path(relative) or len(relative.parts) == 1 and (path.suffix or path.exists() and not path.is_dir()):
         raise ValueError('Delegated access cannot mount project control files')
+    if any(parent.is_symlink() for parent in (path, *path.parents)):
+        raise ValueError('Delegated bind paths cannot cross symbolic links')
+
+
+def owned_volume_reference(name, identifier, container):
+    """Anonymous names are allowed only when present in this inspected instance."""
+    if name.startswith('bd-' + identifier + '_'):
+        return True
+    return bool(re.fullmatch(r'[0-9a-f]{64}', name) and any(
+        m.get('Type') == 'volume' and m.get('Name') == name for m in container.get('Mounts', [])))
+
+
+def validate_bind_layout(paths, identifier):
+    """A workload must not be able to rename another mount's source ancestors."""
+    base = (worker.ROOT / identifier).resolve()
+    selected = node_runtime.load()
+    sources = {Path(path) for path in paths}
+    for path in sources:
+        worker.safe_bind(str(path), identifier)
+        if any(path != other and path.is_relative_to(other) for other in sources):
+            raise ValueError('Delegated bind mounts cannot overlap; use separate data directories')
+        for parent in path.parents:
+            if parent == base:
+                break
+            if parent.exists():
+                info = parent.lstat()
+                mapped = selected.rootless and (info.st_uid == selected.uid or selected.subuid <= info.st_uid < selected.subuid + selected.count)
+                if (info.st_uid != 0 and not mapped) or info.st_mode & 0o022:
+                    raise ValueError('Bind source ancestors must belong to the host or this runtime and be non-writable by others')
 
 
 def validate_delegated_source(source):
@@ -100,6 +122,8 @@ def validate_delegated_config(config, identifier):
                   'blkio_config oom_score_adj oom_kill_disable storage_opt security_opt'.split())
     if not isinstance(config, dict) or set(config) - {'name', 'version', 'services', 'volumes', 'networks'}:
         raise ValueError('Delegated configuration contains unsupported resources')
+    validate_bind_layout([mount['source'] for service in config.get('services', {}).values()
+                          for mount in service.get('volumes') or [] if isinstance(mount, dict) and mount.get('type') == 'bind'], identifier)
     for service in config.get('services', {}).values():
         if not isinstance(service, dict) or set(service) - allowed:
             raise ValueError('Delegated configuration contains unsafe or unsupported service options')
@@ -145,6 +169,8 @@ def validate_delegated_config(config, identifier):
 
 
 def validate_delegated_containers(containers, identifier):
+    validate_bind_layout([mount['Source'] for container in containers for mount in container.get('Mounts') or []
+                          if mount.get('Type') == 'bind'], identifier)
     for container in containers:
         host = container.get('HostConfig') or {}
         service_security.delegated(host.get('SecurityOpt') or [])
@@ -169,7 +195,7 @@ def validate_delegated_containers(containers, identifier):
             source = bind.split(':', 1)[0]
             if source.startswith('/'):
                 worker.safe_bind(source, identifier)
-            elif not source.startswith('bd-' + identifier + '_'):
+            elif not owned_volume_reference(source, identifier, container):
                 raise ValueError('This deployment uses an external volume')
         for mount in host.get('Mounts') or []:
             if mount.get('Type') == 'bind':
@@ -180,7 +206,7 @@ def validate_delegated_containers(containers, identifier):
                 options = mount.get('VolumeOptions') or {}
                 if options.get('DriverConfig') or options.get('Subpath'):
                     raise ValueError('Custom volume options require administrator access')
-                if mount.get('Source') and not mount['Source'].startswith('bd-' + identifier + '_'):
+                if mount.get('Source') and not owned_volume_reference(mount['Source'], identifier, container):
                     raise ValueError('This deployment uses an external volume')
             elif mount.get('Type') != 'tmpfs':
                 raise ValueError('Unsupported deployment mount')
@@ -213,8 +239,12 @@ def delegated_access(identifier, node):
             for mount in container.get('Mounts', []):
                 if mount.get('Type') == 'volume':
                     volume = json.loads(worker.capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
-                    if volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+                    if not owned_local_volume(volume, mount['Name'], identifier):
                         raise ValueError('This deployment uses an external volume')
+                    users = set(worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + mount['Name']]).split())
+                    if users - {record['id'] for record in records}:
+                        raise ValueError('This deployment uses a shared volume')
+                    node_runtime.check_volume_path(Path(mount['Source']), mount['Name'])
             for network in container.get('NetworkSettings', {}).get('Networks', {}):
                 value = json.loads(worker.capture(['docker', 'network', 'inspect', network]))[0]
                 worker.validate_delegated_networks([value])

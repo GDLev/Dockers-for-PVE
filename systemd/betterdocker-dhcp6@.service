@@ -1,0 +1,13 @@
+[Unit]
+Description=BetterDocker DHCPv6 endpoint %i
+Requires=pve-cluster.service
+Wants=network-online.target
+After=network-online.target pve-cluster.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/betterdocker/provision.py dhcp6-client %i
+ExecStop=/usr/local/lib/betterdocker/provision.py dhcp6-release %i
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s

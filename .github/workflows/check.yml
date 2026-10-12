@@ -13,6 +13,14 @@ jobs:
           node-version: '22'
       - run: python3 -m pip install -r requirements-test.txt
       - run: python3 -m unittest discover -s tests -v
-      - run: bash -n install.sh start.sh scripts/docker-install.sh
+      - run: bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
       - run: python3 scripts/build_frontend.py | node --check
       - run: node tests/test_frontend.js
+      - run: bash packaging/build-deb.sh
+      - run: bash packaging/build-release.sh
+      - run: dpkg-deb --info dist/*.deb
+      - run: dpkg-deb --contents dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: betterdocker-deb
+          path: dist/

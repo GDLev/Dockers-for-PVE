@@ -29,7 +29,7 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | POST | `G/images` | Update stopped services; send preview `token`, `digest` and a new `recovery` snapshot name. Requires configuration, snapshot and rollback privileges. |
 | POST | `G/action` | `action`: `start`, `shutdown`, `force-stop` or `reboot`. Optional `timeout` in seconds. |
 | POST | `G/migrate` | Move to `target`; running DCTs require `restart=1`. Optional `storage`, `timeout` and `digest`. HA uses native relocation. |
-| POST | `G/clone` | Clone with `newid`, JSON-encoded destination `deployment`, optional `pool`, `storage` and `digest`. |
+| POST | `G/clone` | Clone with `newid`, JSON-encoded destination `deployment`, optional `pool`, `storage` and `digest`. `full=0` requests an LVM-thin linked clone of a template. |
 | GET | `G/snapshots` | List snapshots. |
 | GET / PUT | `G/snapshot/<name>/config` | Snapshot metadata. PUT `description` with the digest returned by GET. |
 | POST | `G/snapshot` | `action`: `create`, `restore` or `delete`; also send `snapname`. |
@@ -161,7 +161,7 @@ Charts use PVE's native guest RRD archives and consolidation. Long ranges fill a
 
 `GET /nodes/<node>/docker/<id>/network` returns an `interfaces` object keyed by `net0` through `net15`, current `digest` and pending changes. `PUT` edits one interface using `net=net1`, or replaces the whole map using JSON in `interfaces`. Supply the latest digest. `delete=1` removes the selected interface; `net0` is required. `revert=1` discards pending network changes. Running guests apply changes at their next full start or reboot.
 
-Each interface accepts `bridge`, `hwaddr`, `mtu`, `firewall`, `tag`, `link_down`, `rate`, `ipv4mode`, `cidr`, `gw`, `ipv6mode`, `cidr6`, `gw6` and `ports`. IPv4 supports static addresses and DHCP; additional interfaces can disable IPv4. IPv6 supports static addresses. VLAN tags require a VLAN-aware bridge. Rate limits use MiB/s in both directions. Unassigned published ports use net0; `ports=web:8080/tcp` assigns that service's published port to the selected endpoint.
+Each interface accepts `bridge`, `hwaddr`, `mtu`, `firewall`, `tag`, `link_down`, `rate`, `ipv4mode`, `cidr`, `gw`, `ipv6mode`, `cidr6`, `gw6` and `ports`. IPv4 supports `static`, `dhcp` and `none`. IPv6 supports `static`, `auto`, `dhcp` and `none`; use `auto` for SLAAC. An interface can have neither family assigned. VLAN tags require a VLAN-aware bridge; transparent trunks are not supported. Rate limits use MiB/s in both directions. Unassigned published ports use net0; `ports=web:8080/tcp` assigns that service's published port to the selected endpoint.
 
 These are published endpoints on the host, not extra NICs inside each Docker service. Gateways provide source routing for endpoint traffic without changing the node's management routes. Docker's private service networks and their default route remain separate. Published IPv6 ports pass DCT firewall policy before bypassing the separate node INPUT policy. Rootless IPv6 uses a host TCP/UDP adapter; it does not enable IPv6 inside the private Docker networks. Disconnect blocks endpoint traffic while keeping its address reserved.
 
@@ -185,3 +185,15 @@ AppArmor requires rootful Docker and an enabled host AppArmor module. Custom pro
 To update images, POST `G/images/preview` with `images={"web":"nginx:stable"}` and the current configuration digest. Wait for the returned task, then GET `G/images` to compare deployed base images. `candidate_base` is the selected platform digest; `candidate` is the image ID pinned during the update. Pulling does not recreate services. Stop the DCT and apply or revert pending settings, then POST `G/images` with the preview's `token`, `digest` and a new snapshot name in `recovery`. Previews expire after one hour and reject changed configurations or containers.
 
 The update creates that snapshot and recreates only changed services using immutable local image IDs. It leaves the DCT stopped. Start it and check its healthchecks. Rollback uses the normal snapshot endpoint and restores both containers and captured data, discarding data changes made since the snapshot. A failed or interrupted update requires this rollback before another update or Start. Recovery snapshots remain until explicitly removed. Existing snapshot ownership and storage restrictions apply.
+
+## Additional disks and recovery
+
+PUT `G/disks/mp1` with `service`, `target`, `storage`, `size_mib` and the current `digest`. Optional `read_only` and `backup` values default to false and true. The DCT must be stopped. Repeat the request to grow the disk, change its path or move it to another supported storage. Sizes cannot shrink. PUT `detach=1` to detach it while retaining its volume under unused disks. Additional disks require an existing project data disk.
+
+GET `G/management` returns these disks in `storage.disks`, storage measurements in `storage.usage`, and recovery hints in `recovery`. Image sizes are logical sizes and can share physical blocks. POST `G/recover` to recover interrupted local configuration operations. It requires the full deployment configuration privileges. A `recovery.rollback` value identifies an image or snapshot operation that must use normal snapshot rollback instead.
+
+POST `G/clone` accepts `full=0` for linked clones of templates whose managed disks are on LVM-thin. The clone stays on the source storage. Full clones remain the default and work with other supported storage types. Linked clones use native thin snapshots; their temporary snapshot is removed after the clone is allocated.
+
+Network requests accept `ipv6mode=auto` for SLAAC and `ipv6mode=dhcp` for DHCPv6. Runtime addresses appear in `endpoint_ipv6`. IPv4 can be disabled with `ipv4mode=none`. Interfaces without addresses cannot publish ports. Endpoint acquisition does not replace host routes or DNS. VLAN tags select one VLAN per endpoint; a transparent L2 trunk is outside this published-port network model.
+
+Clone and restore `deployment` overrides accept the same IPv6 fields and an `interfaces` object for multiple endpoints. New guests receive new MAC addresses unless you specify them. Migration keeps the existing addresses and MACs.

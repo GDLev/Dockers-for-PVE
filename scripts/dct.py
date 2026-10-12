@@ -91,7 +91,7 @@ def net0(value):
         if key in values:
             result[key] = values[key].replace(';', ',') if key == 'ports' else values[key]
     if 'ip6' in values:
-        result.update(ipv6mode='none' if values['ip6'] == 'none' else 'static', cidr6='' if values['ip6'] == 'none' else values['ip6'])
+        result.update(ipv6mode=values['ip6'] if values['ip6'] in ('none', 'auto', 'dhcp') else 'static', cidr6='' if values['ip6'] in ('none', 'auto', 'dhcp') else values['ip6'])
     if 'rate' in values:
         result['rate'] = float(values['rate'])
     for key in ('mtu', 'firewall', 'tag', 'link_down'):
@@ -103,7 +103,9 @@ def net0(value):
 def format_net0(info):
     values = {'bridge': info['bridge'], 'ip': info['ipv4mode'] if info.get('ipv4mode') in ('dhcp', 'none') else info.get('cidr', info.get('address', ''))}
     values.update({key: info[key] for key in ('hwaddr', 'mtu', 'firewall', 'tag', 'link_down', 'rate', 'gw', 'gw6') if info.get(key)})
-    if info.get('cidr6'):
+    if info.get('ipv6mode') in ('auto', 'dhcp'):
+        values['ip6'] = info['ipv6mode']
+    elif info.get('cidr6'):
         values['ip6'] = info['cidr6']
     if info.get('ports'):
         values['ports'] = info['ports'].replace(',', ';')
@@ -190,7 +192,7 @@ def create(params):
             data['interfaces'] = networks
     if params.get('env-file'):
         data['environment'] = Path(params['env-file']).read_text()
-    if not data.get('bridge') or not (data.get('cidr') or data.get('ipv4mode') == 'dhcp'):
+    if not data.get('bridge') or not (data.get('cidr') or data.get('ipv4mode') in ('dhcp', 'none')):
         raise ValueError('Specify --net0 bridge=<bridge>,ip=<CIDR|dhcp>')
     node = params.get('node') or os.uname().nodename.split('.')[0]
     return api('create', '/nodes/' + node + '/docker', deployment=data, pool=params.get('pool'), start=params.get('start', 0))
@@ -203,8 +205,9 @@ def set_options(base, info, params):
         raise ValueError('Only startup, hookscript or network interfaces can be deleted')
     limits = {key: params[native] for native, key in RESOURCE_KEYS.items() if native in params}
     networks = {key: net0(params[key]) for key in params if re.fullmatch(r'net(?:[0-9]|1[0-5])', key)}
+    disks = {key: params[key] for key in params if re.fullmatch(r'mp(?:[1-9]|1[0-5])', key)}
     network = bool(networks) or any(deleted)
-    if not changes and not limits and not network:
+    if not changes and not limits and not network and not disks:
         raise ValueError('No configuration options specified')
     chosen = service(info, params.get('service')) if limits else None
     if chosen:
@@ -227,6 +230,17 @@ def set_options(base, info, params):
             finish_task(api('set', base + '/config', delete=name, digest=api('get', base + '/management')['digest']), params)
             continue
         finish_task(api('set', base + '/network', net=name, delete=1, digest=api('get', base + '/management')['digest']), params)
+    for name, value in disks.items():
+        if value == 'delete':
+            values = {'detach': 1}
+        else:
+            values = dict(part.split('=', 1) for part in value.split(','))
+            if set(values) - {'storage', 'size', 'mp', 'service', 'backup', 'ro'}:
+                raise ValueError('Invalid mount point option')
+            values = {'storage': values.get('storage'), 'size_mib': int(values.get('size', 1024)),
+                      'target': values.get('mp', ''), 'service': values.get('service') or service(info, params.get('service'))['name'],
+                      'backup': int(values.get('backup', 1)), 'read_only': int(values.get('ro', 0))}
+        finish_task(api('set', base + '/disks/' + name, **values, digest=api('get', base + '/management')['digest']), params)
     if limits:
         digest = api('get', base + '/management')['digest']
         finish_task(api('set', base + '/settings', service=chosen['name'], settings=values, digest=digest), params)
@@ -234,6 +248,13 @@ def set_options(base, info, params):
 
 def dispatch(command, params):
     # PVE validates numeric options, but Perl can encode their scalars as strings.
+    if command == 'cleanup':
+        if os.geteuid() != 0:
+            raise ValueError('Host administrator required')
+        result = subprocess.check_output(['/usr/local/lib/betterdocker/provision.py', 'retained-data', params['project-id'],
+            str(int(params.get('destroy-owned-data', 0)))], text=True)
+        print(result, end='')
+        return
     params = dict(params)
     for key in ('vmid', 'newid', 'memory', 'swap', 'cpuunits', 'pids', 'timeout',
                 'onboot', 'protection', 'restart', 'start', 'cluster', 'current', 'verbose', 'full'):
@@ -334,17 +355,19 @@ def dispatch(command, params):
             output(rows, params)
     elif command == 'set':
         set_options(base, info, params)
+    elif command == 'recover':
+        finish_task(api('create', base + '/recover'), params)
     elif command == 'migrate':
         finish_task(api('create', base + '/migrate', target=params['target'], storage=params.get('target-storage'), restart=params.get('restart'), timeout=params.get('timeout'), digest=info['digest']), params)
     elif command == 'clone':
         destination = net0(params['net0'])
         if 'firewall' in destination:
             raise ValueError('Clones inherit firewall settings; omit firewall from --net0')
-        if not destination.get('cidr') and destination.get('ipv4mode') != 'dhcp':
-            raise ValueError('Specify an independent IP address or DHCP in --net0')
+        if not destination.get('cidr') and destination.get('ipv4mode') not in ('dhcp', 'none'):
+            raise ValueError('Specify an independent address, DHCP or no IPv4 in --net0')
         destination['name'] = params.get('hostname') or info['name'][:55] + '-clone'
         finish_task(api('create', base + '/clone', newid=params['newid'], deployment=destination, pool=params.get('pool'),
-                        storage=params.get('storage'), digest=info['digest']), params)
+                        storage=params.get('storage'), full=params.get('full', 1), digest=info['digest']), params)
     elif command == 'template':
         finish_task(api('create', base + '/template', digest=info['digest']), params)
     else:

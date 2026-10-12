@@ -11,7 +11,7 @@ Ext.define('PVE.betterdocker.FirewallOptions', {
     add_boolean_row: function (name) {
         this.rows.status = { header: gettext('Status'), required: true, defaultValue: 'unknown',
             renderer: value => gettext({ active: 'Active', inactive: 'Inactive', error: 'Error', unknown: 'Unknown' }[value] || 'Unknown') };
-        if (['dhcp', 'ndp', 'radv', 'macfilter', 'ipfilter'].includes(name)) { return; }
+        if (['dhcp', 'ndp', 'radv'].includes(name)) { return; }
         return this.callParent(arguments);
     },
 });
@@ -35,7 +35,7 @@ Ext.define('PVE.betterdocker.NetworkEdit', {
                 { xtype: 'radiogroup', fieldLabel: 'IPv4', columns: 3, items: [
                     { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'), checked: true },
                     { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'dhcp', boxLabel: 'DHCP' },
-                    { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'none', boxLabel: translate('None'), hidden: me.interfaceName === 'net0', disabled: me.interfaceName === 'net0' },
+                    { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'none', boxLabel: translate('None') },
                 ], listeners: { change: group => {
                     ['cidr', 'gw'].forEach(name => group.up('window').down('[name=' + name + ']')?.setDisabled(group.getValue().ipv4mode !== 'static'));
                 } } },
@@ -43,6 +43,8 @@ Ext.define('PVE.betterdocker.NetworkEdit', {
                 field('gw', 'Gateway (IPv4)', '', { vtype: 'IPAddress' }),
                 { xtype: 'radiogroup', fieldLabel: 'IPv6', columns: 2, items: [
                     { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'static', boxLabel: translate('Static') },
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'auto', boxLabel: 'SLAAC' },
+                    { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'dhcp', boxLabel: 'DHCPv6' },
                     { xtype: 'radiofield', name: 'ipv6mode', inputValue: 'none', boxLabel: translate('None'), checked: true },
                 ], listeners: { change: group => {
                     ['cidr6', 'gw6'].forEach(name => group.up('window').down('[name=' + name + ']')?.setDisabled(group.getValue().ipv6mode !== 'static'));

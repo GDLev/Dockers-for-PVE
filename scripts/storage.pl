@@ -10,17 +10,39 @@ use PVE::Cluster;
 use PVE::INotify;
 use PVE::JSONSchema;
 use PVE::Tools;
-use Fcntl qw(O_WRONLY O_CREAT O_EXCL);
+use Fcntl qw(O_RDONLY O_WRONLY O_CREAT O_EXCL :flock);
 die "Root required\n" if $>;
 local $/;
 my $p = decode_json(<STDIN>);
 my $id = $p->{id};
 die "Invalid project\n" unless $id =~ /\A[0-9a-f]{32}\z/;
 my $base = "/var/lib/betterdocker/projects/$id";
+my $operation_lock;
+if (defined($p->{operation_fd})) {
+    die "Invalid inherited operation descriptor\n" unless $p->{operation_fd} =~ /\A[0-9]+\z/;
+    open($operation_lock, '+<&=', $p->{operation_fd}) or die "Cannot inherit storage operation lock\n";
+    my @actual = stat($operation_lock);
+    my @expected = stat("/var/lib/betterdocker/operations/$id.lock");
+    die "Storage operation lock ownership changed\n" unless @actual && @expected && $actual[0] == $expected[0] && $actual[1] == $expected[1];
+    flock($operation_lock, LOCK_EX | LOCK_NB) or die "Storage operation lock lost\n";
+}
 sub read_json {
     my ($path) = @_;
     open(my $fh, '<', $path) or die "$path: $!\n";
     return decode_json(<$fh>);
+}
+sub durable_json {
+    my ($path, $value) = @_;
+    my $temporary = "$path.tmp-$$";
+    sysopen(my $fh, $temporary, O_WRONLY|O_CREAT|O_EXCL, 0600) or die "$temporary: $!\n";
+    print $fh encode_json($value) or die "Cannot write storage journal: $!\n";
+    $fh->flush() or die "Cannot flush storage journal: $!\n";
+    PVE::Tools::fsync(fileno($fh)) or die "Cannot sync storage journal: $!\n";
+    close($fh) or die "Cannot close storage journal: $!\n";
+    rename($temporary, $path) or die "Cannot publish storage journal: $!\n";
+    sysopen(my $directory, $base, O_RDONLY) or die "$base: $!\n";
+    PVE::Tools::fsync(fileno($directory)) or die "Cannot sync storage directory: $!\n";
+    close($directory);
 }
 my $metadata = '/etc/pve/betterdocker';
 if (defined($p->{metadata})) {
@@ -40,7 +62,7 @@ if ($exists && $info->{node} ne PVE::INotify::nodename() && $p->{action} =~ /\Af
     die "Local disk ownership changed\n" unless $local->{vmid} == $info->{vmid};
     $info = $local;
 }
-die "Deleted guest permits disk cleanup only\n" if !$exists && $p->{action} ne 'free' && $p->{action} ne 'free-check';
+die "Deleted guest permits disk cleanup only\n" if !$exists && $p->{action} ne 'free' && $p->{action} ne 'free-check' && $p->{action} ne 'snapshot-delete';
 my $vmid = $info->{vmid};
 die "Wrong node\n" unless $info->{node} eq PVE::INotify::nodename();
 my $reservation = read_json("$metadata/ids/$vmid.json");
@@ -59,6 +81,7 @@ if ($volid) {
         next unless -f "$base/$file";
         my $state = read_json("$base/$file");
         push @owned, $state->{volid}, $state->{target}->{volid}, @{$state->{unused} // []};
+        push @owned, map { $_->{volid} } values %{$state->{additional} // {}};
     }
     die "Unmanaged volume\n" unless grep { defined($_) && $_ eq $volid } @owned;
 } else {
@@ -77,16 +100,55 @@ die "Only local directory, LVM-thin and ZFS rootdir storage is supported\n"
     unless ($scfg->{type} eq 'dir' || $scfg->{type} eq 'lvmthin' || $scfg->{type} eq 'zfspool') && $scfg->{content}->{rootdir} && !$scfg->{shared};
 PVE::Storage::storage_check_enabled($cfg, $sid, $info->{node});
 my $result = {};
-if ($action eq 'allocate') {
+if ($action eq 'linked-clone') {
+    my $source_id = $p->{source_id};
+    die "Invalid linked clone source\n" unless $source_id =~ /\A[0-9a-f]{32}\z/;
+    my $source_info = read_json("$metadata/$source_id.json");
+    die "Linked clones require a local template\n" unless $source_info->{template} && $source_info->{node} eq $info->{node};
+    my $source_disk = read_json("/var/lib/betterdocker/projects/$source_id/storage.json");
+    my $source_volume = $p->{source_volume};
+    my @source_owned = ($source_disk->{volid}, map { $_->{volid} } values %{$source_disk->{additional} // {}});
+    die "Unowned linked clone source\n" unless grep { $_ eq $source_volume } @source_owned;
+    my ($source_sid) = PVE::Storage::parse_volume_id($source_volume);
+    die "Linked clones require the same LVM-thin storage\n" unless $source_sid eq $sid && $scfg->{type} eq 'lvmthin';
+    if (($ENV{BETTERDOCKER_TRUSTED} // '1') ne '1') {
+        my $rpc = PVE::RPCEnvironment->init('cli');
+        $rpc->init_request();
+        $rpc->set_user($ENV{BETTERDOCKER_TASK_USER});
+        $rpc->check($ENV{BETTERDOCKER_TASK_USER}, "/vms/$source_info->{vmid}", ['VM.Clone']);
+        $rpc->check($ENV{BETTERDOCKER_TASK_USER}, "/storage/$sid", ['Datastore.AllocateSpace']);
+    }
+    die "An unfinished allocation exists\n" if -e "$base/allocated-volume.json";
+    my $name = $p->{clone_tag};
+    die "Invalid clone snapshot name\n" unless $name =~ /\Ab[0-9a-f]{32}\z/;
+    durable_json("$base/linked-clone.json", { source_id => $source_id, source_volume => $source_volume, name => $name });
+    my $failure;
+    eval {
+        PVE::Storage::volume_snapshot($cfg, $source_volume, $name);
+        my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+        my $target_name = $plugin->find_free_diskname($sid, $scfg, $vmid);
+        my $expected = "$sid:$target_name";
+        durable_json("$base/allocated-volume.json", { volid => $expected });
+        $volid = PVE::Storage::vdisk_clone($cfg, $source_volume, $vmid, $name);
+        die "Linked clone allocation identity changed\n" unless $volid eq $expected;
+    };
+    $failure = $@;
+    PVE::Storage::volume_snapshot_delete($cfg, $source_volume, $name, 0);
+    unlink "$base/linked-clone.json";
+    die $failure if $failure;
+} elsif ($action eq 'allocate') {
     die "An unfinished allocation exists\n" if -e "$base/allocated-volume.json";
     my $size = $p->{size_mib};
     die "Invalid size\n" unless $size =~ /\A[0-9]+\z/ && $size >= 256 && $size <= 1048576;
     my $status = PVE::Storage::storage_info($cfg, 'rootdir');
     die "Insufficient storage space\n" unless $status->{$sid}->{avail} >= $size * 1048576;
-    $volid = PVE::Storage::vdisk_alloc($cfg, $sid, $vmid, 'raw', undef, $size * 1024);
-    # Persist ownership before returning to Python, including a killed caller.
-    sysopen(my $fh, "$base/allocated-volume.json", O_WRONLY|O_CREAT|O_EXCL, 0600) or die $!;
-    print $fh encode_json({ volid => $volid }); close $fh or die $!;
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+    my $name = $plugin->find_free_diskname($sid, $scfg, $vmid, 'raw', $scfg->{type} eq 'dir' ? 1 : 0);
+    my $expected = "$sid:" . ($scfg->{type} eq 'dir' ? "$vmid/" : '') . $name;
+    # Record the exact native volume name before allocation, including node reboot.
+    durable_json("$base/allocated-volume.json", { volid => $expected });
+    $volid = PVE::Storage::vdisk_alloc($cfg, $sid, $vmid, 'raw', $name, $size * 1024);
+    die "Storage allocation identity changed\n" unless $volid eq $expected;
 } elsif ($action eq 'resize') {
     my $size = $p->{size_mib} * 1048576;
     my ($old) = PVE::Storage::volume_size_info($cfg, $volid);
@@ -95,6 +157,11 @@ if ($action eq 'allocate') {
 } elsif ($action =~ /\A(snapshot|rollback|snapshot-delete|rollback-check|snapshot-export|snapshot-export-cleanup)\z/) {
     my $name = $p->{name};
     die "Invalid snapshot\n" unless $name =~ /\A[a-zA-Z][a-zA-Z0-9_-]{0,39}\z/;
+    if (!$exists) {
+        my $manifest = read_json("/var/lib/betterdocker/snapshots/$id/$name/manifest.json");
+        die "Retained snapshot ownership changed\n" unless $manifest->{id} eq $id && $manifest->{name} eq $name
+            && $manifest->{native_storage}->{volid} eq $volid && $manifest->{native_storage}->{name} eq $name;
+    }
     die "Storage snapshots unsupported\n" unless $scfg->{type} eq 'lvmthin' || $scfg->{type} eq 'zfspool';
     my (undef, $volume) = PVE::Storage::parse_volume_id($volid);
     my $exists;

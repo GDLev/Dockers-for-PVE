@@ -130,7 +130,7 @@ if [[ "$ACTION" == install ]]; then
     stage dependencies
     echo 'Updating the package index and installing BetterDocker dependencies.'
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client ndisc6 pve-xtermjs nftables iptables
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client ndisc6 pve-xtermjs nftables iptables rsync
     if [[ "$RUNTIME_MODE" == rootless ]]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y uidmap dbus-user-session
     fi
@@ -198,6 +198,7 @@ TARGETS=(
     /etc/betterdocker/runtime.json
     /usr/local/lib/betterdocker/rootless-engine.sh
 )
+TARGETS+=(/etc/systemd/system/betterdocker-dhcp6@.service)
 for source in "$PROJECT_DIR"/scripts/dctlib/*.py; do
     TARGETS+=("/usr/local/lib/betterdocker/dctlib/$(basename "$source")")
 done
@@ -334,6 +335,7 @@ with worker.locked():
             if storage:
                 worker.storage_unit(info['id'], storage)
 PY
+install -m 0644 "$PROJECT_DIR/systemd/betterdocker-dhcp6@.service" /etc/systemd/system/betterdocker-dhcp6@.service
 stage services
 systemctl daemon-reload
 systemctl enable --now betterdocker-firewall.service

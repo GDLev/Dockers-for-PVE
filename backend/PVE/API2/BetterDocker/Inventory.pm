@@ -8,6 +8,20 @@ sub register_api {
     my ($helper, $node, $id, $digest, $root) = PVE::API2::BetterDocker::method_defaults();
 
     PVE::API2::BetterDocker::register_docker_method({
+        name => 'recover', path => '{id}/recover', method => 'POST', protected => 1, proxyto => 'node',
+        description => 'Recover interrupted local configuration operations without image or snapshot rollback.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
+        returns => { type => 'string' },
+        code => sub {
+            my ($p) = @_;
+            my $rpc = PVE::RPCEnvironment::get();
+            return $rpc->fork_worker('betterdockersettings', PVE::API2::BetterDocker::task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+                PVE::Tools::run_command([$helper, 'recover', $p->{id}, $p->{node}]);
+            });
+        },
+    });
+
+    PVE::API2::BetterDocker::register_docker_method({
         name => 'list', path => '', method => 'GET', protected => 1, proxyto => 'node',
         description => 'List host Docker projects on this node.', permissions => $root,
         parameters => { additionalProperties => 0, properties => { node => $node, diagnostics => { type => 'boolean', optional => 1, default => 0 } } },

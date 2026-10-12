@@ -26,6 +26,7 @@ class SnapshotTests(unittest.TestCase):
             (project / 'request.json').write_text('{}')
             (project / 'compose.source.yaml').write_text('services: {}')
             worker.write_json(project / 'compose.runtime.json', {'services': {'app': {'image': 'busybox'}}})
+            worker.write_json(project / 'pending-network.json', {'net0': {'mtu': 1400}})
             info = dict(id=ID, node='pve', vmid=101, address='10.0.0.1', name='test', status='stopped')
             container = dict(Id='old', Name='/app', Config={'Image': 'busybox', 'Labels': {'com.docker.compose.service': 'app'}}, HostConfig={}, Mounts=[], NetworkSettings={})
             def capture(args):
@@ -45,9 +46,11 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(saved[0]['SnapshotImage'], 'sha256:snapshot')
                 (project / 'notes.txt').write_text('Changed notes')
                 (project / '.env').write_text('SECRET=changed')
+                worker.write_json(project / 'pending-network.json', {'net0': {'mtu': 1500}})
                 worker.snapshot_apply(ID, 'pve', 'before')
                 self.assertEqual((project / 'notes.txt').read_text(), 'Original notes')
                 self.assertEqual((project / '.env').read_text(), 'SECRET=original')
+                self.assertEqual(json.loads((project / 'pending-network.json').read_text()), {'net0': {'mtu': 1400}})
 
     def test_names_cannot_escape_snapshot_directory(self):
         for value in ('../x', 'x/y', 'current', 'vzdump', '-x', 'a' * 41, 'x\n', 'x;id'):
@@ -155,8 +158,8 @@ class SnapshotTests(unittest.TestCase):
             folder = Path(temporary) / ID
             folder.mkdir()
             worker.write_json(folder / 'snapshot-restored.json', {'containers': ['one', 'two'], 'address': '10.0.0.1'})
-            worker.write_json(folder / 'compose.runtime.json', {'services': {'web': {}}})
-            records = [{'id': 'one', 'service': 'web'}, {'id': 'two', 'service': 'web'}]
+            worker.write_json(folder / 'compose.runtime.json', {'services': {'web': {'deploy': {'replicas': 2}}}})
+            records = [{'id': 'one', 'service': 'web', 'state': 'exited'}, {'id': 'two', 'service': 'web', 'state': 'exited'}]
             with patch.object(worker, 'container_records', return_value=records):
                 self.assertTrue(worker.restored_start(ID))
             run.assert_called_once_with(['docker', 'start', 'one', 'two'], timeout=1800)

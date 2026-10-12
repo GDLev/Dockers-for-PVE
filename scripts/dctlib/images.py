@@ -64,9 +64,12 @@ def preview(identifier, node, changes, digest):
             if not old:
                 old = [inspect(service['image'])['Id']]
             command = ['docker', 'pull']
+            from .capacity import docker_space
+            docker_space(256 * 1024 * 1024)
             if service.get('platform'):
                 command += ['--platform', service['platform']]
             w.run(command + [image], timeout=1800, capture_output=True)
+            docker_space()
             candidate = inspect(image)
             base = candidate['Id']
             if (candidate.get('Descriptor') or {}).get('mediaType', '') in (

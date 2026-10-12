@@ -31,7 +31,7 @@ sub register_api {
             interfaces => { type => 'string', maxLength => 65536, optional => 1 },
             delete => { type => 'boolean', optional => 1 },
             gw => { type => 'string', maxLength => 64, optional => 1 },
-            ipv6mode => { type => 'string', enum => ['static', 'none'], optional => 1 },
+            ipv6mode => { type => 'string', enum => ['static', 'auto', 'dhcp', 'none'], optional => 1 },
             cidr6 => { type => 'string', maxLength => 64, optional => 1 },
             gw6 => { type => 'string', maxLength => 64, optional => 1 },
             tag => { type => 'integer', minimum => 0, maximum => 4094, optional => 1 },

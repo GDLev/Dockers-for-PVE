@@ -6,7 +6,11 @@ from dctlib.projects import dhcp_event
 
 if __name__ == '__main__':
     try:
-        dhcp_event(os.environ)
+        if os.environ.get('reason', '').endswith('6'):
+            from dctlib.ipv6_dynamic import event
+            event(os.environ)
+        else:
+            dhcp_event(os.environ)
     except Exception as error:
         print(f'BetterDocker DHCP: {error}', file=sys.stderr)
         sys.exit(1)

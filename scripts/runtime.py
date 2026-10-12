@@ -169,29 +169,32 @@ def prepare_compose(args, runtime):
     project = Path(args[args.index('--project-directory') + 1])
     config = project / 'compose.runtime.json'
     if config.exists():
-        value = json.loads(config.read_text())
-        check_resources(value, runtime)
-        for service in value.get('services', {}).values():
-            for mount in service.get('volumes', []):
-                if mount.get('type') != 'bind':
-                    continue
-                path = Path(mount['source'])
-                if not path.is_absolute() or '..' in path.parts or not path.is_relative_to(project) or path == project:
-                    raise ValueError('Rootless DCT requires project-owned bind mounts')
-                if path.is_symlink() or any(p.is_symlink() for p in path.parents):
-                    raise ValueError('Rootless bind path crosses a symbolic link')
-                if not path.exists():
-                    if mount.get('bind', {}).get('create_host_path', True) is False:
-                        raise ValueError('Rootless bind mount source does not exist')
-                    path.mkdir(parents=True)
-                    os.chown(path, runtime.uid, runtime.gid)
-                for parent in path.parents:
-                    if parent == project:
-                        break
-                    info = parent.stat()
-                    if info.st_uid == 0:
-                        os.chown(parent, 0, runtime.gid)
-                        os.chmod(parent, stat.S_IMODE(info.st_mode) | 0o050)
+        prepare_bind_paths(project, json.loads(config.read_text()), runtime)
+
+
+def prepare_bind_paths(project, value, runtime):
+    check_resources(value, runtime)
+    for service in value.get('services', {}).values():
+        for mount in service.get('volumes', []):
+            if mount.get('type') != 'bind':
+                continue
+            path = Path(mount['source'])
+            if not path.is_absolute() or '..' in path.parts or not path.is_relative_to(project) or path == project:
+                raise ValueError('Rootless DCT requires project-owned bind mounts')
+            if path.is_symlink() or any(p.is_symlink() for p in path.parents):
+                raise ValueError('Rootless bind path crosses a symbolic link')
+            if not path.exists():
+                if mount.get('bind', {}).get('create_host_path', True) is False:
+                    raise ValueError('Rootless bind mount source does not exist')
+                path.mkdir(parents=True)
+                os.chown(path, runtime.uid, runtime.gid)
+            for parent in path.parents:
+                if parent == project:
+                    break
+                info = parent.stat()
+                if info.st_uid == 0:
+                    os.chown(parent, 0, runtime.gid)
+                    os.chmod(parent, stat.S_IMODE(info.st_mode) | 0o050)
 
 
 def check_resources(config, selected=None):
@@ -303,7 +306,7 @@ def service(action, runner=subprocess.run):
                           **drop_options(runtime))
 
 
-def request(method, path, body):
+def request(method, path, body, pass_fds=()):
     runtime = load()
     if runtime.rootless and method == 'POST' and path.startswith('/containers/create'):
         body = dict(body, HostConfig=dict(body.get('HostConfig') or {}))
@@ -315,7 +318,7 @@ def request(method, path, body):
     if runtime.rootless and os.geteuid() == 0:
         result = subprocess.run([sys.executable, str(Path(__file__)), 'engine', method, path],
                                 input=json.dumps(body), text=True, capture_output=True, check=True,
-                                env=runtime.environment(), **drop_options(runtime))
+                                env=runtime.environment(), pass_fds=pass_fds, **drop_options(runtime))
         return json.loads(result.stdout)
     class Connection(http.client.HTTPConnection):
         def connect(self):
@@ -376,15 +379,24 @@ def anchored(path):
         os.close(fd)
 
 
-def copy_data(source, destination, runner=subprocess.run):
+def copy_data(source, destination, runner=None, rate_kib=0, contents=False):
+    runner = runner or subprocess.run
     if not load().rootless:
-        runner(['cp', '-a', '--reflink=auto', '--', str(source), str(destination)], check=True, timeout=86400)
+        if rate_kib:
+            runner(['rsync', '-aHAXS', '--numeric-ids', '--bwlimit=' + str(int(rate_kib)), '--',
+                    str(source) + ('/' if Path(source).is_dir() else ''), str(destination) + ('/' if Path(source).is_dir() else '')], check=True, timeout=86400)
+            return
+        runner(['cp', '-a', '--reflink=auto', '--', str(source) + ('/.' if contents else ''), str(destination)], check=True, timeout=86400)
         return
     with anchored(source) as fd:
         directory = stat.S_ISDIR(os.fstat(fd).st_mode)
-        if directory:
+        if directory and not contents:
             Path(destination).mkdir(mode=0o700)
-        subprocess.run(['cp', '-a', '--reflink=auto'] + ([] if directory else ['--dereference']) + ['--',
+        if rate_kib:
+            runner(['rsync', '-aHAXS', '--numeric-ids', '--bwlimit=' + str(int(rate_kib))] + ([] if directory else ['--copy-links']) + ['--',
+                            '/proc/self/fd/' + str(fd) + ('/.' if directory else ''), str(destination)], pass_fds=(fd,), check=True, timeout=86400)
+            return
+        runner(['cp', '-a', '--reflink=auto'] + ([] if directory else ['--dereference']) + ['--',
                         '/proc/self/fd/' + str(fd) + ('/.' if directory else ''), str(destination)], pass_fds=(fd,), check=True)
 
 
@@ -414,16 +426,21 @@ def data_directory(path):
         os.close(fd)
 
 
-def restore_data(source, destination, file=False, runner=subprocess.run):
+def restore_data(source, destination, file=False, runner=None, rate_kib=0):
+    runner = runner or subprocess.run
     selected = load()
     if not selected.rootless:
+        if rate_kib:
+            runner(['rsync', '-aHAXS', '--numeric-ids', '--bwlimit=' + str(int(rate_kib)), '--', str(source) + ('' if file else '/'),
+                    str(destination)], check=True, timeout=86400)
+            return
         runner(['cp', '-a', '--', str(source) + ('' if file else '/.'), str(destination)], check=True, timeout=86400)
         return
     import host
     # Workload data is copied in the mapped user namespace, never as host root.
     with tempfile.TemporaryDirectory(prefix='import-data-', dir='/var/lib/betterdocker') as temporary:
         staged = Path(temporary) / 'data'
-        subprocess.run(['cp', '-a', '--', str(source), str(staged)], check=True)
+        copy_data(source, staged, rate_kib=rate_kib)
         remap_tree(staged, Runtime(), selected)
         read_access(temporary, selected)
         with contextlib.ExitStack() as stack:
@@ -438,7 +455,7 @@ def restore_data(source, destination, file=False, runner=subprocess.run):
                 dst = stack.enter_context(anchored(destination))
             src = stack.enter_context(anchored(staged))
             _, _, prefix, descriptors = stack.enter_context(host.namespace())
-            subprocess.run(prefix + ['cp', '-a'] + (['--dereference'] if file else ['--remove-destination']) + ['--',
+            runner(prefix + ['cp', '-a'] + (['--dereference'] if file else ['--remove-destination']) + ['--',
                            '/proc/self/fd/' + str(src) + ('' if file else '/.'),
                            '/proc/self/fd/' + str(dst) + ('' if file else '/.')],
                            pass_fds=(*descriptors, src, dst), check=True)

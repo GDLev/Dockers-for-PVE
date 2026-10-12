@@ -33,7 +33,7 @@ python3 -m pip install -r requirements-test.txt
 python3 -m unittest discover -s tests
 python3 scripts/build_frontend.py | node --check
 node tests/test_frontend.js
-bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
+bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh packaging/build-release.sh
 ```
 
 Tests named `live_*.py` use a real PVE cluster and can change guests or host configuration. Read the test before running it and use a disposable installation. Ordinary unit tests do not connect to a cluster.
@@ -45,3 +45,13 @@ python3 tests/check_native.py /
 ```
 
 This check reads native files, applies integration patches in memory twice to exercise repair, and removes them in memory. It does not install packages or restart services. Run it on both PVE 9.1 and 9.2 after package updates. Full installer lifecycle tests remain in `tests/live_installation.py` and `tests/live_terminal_installer.py`; these change the host and require a disposable node.
+
+## Managed disks
+
+`storage.json` owns the primary data disk and the `additional` collection, keyed by `mp1` through `mp15`. Each additional disk records its PVE volume, service, container path, size, read-only flag and backup flag. `disks.configure()` changes this collection under the guest operation lock. Container replacement and configuration writes share one recovery transaction.
+
+Backups can omit disk contents selected with `backup=0`; clones, migration, replication and snapshots include every managed disk. Imports allocate destination volumes before restoring mount data. A detached disk stays in `unused` until explicitly removed. PVE storage helpers check every attached, unused and pending allocation against its guest ID.
+
+A separate file per disk was considered. One collection keeps configuration, ownership and rollback together and avoids a directory scan racing a disk edit. The primary disk layout stays readable by existing installations.
+
+Release packages read their version from `scripts/dctlib/version.py`. Build source downloads with `bash packaging/build-release.sh` on Linux. Publish the archive and `SOURCE_SHA256SUMS` under the corresponding versioned release before distributing its installer. Native-source fixtures include SHA-256 manifests and cover both supported PVE branches. GitLab and GitHub CI run these compatibility checks and produce release artifacts.

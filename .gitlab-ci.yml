@@ -1,0 +1,31 @@
+stages: [check, package]
+
+python:
+  stage: check
+  image: python:3.12-bookworm
+  script:
+    - python -m pip install -r requirements-test.txt
+    - python -m unittest discover -s tests -v
+    - bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
+
+frontend:
+  stage: check
+  image: node:22-bookworm
+  before_script:
+    - apt-get update && apt-get install -y python3
+  script:
+    - python3 scripts/build_frontend.py | node --check
+    - node tests/test_frontend.js
+
+package:
+  stage: package
+  image: python:3.12-bookworm
+  script:
+    - bash packaging/build-deb.sh
+    - bash packaging/build-release.sh
+    - dpkg-deb --info dist/*.deb
+    - dpkg-deb --contents dist/*.deb
+    - sha256sum dist/*.deb > dist/SHA256SUMS
+  artifacts:
+    paths: [dist/]
+    expire_in: 30 days

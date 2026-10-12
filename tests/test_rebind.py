@@ -14,15 +14,15 @@ class RebindTests(unittest.TestCase):
     def test_commits_before_removing_and_recreates_preserved_image(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); directory = root / ID; directory.mkdir()
-            worker.write_json(directory / 'network-reconcile.json', {'address': '192.0.2.2'})
             worker.write_json(directory / 'compose.runtime.json', {'services': {'web': {'ports': [{'published': '8080', 'target': 80, 'host_ip': '192.0.2.2'}]}}})
             row = {'Id': 'old', 'Name': '/owned-web', 'Config': {'Image': 'original', 'Labels': {'com.docker.compose.service': 'web'}},
                    'HostConfig': {'Binds': []}, 'Mounts': [{'Type': 'volume', 'Name': 'owned-anonymous', 'Destination': '/data', 'RW': True}],
                    'NetworkSettings': {'Networks': {'owned': {'Aliases': ['old', 'web']}}}}
+            worker.write_json(directory / 'network-reconcile.json', {'address': '192.0.2.2', 'containers': [{'source': row, 'tag': 'betterdocker-rebind:' + ID + '-old'}]})
             calls = []
             def run(command, **kwargs):
                 calls.append(command)
-                return Mock(returncode=0, stdout=json.dumps([row]))
+                return Mock(returncode=0, stdout='preserved-image' if command[1] == 'commit' else json.dumps([row]))
             with patch.object(worker, 'ROOT', root), patch.object(worker, 'require_stopped'), \
                     patch.object(worker, 'container_records', return_value=[]), patch.object(worker, 'snapshot_containers', return_value=[row]), \
                     patch.object(worker, 'capture', side_effect=lambda command: calls.append(command) or 'preserved-image'), \

@@ -4,6 +4,7 @@ import ipaddress
 import json
 import math
 import re
+import hashlib
 
 KEYS = ('bridge', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'firewall', 'gw', 'ipv6mode', 'cidr6', 'gw6', 'tag', 'link_down', 'rate', 'ports')
 
@@ -34,13 +35,13 @@ def validate(values):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', str(value.get('bridge', ''))):
             raise ValueError('Select a Linux bridge')
         mode = value.get('ipv4mode', 'static')
-        if mode not in ('static', 'dhcp', 'none') or name == 'net0' and mode == 'none':
-            raise ValueError('net0 requires static IPv4 or DHCP')
+        if mode not in ('static', 'dhcp', 'none') :
+            raise ValueError('Choose static IPv4, DHCP or no IPv4 address')
         value['ipv4mode'] = mode
         value['cidr'] = str(ipaddress.IPv4Interface(value.get('cidr', ''))) if mode == 'static' else ''
         mode6 = value.get('ipv6mode', 'none')
-        if mode6 not in ('static', 'none'):
-            raise ValueError('IPv6 endpoints support static addresses')
+        if mode6 not in ('static', 'auto', 'dhcp', 'none'):
+            raise ValueError('Choose static IPv6, SLAAC, DHCPv6 or no IPv6 address')
         value['ipv6mode'] = mode6
         value['cidr6'] = str(ipaddress.IPv6Interface(value.get('cidr6', ''))) if mode6 == 'static' else ''
         for cidr in (value['cidr'], value['cidr6']):
@@ -56,7 +57,8 @@ def validate(values):
             gateway = value.get(key, '') or ''
             if gateway:
                 address = ipaddress.ip_address(gateway)
-                if address.version != family or not value[cidr] or address not in ipaddress.ip_interface(value[cidr]).network or address == ipaddress.ip_interface(value[cidr]).ip:
+                link_local_router = family == 6 and address.is_link_local
+                if address.version != family or not value[cidr] or (address not in ipaddress.ip_interface(value[cidr]).network and not link_local_router) or address == ipaddress.ip_interface(value[cidr]).ip or address.is_multicast or address.is_unspecified or address.is_loopback:
                     raise ValueError('Gateway must belong to the interface subnet')
                 gateway = str(address)
             value[key] = gateway
@@ -67,7 +69,7 @@ def validate(values):
             macs.add(mac)
         value['hwaddr'] = mac
         value['mtu'] = integer(value.get('mtu', 0) or 0, 0, 9216, 'MTU')
-        if value['mtu'] and value['mtu'] < (1280 if value['cidr6'] else 576):
+        if value['mtu'] and value['mtu'] < (1280 if mode6 != 'none' else 576):
             raise ValueError('MTU is too small for the configured IP family')
         value['tag'] = integer(value.get('tag', 0) or 0, 0, 4094, 'VLAN tag')
         for key in ('firewall', 'link_down'):
@@ -95,10 +97,22 @@ def link_name(identifier, name):
     return 'bd' + identifier[:12] if name == 'net0' else 'b' + identifier[:10] + 'n' + name[3:]
 
 
+def assign_macs(values, identifier):
+    """Persist generated addresses so repairs and migrations keep their identity."""
+    result = copy.deepcopy(values)
+    for name, value in result.items():
+        if not value.get('hwaddr'):
+            octets = bytes.fromhex(identifier[:10]) if name == 'net0' else hashlib.sha256((identifier + ':' + name).encode()).digest()[:5]
+            value['hwaddr'] = '02:' + ':'.join(f'{byte:02x}' for byte in octets)
+    return result
+
+
 def runtime_info(info, name, value):
     ipv4 = str(ipaddress.IPv4Interface(value['cidr']).ip) if value.get('cidr') else (info.get('address', '') if name == 'net0' else info.get('endpoint_addresses', {}).get(name, ''))
     mac = value.get('hwaddr') or (info.get('hwaddr') if name == 'net0' else None) or '02:' + ':'.join(info['id'][i:i+2] for i in range(0, 8, 2)) + ':' + f'{int(name[3:]):02x}'
     result = dict(info, **value)
+    if value.get('ipv6mode') in ('auto', 'dhcp'):
+        result.update(info.get('endpoint_ipv6', {}).get(name, {}))
     result.update(net=name, address=ipv4, hwaddr=mac, interface=link_name(info['id'], name), owner='betterdocker:' + info['id'] + ':' + name)
     return result
 
@@ -138,8 +152,12 @@ def port_bindings(ports):
     for port in ports:
         public = str(port['published']).split('-'); target = str(port['target']).split('-')
         pstart, pend = int(public[0]), int(public[-1]); tstart, tend = int(target[0]), int(target[-1])
-        if pend - pstart != tend - tstart or not 1 <= pstart <= pend <= 65535 or not 1 <= tstart <= tend <= 65535:
+        if (pend - pstart != tend - tstart and tstart != tend) or not 1 <= pstart <= pend <= 65535 or not 1 <= tstart <= tend <= 65535:
             raise ValueError('Invalid published port range')
+        if tstart == tend and pend > pstart:
+            # Docker selects an available port in this range for each replica.
+            result.setdefault(str(tstart) + '/' + port.get('protocol', 'tcp'), []).append({'HostIp': port['host_ip'], 'HostPort': str(port['published'])})
+            continue
         for offset in range(pend - pstart + 1):
             result.setdefault(str(tstart + offset) + '/' + port.get('protocol', 'tcp'), []).append({'HostIp': port['host_ip'], 'HostPort': str(pstart + offset)})
     return result

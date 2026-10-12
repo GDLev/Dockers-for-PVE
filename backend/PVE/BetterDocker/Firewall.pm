@@ -35,7 +35,7 @@ sub register_api {
                     protected => 1, proxyto => 'node' };
                 delete $method->{parameters}->{properties}->{vmid};
                 if ($native->{name} eq 'set_options') {
-                    delete @{$method->{parameters}->{properties}}{qw(dhcp ndp radv macfilter ipfilter ips ips_queues)};
+                    delete @{$method->{parameters}->{properties}}{qw(dhcp ndp radv ips ips_queues)};
                 }
                 if ($native->{name} eq 'get_options') {
                     $method->{returns} = dclone($native->{returns});

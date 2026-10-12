@@ -14,7 +14,7 @@ IMAGE = 'sha256:' + 'e' * 64
 
 def source(index):
     return {'Id': str(index) * 64, 'Name': '/web-' + str(index), 'Image': IMAGE,
-        'State': {'Status': 'exited'},
+        'State': {'Status': 'exited'}, 'SizeRw': 0,
         'Config': {'User': '', 'Labels': {'betterdocker.id': ID, 'com.docker.compose.service': 'web', 'com.docker.compose.image': IMAGE}},
         'HostConfig': {'RestartPolicy': {'Name': 'unless-stopped', 'MaximumRetryCount': 0}, 'SecurityOpt': ['seccomp=original'], 'Mounts': [{'Type': 'volume', 'Target': '/data', 'Source': ''}]},
         'Mounts': [{'Type': 'volume', 'Name': 'anonymous-' + str(index), 'Destination': '/data', 'RW': True}],
@@ -36,7 +36,7 @@ class SwapTests(unittest.TestCase):
         self.interrupt = False
         patches = [patch.object(worker, 'ROOT', self.root), patch.object(worker, 'storage_config', return_value={}),
             patch.object(worker, 'container_records', side_effect=lambda _: [{'id': r['Id'], 'service': 'web', 'state': 'exited'} for r in self.rows.values() if r['Id'][0] in '12']),
-            patch.object(worker, 'capture', side_effect=lambda _: json.dumps([copy.deepcopy(self.rows[str(i)*64]) for i in (1, 2)])),
+            patch.object(worker, 'capture', side_effect=lambda command: str(self.root) if command[:2] == ['docker', 'info'] else json.dumps([copy.deepcopy(self.rows[str(i)*64]) for i in (1, 2)])),
             patch.object(worker, 'run', side_effect=self.docker_run), patch.object(worker, 'docker_engine', side_effect=self.engine)]
         for p in patches:
             p.start(); self.addCleanup(p.stop)
@@ -46,6 +46,8 @@ class SwapTests(unittest.TestCase):
         kind = command[1]
         if kind == 'commit':
             return Mock(returncode=0, stdout=IMAGE)
+        if command[:3] == ['docker', 'volume', 'inspect']:
+            return Mock(returncode=0, stdout=json.dumps([{'Driver': 'local', 'Labels': {'com.docker.compose.project': 'bd-' + ID}}]))
         if kind == 'inspect':
             row = next((r for r in self.rows.values() if command[2] in (r['Id'], r['Name'].lstrip('/'))), None)
             return Mock(returncode=0 if row else 1, stdout=json.dumps([copy.deepcopy(row)]), stderr='' if row else 'error: no such object: '+command[2])
@@ -85,6 +87,14 @@ class SwapTests(unittest.TestCase):
         self.assertTrue(all(r['HostConfig']['SecurityOpt'] == ['seccomp=original'] for r in self.rows.values()))
         self.assertFalse((self.directory / swap.JOURNAL).exists())
         self.assertLess(max(i for i,c in enumerate(self.calls) if c[1]=='commit'), min(i for i,c in enumerate(self.calls) if c[1]=='rename'))
+
+    def test_zero_replica_service_can_save_configuration_without_creating_instances(self):
+        self.rows.clear()
+        candidate = {'services': {'web': {'deploy': {'replicas': 0}, 'read_only': True}}}
+        swap.replace({'id': ID}, 'web', candidate, {'web': {'read_only': True}}, {})
+        self.assertEqual(self.creates, 0)
+        self.assertEqual(json.loads((self.directory / 'compose.runtime.json').read_text()), candidate)
+        self.assertFalse((self.directory / swap.JOURNAL).exists())
 
     def test_second_replica_failure_restores_originals_and_pending_changes(self):
         self.fail_at = 2

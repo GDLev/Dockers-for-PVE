@@ -10,11 +10,12 @@ sub register_api {
 
     PVE::API2::BetterDocker::register_docker_method({
         name => 'clone', path => '{id}/clone', method => 'POST', protected => 1, proxyto => 'node',
-        description => 'Create an independent full clone, initially stopped.', permissions => $root,
+        description => 'Clone a stopped DCT; linked clones require LVM-thin template disks.', permissions => $root,
         parameters => { additionalProperties => 0, properties => {
             node => $node, id => $id, digest => $digest,
             newid => { type => 'integer', minimum => 100, optional => 1 },
             deployment => { type => 'string', maxLength => 262144 },
+            full => { type => 'boolean', optional => 1, default => 1 },
             storage => { type => 'string', format => 'pve-storage-id', optional => 1 },
             pool => { type => 'string', format => 'pve-poolid', optional => 1 },
         } },
@@ -31,7 +32,7 @@ sub register_api {
             die "Clone deployment overrides must be an object\n" unless ref($deployment) eq 'HASH';
             my ($fh, $path) = tempfile('betterdocker-clone-XXXXXX', DIR => '/run', UNLINK => 0);
             chmod 0600, $path;
-            print $fh encode_json({ deployment => $deployment, storage => $param->{storage} // '', digest => $param->{digest} }); close $fh;
+            print $fh encode_json({ deployment => $deployment, storage => $param->{storage} // '', digest => $param->{digest}, full => defined($param->{full}) ? 0 + $param->{full} : 1 }); close $fh;
             my $identifier = PVE::API2::BetterDocker::output(['new-id']); chomp $identifier;
             $identifier = PVE::API2::BetterDocker::worker_id($identifier);
             my $vmid = eval { PVE::API2::BetterDocker::reserve_guest_id($identifier, $param->{node}, $param->{newid}); };

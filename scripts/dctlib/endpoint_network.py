@@ -31,6 +31,8 @@ def preflight(data, identifier=None):
             program = "use PVE::RPCEnvironment; use PVE::GuestHelpers; my $r=PVE::RPCEnvironment->init('cli');$r->init_request();$r->set_user($ARGV[0]);PVE::GuestHelpers::check_vnet_access($r,$ARGV[0],$ARGV[1],$ARGV[2] || undef,undef);"
             w.capture(['perl', '-e', program, actor, value['bridge'], str(value['tag'])])
         owned = model.link_name(identifier, name) if identifier else None
+        if value['hwaddr'] and any(link['ifname'] != owned and link.get('address', '').lower() == value['hwaddr'] for link in links):
+            raise ValueError('MAC address already belongs to a host interface')
         for key in ('cidr', 'cidr6'):
             if not value[key]:
                 continue
@@ -73,7 +75,7 @@ def ensure_link(info):
     if not existing:
         w.run(['ip', 'link', 'add', 'link', parent, 'name', info['interface'], 'address', info['hwaddr'], 'type', 'macvlan', 'mode', 'bridge'])
     w.run(['ip', 'link', 'set', 'dev', info['interface'], 'alias', info['owner']])
-    for setting, value in (('accept_ra', '0'), ('autoconf', '0'), ('disable_ipv6', '0' if info.get('cidr6') else '1')):
+    for setting, value in (('accept_ra', '0'), ('autoconf', '0'), ('disable_ipv6', '0' if info.get('cidr6') or info.get('ipv6mode') in ('auto', 'dhcp') else '1')):
         path = Path('/proc/sys/net/ipv6/conf') / info['interface'] / setting
         if path.exists():
             w.run(['sysctl', '-q', '-w', 'net.ipv6.conf.' + info['interface'] + '.' + setting + '=' + value])
@@ -82,6 +84,9 @@ def ensure_link(info):
     if info.get('mtu'):
         w.run(['ip', 'link', 'set', 'dev', info['interface'], 'mtu', str(info['mtu'])])
     w.run(['ip', 'link', 'set', 'dev', info['interface'], 'up'])
+    if info.get('ipv6mode', 'none') != 'none':
+        from .ipv6_controls import ensure
+        ensure(info)
     return parent
 
 
@@ -147,11 +152,41 @@ def ensure_address(info, wait=True):
                 if not owned and subprocess.run(['arping', '-D', '-I', parent, '-c', '3', '-w', '4', endpoint['address']], capture_output=True, timeout=10).returncode:
                     raise ValueError('Duplicate VLAN endpoint address')
             w.add_address(endpoint['interface'], endpoint['address']); addresses[name] = endpoint['address']
+        if endpoint.get('ipv6mode') in ('auto', 'dhcp'):
+            from .ipv6_dynamic import lease as ipv6_lease
+            assigned = ipv6_lease(endpoint, wait)
+            endpoint['cidr6'] = ''
+            if assigned:
+                endpoint.update(assigned)
+                info.setdefault('endpoint_ipv6', {})[name] = assigned
+            else:
+                info.setdefault('endpoint_ipv6', {}).pop(name, None)
+            entries = json.loads(w.capture(['ip', '-j', '-6', 'address', 'show', 'dev', endpoint['interface']]))
+            wanted = str(ipaddress.IPv6Interface(endpoint['cidr6']).ip) if endpoint.get('cidr6') else None
+            for entry in (entry for link in entries for entry in link.get('addr_info', [])):
+                if entry.get('scope') == 'global' and entry['local'] != wanted:
+                    w.run(['ip', '-6', 'address', 'del', entry['local'] + '/' + str(entry['prefixlen']), 'dev', endpoint['interface']])
         if endpoint.get('cidr6'):
             address = str(ipaddress.IPv6Interface(endpoint['cidr6']).ip)
+            node_addresses = json.loads(w.capture(['ip', '-j', '-6', 'address', 'show']))
+            if any(link['ifname'] != endpoint['interface'] and any(entry.get('local') == address for entry in link.get('addr_info', [])) for link in node_addresses):
+                raise ValueError('IPv6 address already belongs to another host interface')
+            if any(guest['id'] != info['id'] and any(value.get('cidr6') and str(ipaddress.IPv6Interface(value['cidr6']).ip) == address
+                    for value in model.resolved(guest).values()) for guest in w.summaries()):
+                raise ValueError('IPv6 address belongs to another DCT')
             existing = json.loads(w.capture(['ip', '-j', '-6', 'address', 'show', 'dev', endpoint['interface']]))
             if not any(entry.get('local') == address for link in existing for entry in link.get('addr_info', [])):
-                w.run(['ip', '-6', 'address', 'add', address + '/128', 'dev', endpoint['interface']])
+                command = ['ip', '-6', 'address', 'add', address + '/128', 'dev', endpoint['interface']]
+                if endpoint.get('expires'):
+                    import time
+                    command += ['valid_lft', str(max(1, int(endpoint['expires'] - time.time()))),
+                                'preferred_lft', str(max(0, int(endpoint.get('preferred', endpoint['expires']) - time.time())))]
+                w.run(command)
+            elif endpoint.get('expires'):
+                import time
+                w.run(['ip', '-6', 'address', 'change', address + '/128', 'dev', endpoint['interface'],
+                       'valid_lft', str(max(1, int(endpoint['expires'] - time.time()))),
+                       'preferred_lft', str(max(0, int(endpoint.get('preferred', endpoint['expires']) - time.time())))])
             # DAD remains enabled. Never expose a duplicate IPv6 endpoint.
             if wait:
                 import time
@@ -183,10 +218,15 @@ def remove(info):
     from . import projects as w
     for endpoint in model.resolved(info).values():
         routing(endpoint, remove=True)
+        if endpoint.get('ipv6mode') == 'dhcp':
+            w.run(['systemctl', 'stop', 'betterdocker-dhcp6@' + info['id'] + '-' + endpoint['net'] + '.service'])
         if endpoint['ipv4mode'] == 'dhcp':
             w.run(['systemctl', 'stop', 'betterdocker-dhcp@' + info['id'] + '-' + endpoint['net'] + '.service'])
             if endpoint['net'] == 'net0':
                 w.run(['systemctl', 'stop', 'betterdocker-dhcp@' + info['id'] + '.service'])
+        if endpoint.get('ipv6mode', 'none') != 'none':
+            from .ipv6_controls import ensure
+            ensure(endpoint, remove=True)
         links = json.loads(w.capture(['ip', '-j', '-d', 'link', 'show']))
         aliases = (endpoint['owner'], 'betterdocker:' + info['id'])
         # Delete the child before its VLAN parent, which would remove it implicitly.
@@ -203,7 +243,7 @@ def candidate(identifier, info, values):
     runtime = json.loads((directory / 'compose.runtime.json').read_text())
     provisional = dict(info, interfaces=value)
     # Static assignments are checked now; DHCP bindings are checked after acquisition.
-    if all(entry['ipv4mode'] != 'dhcp' for entry in value.values()):
+    if all(entry['ipv4mode'] != 'dhcp' and entry.get('ipv6mode') not in ('auto', 'dhcp') for entry in value.values()):
         model.bind_runtime(runtime, provisional)
     return value
 
@@ -246,7 +286,7 @@ def apply(identifier, node, info, values):
 
 def re_dhcp_file(name):
     import re
-    return bool(re.fullmatch(r'(dhcp-address-net\d+\.json|dhclient-net\d+\.(conf|leases))', name))
+    return bool(re.fullmatch(r'(dhcp-address-net\d+\.json|dhclient-net\d+(?:-v6)?\.(conf|leases)|\.ipv6-net\d+\.json)', name))
 
 
 def update(identifier, node, values, digest):
@@ -288,11 +328,16 @@ def update(identifier, node, values, digest):
 def sync(info, wait=False):
     from . import projects as w
     directory = w.ROOT / info['id']
-    before = dict(info.get('endpoint_addresses', {}))
-    before.setdefault('net0', info.get('address', ''))
+    before = {name: address for name, address in info.get('endpoint_addresses', {}).items() if address}
+    import copy
+    previous_leases = copy.deepcopy(info.get('endpoint_ipv6', {}))
+    before_ipv6 = {name: {key: value.get(key) for key in ('cidr6', 'gw6')} for name, value in info.get('endpoint_ipv6', {}).items()}
+    if info.get('address'):
+        before.setdefault('net0', info['address'])
     active = w.active_network_instances(info['id'])
     w.ensure_address(info, wait)
-    ready = all(value['ipv4mode'] != 'dhcp' or name in info['endpoint_addresses'] for name, value in info['interfaces'].items())
+    ready = all((value['ipv4mode'] != 'dhcp' or name in info['endpoint_addresses']) and
+                (value.get('ipv6mode') not in ('auto', 'dhcp') or name in info.get('endpoint_ipv6', {})) for name, value in info['interfaces'].items())
     marker = directory / 'network-resume.json'
     if not ready:
         if active:
@@ -301,13 +346,16 @@ def sync(info, wait=False):
             w.stop_network_instances(info['id'])
             info.update(status='network-error', network_resume=True)
             w.write_json(w.METADATA / (info['id'] + '.json'), info)
+        else:
+            w.write_json(w.METADATA / (info['id'] + '.json'), info)
         return False
     if marker.exists():
         saved = json.loads(marker.read_text())
         if isinstance(saved, dict) and saved.get('boot_id') != w.network_boot_id():
             marker.unlink()
             info.pop('network_resume', None)
-    if before != info['endpoint_addresses'] or marker.exists():
+    now_ipv6 = {name: {key: value.get(key) for key in ('cidr6', 'gw6')} for name, value in info.get('endpoint_ipv6', {}).items()}
+    if before != info['endpoint_addresses'] or before_ipv6 != now_ipv6 or marker.exists():
         if not marker.exists():
             w.save_network_resume(marker, active)
         resume = w.read_network_resume(marker)
@@ -329,4 +377,7 @@ def sync(info, wait=False):
         info.pop('network_resume', None)
         w.write_json(w.METADATA / (info['id'] + '.json'), info)
         marker.unlink()
+    elif previous_leases != info.get('endpoint_ipv6', {}):
+        # Lease renewal updates lifetimes without stopping unchanged endpoints.
+        w.write_json(w.METADATA / (info['id'] + '.json'), info)
     return True

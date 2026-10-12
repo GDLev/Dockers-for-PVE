@@ -7,7 +7,7 @@ from unittest.mock import patch
 from test_worker import worker
 
 ID = 'a' * 32
-RUNNING = {'id': 'b' * 64, 'state': 'running', 'stop_signal': 'SIGQUIT'}
+RUNNING = {'id': 'b' * 64, 'service': 'app', 'state': 'running', 'stop_signal': 'SIGQUIT'}
 STOPPED = dict(RUNNING, state='exited')
 
 
@@ -53,10 +53,14 @@ class PowerTests(unittest.TestCase):
     def test_reboot_restarts_existing_ids_without_recreation(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), \
              patch.object(worker, 'locked'), patch.object(worker, 'detail', return_value={'id': ID, 'address': '192.0.2.1'}), \
-             patch.object(worker, 'container_records', return_value=[RUNNING]), \
+             patch.object(worker, 'container_records', return_value=[RUNNING]) as records, \
              patch.object(worker, 'graceful_shutdown', return_value=[RUNNING['id']]) as shutdown, \
              patch.object(worker, 'ensure_address'), patch.object(worker, 'rebind_runtime'), \
              patch.object(worker, 'refresh'), patch.object(worker, 'write_json'), patch.object(worker, 'run') as run:
+            directory = Path(folder) / ID
+            directory.mkdir()
+            (directory / 'compose.runtime.json').write_text('{"services":{"app":{}}}')
+            shutdown.side_effect = lambda *_: setattr(records, 'return_value', [STOPPED]) or [RUNNING['id']]
             worker.action(ID, 'pve', 'reboot', 20)
             shutdown.assert_called_once_with(ID, 20)
             self.assertEqual(run.call_args.args[0], ['docker', 'start', RUNNING['id']])
@@ -120,5 +124,8 @@ class PowerTests(unittest.TestCase):
              patch.object(worker, 'write_json'), patch.object(worker, 'refresh'), \
              patch.object(worker, 'restored_start', return_value=False), \
              patch.object(worker, 'container_records', return_value=[STOPPED]), patch.object(worker, 'run') as run:
+            directory = Path(folder) / ID
+            directory.mkdir()
+            (directory / 'compose.runtime.json').write_text('{"services":{"app":{}}}')
             worker.action(ID, 'pve', 'start')
             self.assertEqual(run.call_args.args[0], ['docker', 'start', STOPPED['id']])

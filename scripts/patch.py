@@ -5,6 +5,8 @@ import os
 import re
 import tempfile
 from pathlib import Path
+import runpy
+VERSION = runpy.run_path(str(Path(__file__).parent / 'dctlib' / 'version.py'))['VERSION']
 
 NODE_BLOCK = '''# BEGIN BETTERDOCKER
 use PVE::API2::BetterDocker;
@@ -51,6 +53,7 @@ UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
 <script src="/pve2/js/betterdocker-locales/pl.js?v=19.85"></script>
 <script src="/pve2/js/betterdocker.js?v=19.85"></script>
 <!-- END BETTERDOCKER -->'''
+UI_BLOCK = re.sub(r'v=19\.85', 'v=' + VERSION, UI_BLOCK)
 
 
 NODE_LIFECYCLE = [
@@ -226,22 +229,27 @@ def atomic_write(path, text):
             os.unlink(tmp)
 
 
+NATIVE_FILES = (
+    ('usr/share/perl5/PVE/API2/Nodes.pm', 'node'),
+    ('usr/share/pve-manager/index.html.tpl', 'ui'),
+    ('usr/share/perl5/PVE/API2/Cluster.pm', 'cluster'),
+    ('usr/share/perl5/PVE/Cluster.pm', 'vmid'),
+    ('usr/share/perl5/PVE/VZDump.pm', 'vzdump'),
+    ('usr/share/perl5/PVE/Replication.pm', 'replication-core'),
+    ('usr/share/perl5/PVE/API2/Replication.pm', 'replication-api'),
+    ('usr/share/perl5/PVE/HA/Env/PVE2.pm', 'ha-env'),
+    ('usr/share/perl5/PVE/API2/HA/Resources.pm', 'ha-api'),
+    ('usr/share/pve-manager/js/pvemanagerlib.js', 'manager'),
+)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['check', 'status', 'apply', 'remove'])
     parser.add_argument('--root', default='/')
     args = parser.parse_args()
     root = Path(args.root)
-    files = [(root / 'usr/share/perl5/PVE/API2/Nodes.pm', 'node'),
-             (root / 'usr/share/pve-manager/index.html.tpl', 'ui'),
-             (root / 'usr/share/perl5/PVE/API2/Cluster.pm', 'cluster'),
-             (root / 'usr/share/perl5/PVE/Cluster.pm', 'vmid'),
-             (root / 'usr/share/perl5/PVE/VZDump.pm', 'vzdump'),
-             (root / 'usr/share/perl5/PVE/Replication.pm', 'replication-core'),
-             (root / 'usr/share/perl5/PVE/API2/Replication.pm', 'replication-api'),
-             (root / 'usr/share/perl5/PVE/HA/Env/PVE2.pm', 'ha-env'),
-             (root / 'usr/share/perl5/PVE/API2/HA/Resources.pm', 'ha-api'),
-             (root / 'usr/share/pve-manager/js/pvemanagerlib.js', 'manager')]
+    files = [(root / path, kind) for path, kind in NATIVE_FILES]
     # Preflight all targets before the first mutation.
     changes = [(path, transform(path.read_text(), kind, args.action == 'remove')) for path, kind in files]
     if args.action == 'status':

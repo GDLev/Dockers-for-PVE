@@ -30,8 +30,9 @@ def directory(token):
 def ssh_command(node):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*', node):
         raise ValueError('Invalid destination node')
-    program = ('use PVE::Cluster; use PVE::SSHInfo; use JSON; PVE::Cluster::cfs_update(); '
-               'print encode_json(PVE::SSHInfo::ssh_info_to_command(PVE::SSHInfo::get_ssh_info($ARGV[0])));')
+    program = ('use PVE::Cluster; use PVE::DataCenterConfig; use PVE::SSHInfo; use JSON; PVE::Cluster::cfs_update(); '
+               'my $dc=PVE::Cluster::cfs_read_file("datacenter.cfg"); '
+               'print encode_json(PVE::SSHInfo::ssh_info_to_command(PVE::SSHInfo::get_ssh_info($ARGV[0],$dc->{migration}->{network})));')
     command = json.loads(worker.capture(['perl', '-e', program, node]))
     return command[:-1] + ['-o', 'ConnectTimeout=10', command[-1]]
 
@@ -157,8 +158,8 @@ def clean_local(identifier, info):
     disk = worker.storage_config(identifier)
     if disk:
         worker.storage_unmount(identifier)
-        worker.pve_storage(identifier, 'free', volid=disk['volid'])
-        for volid in disk.get('unused', []):
+        from dctlib.disks import volume_ids
+        for volid in volume_ids(disk):
             worker.pve_storage(identifier, 'free', volid=volid)
     unit = worker.capture(['systemd-escape','--path','--suffix=mount',str(worker.ROOT / identifier / 'storage-data')]).strip()
     worker.run(['systemctl','disable',unit],check=False,capture_output=True)
@@ -337,7 +338,10 @@ def migrate(identifier, node, target, storage, digest=None, restart=0, timeout=1
             with worker.locked(identifier):
                 worker.remove_network(info)
             with (folder / 'state.tar').open('rb') as archive:
-                subprocess.run(ssh_command(target) + [shlex.join([HELPER, 'receive', token])],stdin=archive,check=True,timeout=86400)
+                from dctlib.transfer_io import bandwidth, send
+                source_storage = worker.storage_config(identifier).get('storage')
+                send(ssh_command(target) + [shlex.join([HELPER, 'receive', token])], archive,
+                     bandwidth('migration', [source_storage, storage]))
             destination = json.loads(remote(target, 'prepare', token, identifier, node, storage))
             commit(identifier,node,target,token,destination)
             committed = True

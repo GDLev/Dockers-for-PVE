@@ -6,19 +6,7 @@ import sys
 spec=importlib.util.spec_from_file_location('patcher',Path(__file__).resolve().parents[1]/'scripts/patch.py')
 patcher=importlib.util.module_from_spec(spec);spec.loader.exec_module(patcher)
 root=Path(sys.argv[1])
-files={
- 'usr/share/perl5/PVE/API2/Nodes.pm':'node',
- 'usr/share/perl5/PVE/API2/Cluster.pm':'cluster',
- 'usr/share/perl5/PVE/Cluster.pm':'vmid',
- 'usr/share/perl5/PVE/VZDump.pm':'vzdump',
- 'usr/share/perl5/PVE/Replication.pm':'replication-core',
- 'usr/share/perl5/PVE/API2/Replication.pm':'replication-api',
- 'usr/share/perl5/PVE/HA/Env/PVE2.pm':'ha-env',
- 'usr/share/perl5/PVE/API2/HA/Resources.pm':'ha-api',
- 'usr/share/pve-manager/index.html.tpl':'ui',
- 'usr/share/pve-manager/js/pvemanagerlib.js':'manager',
-}
-for path,kind in files.items():
+for path,kind in patcher.NATIVE_FILES:
  text=(root/path).read_text()
  clean=patcher.transform(text,kind,remove=True)
  applied=patcher.transform(clean,kind)

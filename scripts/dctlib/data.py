@@ -3,6 +3,28 @@ import json
 import os
 from pathlib import Path
 import shutil
+import re
+from .policy import owned_local_volume
+from .disks import volume_ids, source, records
+
+
+def remember_volumes(identifier, containers):
+    """Keep anonymous ownership when a service or replica is later removed."""
+    names = {mount['Name'] for row in containers for mount in row.get('Mounts', []) if mount.get('Type') == 'volume'}
+    ledger = worker.ROOT / identifier / 'owned-volumes.json'
+    if ledger.exists():
+        names.update(json.loads(ledger.read_text())['volumes'])
+    verified = []
+    for name in sorted(names):
+        volume = worker.run(['docker', 'volume', 'inspect', name], check=False, capture_output=True)
+        if volume.returncode:
+            if 'no such volume' not in (volume.stderr or '').lower():
+                raise ValueError('Cannot inspect retained volume ownership')
+            continue
+        if owned_local_volume(json.loads(volume.stdout)[0], name, identifier):
+            verified.append(name)
+    if verified:
+        worker.write_json(ledger, {'volumes': verified})
 
 
 def storage_owner(vmid, node):
@@ -18,12 +40,12 @@ def storage_owner(vmid, node):
     return identifier
 
 
-def check_data_dependencies(identifier, info=None):
+def check_data_dependencies(identifier, info=None, allow_snapshots=False):
     if info:
         worker.check_protection(info)
         if info.get('replication') or info.get('ha', {}).get('managed'):
             raise ValueError('Remove HA and replication before deleting data')
-    if any(worker.snapshot_root(identifier).glob('*/manifest.json')):
+    if not allow_snapshots and any(worker.snapshot_root(identifier).glob('*/manifest.json')):
         raise ValueError('Remove snapshots before deleting data')
     folder = worker.ROOT / identifier
     if (folder / 'replication.json').exists():
@@ -45,29 +67,44 @@ def owned_data_plan(identifier, info):
     volumes = worker.capture(['docker', 'volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=bd-' + identifier]).split()
     config = json.loads((folder / 'compose.runtime.json').read_text())
     external = {value.get('name', name) for name, value in config.get('volumes', {}).items() if value.get('external')}
+    container_ids = {row['id'] for row in worker.container_records(identifier)}
+    if container_ids:
+        containers = json.loads(worker.capture(['docker', 'inspect', *sorted(container_ids)]))
+        if {row['Id'] for row in containers} != container_ids:
+            raise ValueError('Container ownership changed while planning data removal')
+        volumes.extend(mount['Name'] for row in containers for mount in row.get('Mounts', [])
+                       if mount.get('Type') == 'volume')
+    ledger = folder / 'owned-volumes.json'
+    if ledger.exists():
+        saved = json.loads(ledger.read_text())['volumes']
+        if any(not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}', name) for name in saved):
+            raise ValueError('Invalid retained volume ownership')
+        existing = set(worker.capture(['docker', 'volume', 'ls', '-q']).split())
+        volumes.extend(name for name in saved if name in existing)
     owned = []
-    records = {row['id'] for row in worker.container_records(identifier)}
-    for name in volumes:
+    for name in sorted(set(volumes)):
         if name in external:
             continue
         volume = json.loads(worker.capture(['docker', 'volume', 'inspect', name]))[0]
         if volume.get('Driver') != 'local' or volume.get('Options'):
             continue  # External storage remains outside the deletion scope.
-        if (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier:
+        if not owned_local_volume(volume, name, identifier):
             raise ValueError('Docker volume ownership changed')
         users = set(worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + name]).split())
-        if users - records:
+        if users - container_ids:
             raise ValueError('A DCT volume is shared with another container')
         owned.append(name)
     # Refuse foreign mountpoints within the project tree, even when no container is running.
     mountpoints = json.loads(worker.capture(['findmnt', '--json', '--list', '--output', 'TARGET']))['filesystems']
     for row in mountpoints:
         point = Path(row['target'])
-        if point.is_relative_to(folder) and point != folder / 'storage-data':
+        if point.is_relative_to(folder) and point not in {folder / 'storage-data', *[source(identifier, key) for key in records(worker.storage_config(identifier))]}:
             raise ValueError('Unmount foreign filesystems before deleting DCT data')
     settings = worker.storage_config(identifier)
-    for volid in settings.get('unused', []) + ([settings['volid']] if settings.get('volid') else []):
+    for volid in volume_ids(settings):
         worker.pve_storage(identifier, 'free-check', volid=volid)
+    if owned:
+        worker.write_json(ledger, {'volumes': owned})
     return owned
 
 
@@ -77,13 +114,51 @@ def remove_owned_data(identifier, volumes):
         # Docker checks remaining users again at removal; never force-delete a shared volume.
         worker.run(['docker', 'volume', 'rm', name], capture_output=True)
     settings = worker.storage_config(identifier)
-    for volid in settings.get('unused', []) + ([settings['volid']] if settings.get('volid') else []):
+    for volid in volume_ids(settings):
         worker.pve_storage(identifier, 'free', volid=volid)
+    mount_keys = set(records(settings)) | {path.name[len('mount-'):] for path in (worker.ROOT / identifier).glob('mount-mp*')}
+    for key in mount_keys:
+        unit = worker.capture(['systemd-escape', '--path', '--suffix=mount', str(source(identifier, key))]).strip()
+        (Path('/etc/systemd/system') / unit).unlink(missing_ok=True)
     point = worker.ROOT / identifier / 'storage-data'
     unit = worker.capture(['systemd-escape', '--path', '--suffix=mount', str(point)]).strip()
     (Path('/etc/systemd/system') / unit).unlink(missing_ok=True)
     worker.run(['systemctl', 'daemon-reload'], capture_output=True)
     shutil.rmtree(worker.ROOT / identifier)
+
+
+def retained_data(identifier, destroy=False):
+    identifier = worker.project_id(identifier)
+    with worker.operation(identifier, 'data-cleanup'), worker.locked(identifier):
+        if (worker.METADATA / (identifier + '.json')).exists():
+            raise ValueError('Remove the DCT before cleaning retained project data')
+        if worker.container_records(identifier):
+            raise ValueError('Retained project still has Docker containers')
+        check_data_dependencies(identifier, allow_snapshots=True)
+        snapshots = []
+        for path in worker.snapshot_root(identifier).glob('*/manifest.json'):
+            folder, manifest = worker.snapshot_check(identifier, path.parent.name)
+            snapshots.append((folder, manifest))
+        if snapshots and not destroy:
+            ledger = worker.ROOT / identifier / 'owned-volumes.json'
+            return {'id': identifier, 'snapshots': [manifest['name'] for _, manifest in snapshots],
+                'disks': volume_ids(worker.storage_config(identifier)),
+                'volumes': json.loads(ledger.read_text()).get('volumes', []) if ledger.exists() else [],
+                'dry_run': True, 'directory': str(worker.ROOT / identifier)}
+        for folder, manifest in snapshots:
+            if manifest.get('native_storage'):
+                worker.pve_storage(identifier, 'snapshot-delete', **manifest['native_storage'])
+            shutil.rmtree(folder)
+        volumes = owned_data_plan(identifier, {})
+        plan = {'id': identifier, 'volumes': volumes, 'disks': volume_ids(worker.storage_config(identifier)),
+                'directory': str(worker.ROOT / identifier), 'dry_run': not destroy}
+        if destroy:
+            remove_owned_data(identifier, volumes)
+            shutil.rmtree(worker.snapshot_root(identifier), ignore_errors=True)
+            from .service_recreate import prune_images
+            prune_images(identifier)
+            worker.release_id(identifier)
+        return plan
 
 
 def storage_volume_state(identifier, node, vmid):
@@ -105,12 +180,16 @@ def delete_storage_volume(vmid, node, volid):
         check_data_dependencies(identifier, info)
         settings = worker.storage_config(identifier)
         retained = not local_guest
-        allowed = settings.get('unused', []) + ([settings['volid']] if retained and settings.get('volid') else [])
+        allowed = volume_ids(settings) if retained else settings.get('unused', [])
         if volid not in allowed:
             raise ValueError('Cannot delete an attached or unowned DCT disk')
         worker.pve_storage(identifier, 'free-check', volid=volid)
         if volid == settings.get('volid'):
             worker.storage_unmount(identifier)
+        for key, disk in records(settings).items():
+            if disk['volid'] == volid:
+                from .disks import unmount
+                unmount(identifier, key)
         worker.pve_storage(identifier, 'free', volid=volid)
         if retained and volid == settings.get('volid'):
             unit = worker.capture(['systemd-escape', '--path', '--suffix=mount', str(worker.ROOT / identifier / 'storage-data')]).strip()
@@ -118,11 +197,18 @@ def delete_storage_volume(vmid, node, volid):
             worker.run(['systemctl', 'daemon-reload'], capture_output=True)
         if volid in settings.get('unused', []):
             settings['unused'].remove(volid)
-        else:
+        elif volid == settings.get('volid'):
             settings.pop('volid')
             settings.pop('mapping', None)
+        else:
+            for key, disk in list(records(settings).items()):
+                if disk['volid'] == volid:
+                    settings['additional'].pop(key)
+                    unit = worker.capture(['systemd-escape', '--path', '--suffix=mount', str(source(identifier, key))]).strip()
+                    (Path('/etc/systemd/system') / unit).unlink(missing_ok=True)
+                    worker.run(['systemctl', 'daemon-reload'], capture_output=True)
         target = worker.ROOT / identifier / 'storage.json'
-        if settings.get('volid') or settings.get('unused'):
+        if volume_ids(settings):
             worker.write_json(target, settings)
         else:
             target.unlink(missing_ok=True)

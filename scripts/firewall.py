@@ -61,7 +61,7 @@ def networks(info):
 
 
 def check_options(options):
-    for name in ('dhcp', 'macfilter', 'ipfilter', 'ips', 'radv', 'ndp'):
+    for name in ('dhcp', 'ips', 'radv', 'ndp'):
         if name in options:
             raise ValueError(f'{name} is not supported for the Docker IPv4 endpoint')
 
@@ -182,7 +182,27 @@ def translate(line, names, original=False, family=4):
     return expression
 
 
-def render(infos, config, bridges, bindings=None, routed=None, inner=False):
+def identity_guards(infos):
+    result = {}
+    for info in infos:
+        ids = command(['docker', 'network', 'ls', '-q', '--filter', 'label=com.docker.compose.project=bd-' + info['id']]).split()
+        result[info['id']] = {}
+        for network in json.loads(command(['docker', 'network', 'inspect', *ids])) if ids else []:
+            bridge = network.get('Options', {}).get('com.docker.network.bridge.name') or 'br-' + network['Id'][:12]
+            ips, macs = set(), set()
+            for endpoint in network.get('Containers', {}).values():
+                if endpoint.get('IPv4Address'):
+                    ips.add(str(ipaddress.IPv4Interface(endpoint['IPv4Address']).ip))
+                mac = endpoint.get('MacAddress', '').lower()
+                if mac:
+                    if not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac):
+                        raise ValueError('Invalid container MAC identity')
+                    macs.add(mac)
+            result[info['id']][bridge] = {'ips': sorted(ips), 'macs': sorted(macs)}
+    return result
+
+
+def render(infos, config, bridges, bindings=None, routed=None, inner=False, guards=None):
     from dctlib.endpoints import resolved
     originals = infos
     expanded = []
@@ -276,6 +296,11 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False):
             for bridge in (bridges.get(info['id'], []) if info.get('net', 'net0') == 'net0' else []):
                 interface = json.dumps(bridge)
                 if direction == 'out':
+                    guard = (guards or {}).get(info['id'], {}).get(bridge, {})
+                    for enabled, field, values in ((policies[info['vmid']]['options'].get('ipfilter'), 'ip saddr', guard.get('ips')),
+                                                  (policies[info['vmid']]['options'].get('macfilter', 1), 'ether saddr', guard.get('macs'))):
+                        if enabled:
+                            lines.append(f'iifname {interface} ' + (field + ' != { ' + ', '.join(values) + ' } ' if values else '') + 'drop')
                     lines.append(f'iifname {interface} meta nfproto ipv6 drop')
                     lines.append(f'iifname {interface} jump {chain}')
                 elif hook != 'input':
@@ -309,6 +334,8 @@ def add_ipv6_policy(lines, infos, config):
     policies = {guest['vmid']: guest for guest in config['guests']}
     chains = []
     hooks = {'input': [], 'output': []}
+    lograte = config.get('log_ratelimit', {})
+    limiter = ('limit rate ' + lograte.get('rate', '1/second') + ' burst ' + str(lograte.get('burst', 5)) + ' packets ') if lograte.get('enable', 1) else ''
     for info in infos:
         if 'interfaces' not in info:
             continue
@@ -331,11 +358,21 @@ def add_ipv6_policy(lines, infos, config):
                 chains.extend(['chain ' + chain + ' {', 'ct state invalid drop', 'ct state established,related accept',
                                # Neighbor discovery is required for static IPv6 endpoints.
                                'icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept'])
+                if endpoint.get('ipv6mode') == 'dhcp':
+                    chains.append('udp sport 547 udp dport 546 accept' if direction == 'in' else 'udp sport 546 udp dport 547 accept')
                 for rule in guest.get('interfaces', {}).get(name, {}).get('6', {}).get(direction, []):
-                    chains.append(translate(rule, names, family=6))
+                    expression = translate(rule, names, family=6)
+                    if ' log ' in expression or expression.startswith('log '):
+                        expression = re.sub(r'limit rate \S+(?: burst \d+ packets)? ?', lambda _: limiter, expression)
+                    chains.append(expression)
                 policy = guest['options'].get('policy_' + direction, 'DROP' if direction == 'in' else 'ACCEPT').lower()
                 if policy not in ('accept', 'drop', 'reject'):
                     raise ValueError('Invalid IPv6 firewall policy')
+                level = guest['options'].get('log_level_' + direction, 'nolog')
+                if level != 'nolog':
+                    severity = {'emerg': 0, 'alert': 1, 'crit': 2, 'err': 3, 'warning': 4, 'notice': 5, 'info': 6, 'debug': 7}[level]
+                    prefix = f':{info["vmid"]}:{severity}:{chain}: {policy.upper()}: '
+                    chains.append(limiter + 'log prefix ' + json.dumps(prefix) + ' group 0')
                 chains.extend([policy, '}'])
                 hooks['input' if direction == 'in' else 'output'].append('ip6 ' + ('daddr' if direction == 'in' else 'saddr') + ' ' + address + ' jump ' + chain)
     for hook, rules in hooks.items():
@@ -382,7 +419,8 @@ def reconcile():
         if rootless:
             reconcile_rootless(infos, config, bridges, bindings)
             return
-        rules = render(infos, config, bridges, bindings)
+        guards = identity_guards([info for info in infos if info['id'] in bridges])
+        rules = render(infos, config, bridges, bindings, guards=guards)
         previous = STATE / 'applied.nft'
         if not previous.exists() or previous.read_text() != rules or subprocess.run(
                 ['nft', 'list', 'table', 'inet', TABLE], capture_output=True).returncode:
@@ -401,7 +439,7 @@ def reconcile_rootless(infos, config, bridges, bindings):
         routed[info['id']] = sorted({host.valid_address(n['IPAddress']) for c in values
                                    for n in c.get('NetworkSettings', {}).get('Networks', {}).values() if n.get('IPAddress')})
     rules = render(infos, config, {}, bindings, routed=routed)
-    inner = render(infos, config, bridges, inner=True)
+    inner = render(infos, config, bridges, inner=True, guards=identity_guards(infos))
     with host.namespace() as (_, _, prefix, descriptors):
         exists = subprocess.run(prefix + ['nft', 'list', 'table', 'inet', TABLE], pass_fds=descriptors, capture_output=True).returncode == 0
         transaction = ('delete table inet ' + TABLE + '\n' if exists else '') + inner

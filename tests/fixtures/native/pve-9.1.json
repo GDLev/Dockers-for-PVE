@@ -1,0 +1,17 @@
+{
+  "source_node": "pve1",
+  "source": "Installed Proxmox VE packages; BetterDocker markers removed",
+  "files": {
+    "usr/share/perl5/PVE/API2/Nodes.pm": "a22d0faaba41c6e2b9ae3ef146add2b8811f0eb6e5045764feef5f495222f8b8",
+    "usr/share/pve-manager/index.html.tpl": "afc52318a7f82aea9dad9c73a9c397ff432f80967d35497ecf6a6ffdb8e6b8ca",
+    "usr/share/perl5/PVE/API2/Cluster.pm": "7063511de29bc8299bbbcd50885122615cd4825777196d58dc8acbabdc1263f7",
+    "usr/share/perl5/PVE/Cluster.pm": "549a4952dc722586d1e6b41c6b15a4e49a1fa87bc4401dddff94f6460dd7bdbf",
+    "usr/share/perl5/PVE/VZDump.pm": "9a5706e5fcb31adfc1e7825686203fae16afd1fe197ef340d4077c52ef68be2a",
+    "usr/share/perl5/PVE/Replication.pm": "ade5ee3f1901809d077051ed6fd8aba352748ec1e687f1e8e23a4d3c028a606b",
+    "usr/share/perl5/PVE/API2/Replication.pm": "13906bca648fc72973704d87f54c3c485d5258acbee90b0ddbfed203d8ea9b3d",
+    "usr/share/perl5/PVE/HA/Env/PVE2.pm": "9b5fbfb9ac14b232c04df175d6ecad0ff9375484b4619de5f9e9c238a0918be2",
+    "usr/share/perl5/PVE/API2/HA/Resources.pm": "96452a3d1e5d1bbc06eedf2465e4d38a22957a2ce924c5a1f26d77b1fae510f9",
+    "usr/share/pve-manager/js/pvemanagerlib.js": "5dc4993b0647911c21b4ce1bf2dc2fbc1fde42a56d3ef3c5b9835b2512aee4c7"
+  },
+  "archive_sha256": "7639fd1524c580500fbfab1b43dc473d194ba8fd7125fe0b7cd417e758377849"
+}

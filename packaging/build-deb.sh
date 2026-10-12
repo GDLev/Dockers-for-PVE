@@ -4,6 +4,7 @@ set -Eeuo pipefail
 umask 022
 SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR=${1:-"$SOURCE_DIR/dist"}
+RELEASE_VERSION=$(python3 "$SOURCE_DIR/scripts/dctlib/version.py")
 BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$BUILD_DIR"' EXIT
 chmod 0755 "$BUILD_DIR"
@@ -12,13 +13,14 @@ cp -a "$SOURCE_DIR/frontend" "$SOURCE_DIR/backend" "$SOURCE_DIR/scripts" "$SOURC
 find "$BUILD_DIR/opt/betterdocker" -type d -name __pycache__ -prune -exec rm -rf {} +
 cat > "$BUILD_DIR/DEBIAN/control" <<'CONTROL'
 Package: proxmox-betterdockers
-Version: 0.19.0
+Version: @VERSION@
 Architecture: all
 Maintainer: BetterDockers contributors
-Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, e2fsprogs, util-linux, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2, uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
+Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, e2fsprogs, util-linux, rsync, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2, uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
 Recommends: docker-ce-rootless-extras
 Description: Native Proxmox VE interface for host Docker Compose projects
 CONTROL
+sed -i "s/^Version: .*/Version: $RELEASE_VERSION/" "$BUILD_DIR/DEBIAN/control"
 cat > "$BUILD_DIR/DEBIAN/triggers" <<'TRIGGERS'
 interest-noawait /usr/share/pve-manager
 interest-noawait /usr/share/perl5/PVE/API2/Nodes.pm
@@ -62,8 +64,10 @@ cat > "$BUILD_DIR/DEBIAN/prerm" <<'PRERM'
 #!/bin/sh
 set -eu
 case "$1" in
-    remove) bash /opt/betterdocker/start.sh uninstall ;;
+    remove)
+        bash /opt/betterdocker/start.sh uninstall
+        find /opt/betterdocker -type d -name __pycache__ -prune -exec rm -rf {} + ;;
 esac
 PRERM
 chmod 0755 "$BUILD_DIR/DEBIAN/postinst" "$BUILD_DIR/DEBIAN/prerm"
-dpkg-deb --root-owner-group --build "$BUILD_DIR" "$OUTPUT_DIR/proxmox-betterdockers_0.19.0_all.deb"
+dpkg-deb --root-owner-group --build "$BUILD_DIR" "$OUTPUT_DIR/proxmox-betterdockers_${RELEASE_VERSION}_all.deb"

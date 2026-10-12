@@ -3,6 +3,8 @@ import copy
 import json
 from pathlib import Path
 import sys
+import tempfile
+from unittest.mock import patch
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dctlib import endpoints
@@ -12,6 +14,21 @@ ID = 'ab' * 16
 
 
 class EndpointsTests(unittest.TestCase):
+    def test_addressless_refresh_does_not_recreate_instances(self):
+        from dctlib import projects as w
+        from dctlib.endpoint_network import sync
+        for ipv6 in ({}, {'net0': {'cidr6': 'fd00::2/64', 'gw6': 'fe80::1'}}):
+            with self.subTest(ipv6=ipv6), tempfile.TemporaryDirectory() as folder:
+                info = {'id': ID, 'address': '', 'endpoint_addresses': {}, 'endpoint_ipv6': ipv6,
+                        'interfaces': {'net0': {'ipv4mode': 'none', 'ipv6mode': 'static' if ipv6 else 'none'}}}
+                directory = Path(folder) / ID; directory.mkdir()
+                with patch.object(w, 'ROOT', Path(folder)), patch.object(w, 'active_network_instances', return_value=['active']), \
+                     patch.object(w, 'ensure_address'), patch.object(w, 'stop_network_instances') as stop, \
+                     patch.object(w, 'reconcile_network_runtime') as recreate:
+                    self.assertTrue(sync(info))
+                    stop.assert_not_called()
+                    recreate.assert_not_called()
+
     def configuration(self):
         return {'net0': {'bridge': 'vmbr0', 'cidr': '192.0.2.10/24'},
                 'net1': {'bridge': 'vmbr1', 'cidr': '198.51.100.10/24', 'cidr6': '2001:db8:1::10/64', 'ipv6mode': 'static', 'ports': 'web:8080/tcp'}}
@@ -57,3 +74,32 @@ class EndpointsTests(unittest.TestCase):
         info = {'id': ID, 'bridge': 'vmbr0', 'cidr': '192.0.2.10/24', 'hwaddr': '02:00:00:00:00:99'}
         self.assertEqual(endpoints.resolved(info)['net0']['hwaddr'], info['hwaddr'])
         self.assertEqual(endpoints.resolved(info)['net0']['interface'], 'bd' + ID[:12])
+
+    def test_generated_secondary_macs_cannot_copy_the_net0_last_octet(self):
+        identifier = 'ab' * 4 + '01' + 'cd' * 11
+        values = {'net0': {'bridge': 'vmbr0'}, 'net1': {'bridge': 'vmbr0'}}
+        concrete = endpoints.assign_macs(values, identifier)
+        self.assertNotEqual(concrete['net0']['hwaddr'], concrete['net1']['hwaddr'])
+        self.assertEqual(endpoints.assign_macs(concrete, identifier), concrete)
+        self.assertEqual(values['net0'], {'bridge': 'vmbr0'})
+
+    def test_ipv6_lease_files_participate_in_network_recovery(self):
+        from dctlib.endpoint_network import re_dhcp_file
+        for name in ('dhclient-net0-v6.conf', 'dhclient-net0-v6.leases', '.ipv6-net0.json'):
+            self.assertTrue(re_dhcp_file(name))
+        self.assertFalse(re_dhcp_file('compose.runtime.json'))
+
+    def test_ipv6_only_runtime_rebind_does_not_require_an_ipv4_address(self):
+        from dctlib import projects as w
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder) / ID; directory.mkdir()
+            metadata = Path(folder) / 'metadata'; metadata.mkdir()
+            config = {'services': {'app': {'ports': [{'published': '8080', 'target': 80}]}}}
+            w.write_json(directory / 'compose.runtime.json', config)
+            info = {'id': ID, 'address': '', 'interfaces': endpoints.validate({'net0': {
+                'bridge': 'vmbr0', 'ipv4mode': 'none', 'ipv6mode': 'static', 'cidr6': 'fd00::2/64'}})}
+            w.write_json(metadata / (ID + '.json'), info)
+            with patch.object(w, 'METADATA', metadata):
+                w.rebind_runtime(directory, '')
+            saved = json.loads((directory / 'compose.runtime.json').read_text())
+            self.assertEqual(saved['services']['app']['ports'][0]['host_ip'], 'fd00::2')

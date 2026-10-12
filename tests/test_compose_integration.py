@@ -15,6 +15,22 @@ def available():
 
 @unittest.skipUnless(available(), 'Docker Compose CLI is not installed')
 class ComposeIntegrationTests(unittest.TestCase):
+    def test_literal_dollars_are_not_doubled_by_runtime_generation(self):
+        def run(args, **kwargs):
+            return subprocess.run(args, check=True, text=True, **kwargs)
+        with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'run', side_effect=run):
+            directory = Path(folder)
+            source = json.dumps({'services': {'web': {'image': 'busybox', 'command': ['sh', '-c', 'echo $$HOME'],
+                'environment': {'VALUE': 'after-$$literal'}}}})
+            config = worker.prepare(dict(BASE, compose=source), 'a' * 32, directory)
+            self.assertEqual(config['services']['web']['environment']['VALUE'], 'after-$literal')
+            self.assertEqual(config['services']['web']['command'][-1], 'echo $HOME')
+            saved = json.loads((directory / 'compose.runtime.json').read_text())
+            self.assertEqual(saved['services']['web']['environment']['VALUE'], 'after-$$literal')
+            output = json.loads(subprocess.check_output(worker.compose_base(directory, 'a' * 32) + ['config', '--format', 'json']))
+            from dctlib.deployment import compose_values
+            self.assertEqual(compose_values(output)['services']['web']['environment']['VALUE'], 'after-$literal')
+
     def test_relative_bind_mounts_and_env_stay_in_permanent_directory_on_redeploy(self):
         yaml = 'services:\n  web:\n    image: nginx:stable\n    ports: ["8080:80"]\n    volumes: ["./data:/data"]\n    env_file: .env\n'
         # The local developer user may store CLI plugins under their own HOME.

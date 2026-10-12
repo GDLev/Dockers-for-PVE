@@ -10,7 +10,7 @@ from .rebind import preserved_body, network_endpoints, storage_bindings
 import service_security
 
 JOURNAL = 'settings-transaction.json'
-FILES = ('compose.runtime.json', 'settings.json', 'pending.json', 'snapshot-restored.json', 'service-defaults.json')
+FILES = ('compose.runtime.json', 'settings.json', 'pending.json', 'snapshot-restored.json', 'service-defaults.json', 'compose.source.yaml', '.env', 'request.json', 'images.json', 'image-update.json', 'storage.json', 'disk-transaction.json')
 
 
 def durable_write(path, value):
@@ -23,6 +23,25 @@ def durable_write(path, value):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def durable_text(path, value):
+    import tempfile
+    fd, temporary = tempfile.mkstemp(prefix='.transaction-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as output:
+            output.write(value)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def defaults_state(directory):
@@ -46,7 +65,7 @@ def inspect(name):
 
 def owned(row, identifier, service):
     labels = row['Config'].get('Labels') or {}
-    if labels.get('betterdocker.id') != identifier or labels.get('com.docker.compose.service') != service:
+    if labels.get('betterdocker.id') != identifier or not labels.get('com.docker.compose.service') or (service != '*' and labels.get('com.docker.compose.service') != service):
         raise ValueError('Service recovery container ownership changed')
 
 
@@ -162,13 +181,13 @@ def replace(info, service, candidate, settings, pending):
     records = [r for r in w.container_records(identifier) if r['service'] == service]
     w.require_stopped(records)
     if not records:
-        raise ValueError('Service has no instances to preserve')
-    rows = json.loads(w.capture(['docker', 'inspect', *[r['id'] for r in records]]))
+        execute(info, service, [], candidate, settings, pending, defaults_state(directory))
+        return
+    rows = json.loads(w.capture(['docker', 'inspect', '--size', *[r['id'] for r in records]]))
     original = json.loads((directory / 'compose.runtime.json').read_text())
     defaults_path = directory / 'service-defaults.json'
     defaults = defaults_state(directory)
     remember_defaults(rows, original['services'][service], defaults)
-    token = uuid.uuid4().hex
     entries = []
     for index, row in enumerate(rows):
         owned(row, identifier, service)
@@ -176,35 +195,100 @@ def replace(info, service, candidate, settings, pending):
         storage_bindings(body['HostConfig'], candidate['services'][service], w.storage_config(identifier))
         if not w.trusted_management():
             w.validate_delegated_containers([row], identifier)
-        entries.append({'source': row, 'body': body,
-            'backup': 'bd-settings-' + identifier + '-' + token + '-' + str(index),
-            'tag': 'betterdocker-settings/' + identifier + ':' + token + '-' + str(index)})
+        entries.append({'source': row, 'body': body})
+    execute(info, service, entries, candidate, settings, pending, defaults)
+
+
+def replace_bindings(info, candidate=None, storage=None, updates=None):
+    """Replace all stopped bindings as one recoverable container transaction."""
+    from . import projects as w
+    directory = w.ROOT / info['id']
+    candidate = candidate if candidate is not None else json.loads((directory / 'compose.runtime.json').read_text())
+    storage = storage if storage is not None else w.storage_config(info['id'])
+    records = w.container_records(info['id'])
+    w.require_stopped(records)
+    rows = json.loads(w.capture(['docker', 'inspect', '--size', *[r['id'] for r in records]])) if records else []
+    entries = []
+    from .endpoints import port_bindings
+    for row in rows:
+        owned(row, info['id'], '*')
+        service = row['Config']['Labels']['com.docker.compose.service']
+        body = preserved_body(row, row['Image'])
+        body['HostConfig']['StorageOpt'] = copy.deepcopy(candidate['services'][service].get('storage_opt') or {})
+        body['HostConfig']['PortBindings'] = port_bindings(candidate['services'][service].get('ports', [])) if not w.node_runtime.load().rootless else {}
+        storage_bindings(body['HostConfig'], candidate['services'][service], storage)
+        entries.append({'source': row, 'body': body})
+    if entries:
+        execute(info, '*', entries, candidate, w.load_settings(directory), w.load_pending(directory), defaults_state(directory), updates=updates)
+
+
+def execute(info, service, entries, candidate, settings, pending, defaults, updates=None, metadata=None, prepare=None):
+    from . import projects as w
+    identifier = info['id']
+    directory = w.ROOT / identifier
+    marker = directory / JOURNAL
+    defaults_path = directory / 'service-defaults.json'
+    if marker.exists():
+        raise ValueError('Recover the previous container transaction first')
+    token = uuid.uuid4().hex
+    from .capacity import docker_space, preserve_quota
+    for entry in entries:
+        if entry.get('source') and entry.get('body') and entry.get('preserve', True):
+            preserve_quota(entry['source'], entry['body'])
+    required = sum(max(0, (entry.get('source') or {}).get('SizeRw', 0)) for entry in entries)
+    docker_space(required)
+    for index, entry in enumerate(entries):
+        entry['backup'] = 'bd-settings-' + identifier + '-' + token + '-' + str(index)
+        entry['tag'] = 'betterdocker-settings/' + identifier + ':' + token + '-' + str(index)
     journal = {'id': identifier, 'service': service, 'token': token, 'phase': 'preparing', 'entries': entries,
         'files': {name: (directory / name).read_text() if (directory / name).exists() else None for name in FILES}}
+    if metadata is not None:
+        journal['metadata'] = json.loads((w.METADATA / (identifier + '.json')).read_text())
+    from .data import remember_volumes
+    remember_volumes(identifier, [entry['source'] for entry in entries if entry.get('source')])
     durable_write(marker, journal)
     try:
+        if prepare:
+            prepare(journal, marker)
         # Capture every replica before changing names or network membership.
         for entry in entries:
+            if not entry.get('source') or not entry.get('body') or not entry.get('preserve', True):
+                entry['image'] = entry['body']['Image'] if entry.get('body') else None
+                continue
             entry['image'] = w.run(['docker', 'commit', entry['source']['Id'], entry['tag']],
                 timeout=86400, capture_output=True).stdout.strip()
             if not re.fullmatch(r'sha256:[0-9a-f]{64}', entry['image']):
                 raise ValueError('Docker did not return a committed image ID')
             durable_write(marker, journal)
         for entry in entries:
-            row = entry['source']
-            w.docker_engine('POST', '/containers/' + row['Id'] + '/update', {'RestartPolicy': {'Name': 'no', 'MaximumRetryCount': 0}})
-            w.run(['docker', 'rename', row['Id'], entry['backup']], capture_output=True)
-            for network, endpoint in row.get('NetworkSettings', {}).get('Networks', {}).items():
-                if endpoint.get('EndpointID'):
-                    w.docker_engine('POST', '/networks/' + quote(network, safe='') + '/disconnect', {'Container': row['Id'], 'Force': True})
+            row = entry.get('source')
+            if row:
+                backup_original(entry, row)
+            if not entry.get('body'):
+                continue
             body = copy.deepcopy(entry['body'])
             body['Image'] = entry['image']
             body.setdefault('Labels', {})['betterdocker.settings-transaction'] = token
             body['HostConfig']['RestartPolicy'] = {'Name': 'no', 'MaximumRetryCount': 0}
-            entry['created'] = w.docker_engine('POST', '/containers/create?name=' + quote(row['Name'].lstrip('/'), safe=''), body)['Id']
+            name = row['Name'].lstrip('/') if row else entry['name']
+            endpoint = '/containers/create?name=' + quote(name, safe='')
+            if entry.get('platform'):
+                endpoint += '&platform=' + quote(entry['platform'], safe='')
+            entry['created'] = w.docker_engine('POST', endpoint, body)['Id']
             durable_write(marker, journal)
         for entry in entries:
-            w.docker_engine('POST', '/containers/' + entry['created'] + '/update', {'RestartPolicy': entry['body']['HostConfig']['RestartPolicy']})
+            if entry.get('created'):
+                w.docker_engine('POST', '/containers/' + entry['created'] + '/update', {'RestartPolicy': entry['body']['HostConfig']['RestartPolicy']})
+        for name, value in (updates or {}).items():
+            if name not in FILES:
+                raise ValueError('Invalid transaction control file')
+            target = directory / name
+            if value is None:
+                target.unlink(missing_ok=True)
+            else:
+                durable_text(target, value)
+        if metadata is not None:
+            w.write_json(w.METADATA / (identifier + '.json'), metadata)
         durable_write(directory / 'compose.runtime.json', candidate)
         durable_write(directory / 'settings.json', settings)
         durable_write(directory / 'pending.json', {name: changes for name, changes in pending.items() if changes})
@@ -212,8 +296,8 @@ def replace(info, service, candidate, settings, pending):
         restored = directory / 'snapshot-restored.json'
         if restored.exists():
             value = json.loads(restored.read_text())
-            changed = {e['source']['Id']: e['created'] for e in entries}
-            value['containers'] = [changed.get(cid, cid) for cid in value.get('containers', [])]
+            changed = {e['source']['Id']: e.get('created') for e in entries if e.get('source')}
+            value['containers'] = [changed.get(cid, cid) for cid in value.get('containers', []) if changed.get(cid, cid)]
             durable_write(restored, value)
         journal['phase'] = 'committed'
         durable_write(marker, journal)
@@ -223,28 +307,41 @@ def replace(info, service, candidate, settings, pending):
             try:
                 recover(identifier)
             except Exception as failure:
-                raise ValueError('Service settings failed; recovery is incomplete. Retry the operation: ' + str(failure)) from None
+                raise ValueError('Container change failed; recovery is incomplete. Retry the operation: ' + str(failure)) from None
         raise
+
+
+def backup_original(entry, row):
+    from . import projects as w
+    w.docker_engine('POST', '/containers/' + row['Id'] + '/update', {'RestartPolicy': {'Name': 'no', 'MaximumRetryCount': 0}})
+    w.run(['docker', 'rename', row['Id'], entry['backup']], capture_output=True)
+    for network, endpoint in row.get('NetworkSettings', {}).get('Networks', {}).items():
+        if endpoint.get('EndpointID'):
+            w.docker_engine('POST', '/networks/' + quote(network, safe='') + '/disconnect', {'Container': row['Id'], 'Force': True})
 
 
 def validate_journal(identifier, journal):
     if journal.get('id') != identifier or not re.fullmatch(r'[0-9a-f]{32}', journal.get('token', '')):
         raise ValueError('Invalid service settings recovery journal')
-    if journal.get('phase') not in ('preparing', 'committed') or set(journal['files']) != set(FILES):
+    if journal.get('phase') not in ('preparing', 'committed') or (set(journal['files']) - set(FILES) or not set(FILES[:5]).issubset(journal['files'])):
         raise ValueError('Invalid service settings recovery state')
-    if not journal['entries'] or len({e['source']['Id'] for e in journal['entries']}) != len(journal['entries']):
+    sources = [e['source'] for e in journal['entries'] if e.get('source')]
+    if not isinstance(journal['entries'], list) or len({row['Id'] for row in sources}) != len(sources):
         raise ValueError('Invalid service settings recovery instances')
-    for saved in journal['files'].values():
-        if saved is not None:
+    for name, saved in journal['files'].items():
+        if saved is not None and name.endswith('.json'):
             json.loads(saved)
     for index, entry in enumerate(journal['entries']):
-        if not re.fullmatch(r'[0-9a-f]{64}', entry['source']['Id']) or not re.fullmatch(r'/?[a-zA-Z0-9][a-zA-Z0-9_.-]*', entry['source']['Name']):
+        if entry.get('source') and (not re.fullmatch(r'[0-9a-f]{64}', entry['source']['Id']) or not re.fullmatch(r'/?[a-zA-Z0-9][a-zA-Z0-9_.-]*', entry['source']['Name'])):
             raise ValueError('Invalid service settings recovery container')
         if entry.get('created') and not re.fullmatch(r'[0-9a-f]{64}', entry['created']):
             raise ValueError('Invalid service settings replacement ID')
         if entry.get('image') and not re.fullmatch(r'sha256:[0-9a-f]{64}', entry['image']):
             raise ValueError('Invalid service settings image ID')
-        owned(entry['source'], identifier, journal['service'])
+        if entry.get('source'):
+            owned(entry['source'], identifier, journal['service'])
+        elif not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]*', entry.get('name', '')):
+            raise ValueError('Invalid new container name')
         token = journal['token']
         if entry['backup'] != 'bd-settings-' + identifier + '-' + token + '-' + str(index) or entry['tag'] != 'betterdocker-settings/' + identifier + ':' + token + '-' + str(index):
             raise ValueError('Invalid service settings recovery resource')
@@ -254,6 +351,8 @@ def finish(identifier, journal):
     from . import projects as w
     validate_journal(identifier, journal)
     for entry in journal['entries']:
+        if not entry.get('body'):
+            continue
         replacement = inspect(entry['created'])
         if not replacement:
             raise ValueError('Committed replacement is missing; retain the original recovery container')
@@ -261,6 +360,8 @@ def finish(identifier, journal):
         if (replacement['Config'].get('Labels') or {}).get('betterdocker.settings-transaction') != journal['token']:
             raise ValueError('Replacement ownership changed')
     for entry in journal['entries']:
+        if not entry.get('source'):
+            continue
         row = inspect(entry['source']['Id'])
         if row:
             owned(row, identifier, journal['service'])
@@ -285,6 +386,14 @@ def recover(identifier):
     # Validate all originals before removing any replacement, including replicas.
     originals = []
     for entry in journal['entries']:
+        if not entry.get('source'):
+            replacement = inspect(entry['name'])
+            if replacement:
+                owned(replacement, identifier, journal['service'])
+                if (replacement['Config'].get('Labels') or {}).get('betterdocker.settings-transaction') != journal['token']:
+                    raise ValueError('New container name is owned by another operation')
+            originals.append(None)
+            continue
         row = inspect(entry['source']['Id'])
         if not row:
             raise ValueError('Original service recovery container is missing')
@@ -296,14 +405,16 @@ def recover(identifier):
                 raise ValueError('Service name is owned by another operation')
         originals.append(row)
     for entry, original in zip(journal['entries'], originals):
-        name = entry['source']['Name'].lstrip('/')
+        name = entry['source']['Name'].lstrip('/') if entry.get('source') else entry['name']
         replacement = inspect(name)
-        if replacement and replacement['Id'] != original['Id']:
+        if replacement and (not original or replacement['Id'] != original['Id']):
             owned(replacement, identifier, journal['service'])
             if (replacement['Config'].get('Labels') or {}).get('betterdocker.settings-transaction') != journal['token']:
                 raise ValueError('Service name is owned by another operation')
             stop_backup(replacement)
             w.run(['docker', 'rm', replacement['Id']], capture_output=True)
+        if not original:
+            continue
         stop_backup(original)
         if original['Name'].lstrip('/') != name:
             w.run(['docker', 'rename', original['Id'], name], capture_output=True)
@@ -313,13 +424,28 @@ def recover(identifier):
             if network not in connected:
                 w.docker_engine('POST', '/networks/' + quote(network, safe='') + '/connect', {'Container': original['Id'], 'EndpointConfig': endpoint})
         w.docker_engine('POST', '/containers/' + original['Id'] + '/update', {'RestartPolicy': entry['source']['HostConfig']['RestartPolicy']})
+    for resource in reversed(journal.get('resources', [])):
+        kind, name = resource['kind'], resource['name']
+        if kind not in ('volume', 'network') or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}', name):
+            raise ValueError('Invalid deployment recovery resource')
+        result = w.run(['docker', kind, 'inspect', name], check=False, capture_output=True)
+        if result.returncode:
+            if 'no such ' not in result.stderr.lower() and 'not found' not in result.stderr.lower():
+                raise ValueError('Cannot inspect deployment recovery resource')
+            continue
+        labels = json.loads(result.stdout)[0].get('Labels') or {}
+        if labels.get('betterdocker.transaction') != journal['token']:
+            raise ValueError('Deployment recovery resource ownership changed')
+        w.run(['docker', kind, 'rm', name], capture_output=True)
     for name, value in journal['files'].items():
         path = directory / name
         if value is None:
             path.unlink(missing_ok=True)
         else:
             # Reuse atomic, private configuration writes, preserving JSON semantics.
-            durable_write(path, json.loads(value))
+            durable_text(path, value)
+    if 'metadata' in journal:
+        w.write_json(w.METADATA / (identifier + '.json'), journal['metadata'])
     prune_images(identifier)
     marker.unlink()
     return True
@@ -329,12 +455,16 @@ def prune_images(identifier):
     """Retain images used by containers; discard unused tags owned by this guest."""
     from . import projects as w
     reference = 'betterdocker-settings/' + identifier
-    result = w.run(['docker', 'image', 'ls', '--no-trunc', '--filter', 'reference=' + reference + ':*', '--format', '{{json .}}'], capture_output=True)
+    result = w.run(['docker', 'image', 'ls', '--no-trunc', '--format', '{{json .}}'], capture_output=True)
     images = [json.loads(line) for line in result.stdout.splitlines()]
     if not images:
         return
     containers = w.capture(['docker', 'ps', '-aq']).split()
     used = set(w.capture(['docker', 'inspect', '--format', '{{.Image}}', *containers]).split()) if containers else set()
     for image in images:
-        if image['Repository'] == reference and re.fullmatch(r'[0-9a-f]{32}-[0-9]+', image['Tag']) and image['ID'] not in used:
-            w.run(['docker', 'image', 'rm', '--force', reference + ':' + image['Tag']], capture_output=True)
+        owned_tag = (image['Repository'] == reference and re.fullmatch(r'[0-9a-f]{32}-[0-9]+', image['Tag'])) or (
+            image['Repository'] in ('betterdocker-snapshot/' + identifier, 'betterdocker-export/' + identifier)
+            and re.fullmatch(r'[0-9a-f]{32}', image['Tag'])) or (
+            image['Repository'] == 'betterdocker-rebind' and re.fullmatch(re.escape(identifier) + r'-[0-9a-f]{12}', image['Tag']))
+        if owned_tag and image['ID'] not in used:
+            w.run(['docker', 'image', 'rm', '--force', image['Repository'] + ':' + image['Tag']], capture_output=True)

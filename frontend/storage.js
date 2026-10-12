@@ -1,3 +1,30 @@
+Ext.define('PVE.betterdocker.DiskEdit', {
+    extend: 'Proxmox.window.Edit', showTaskViewer: true,
+    initComponent: function () {
+        const me = this, disk = me.disk || {};
+        const sizeMiB = disk.size_mib || 1024, sizeGiB = Math.ceil(sizeMiB / 1024 * 1000) / 1000;
+        me.title = translate(me.isCreate ? 'Add' : 'Edit') + ': ' + translate('Mount Point') + ' (' + me.diskName + ')';
+        me.method = 'PUT';
+        me.items = [{ xtype: 'inputpanel', column1: [
+            field('service', 'Service', disk.service || me.services[0]?.name || '', { xtype: 'combobox', queryMode: 'local', editable: false,
+                store: me.services.map(service => [service.name, service.name]), allowBlank: false }),
+            field('target', 'Path', disk.target || '', { allowBlank: false }),
+            { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Storage'), nodename: me.nodename,
+                storageContent: 'rootdir', value: disk.storage, allowBlank: false },
+            field('size_gib', 'Disk size (GiB)', sizeGiB, { xtype: 'numberfield', minValue: disk.size_mib ? sizeGiB : 0.25,
+                maxValue: 1024, decimalPrecision: 3, allowBlank: false }),
+        ], column2: [
+            { xtype: 'proxmoxcheckbox', name: 'backup', fieldLabel: translate('Backup'), value: disk.backup !== false, uncheckedValue: 0 },
+            { xtype: 'proxmoxcheckbox', name: 'read_only', fieldLabel: translate('Read-only'), value: Boolean(disk.read_only), uncheckedValue: 0 },
+        ], onGetValues: values => {
+            values.size_mib = Number(values.size_gib) === sizeGiB ? sizeMiB : Math.ceil(Number(values.size_gib) * 1024);
+            delete values.size_gib;
+            return Object.assign(values, { digest: me.digest });
+        } }];
+        me.callParent();
+    },
+});
+
 Ext.define('PVE.betterdocker.StorageVolumes', {
     extend: 'Ext.grid.GridPanel', alias: 'widget.pveBetterDockerStorageVolumes',
     onlineHelp: 'chapter_storage',

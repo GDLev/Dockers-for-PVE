@@ -170,7 +170,7 @@ def main():
             api('delete', '/access/users/' + user); api('delete', '/access/roles/' + role)
             state.pop('user'); state.pop('role'); save()
             print('PASS network-only separated token, audit writes and cross-DCT denial', flush=True)
-            for option in ('dhcp', 'macfilter', 'ipfilter', 'ndp', 'radv', 'ips'):
+            for option in ('dhcp', 'ndp', 'radv', 'ips'):
                 try: api('set', fw + '/options', **{option: 1})
                 except RuntimeError as error: assert '400' in str(error)
                 else: raise AssertionError('Unsupported option accepted: ' + option)

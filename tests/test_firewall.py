@@ -104,7 +104,7 @@ class FirewallTests(unittest.TestCase):
             self.assertEqual(path.read_text(), 'previous rules')
 
     def test_unsupported_options_do_not_look_enabled(self):
-        for option in ('ipfilter', 'macfilter', 'ndp', 'ips', 'dhcp'):
+        for option in ('ndp', 'ips', 'dhcp'):
             with self.subTest(option=option), self.assertRaisesRegex(ValueError, 'not supported'):
                 firewall.check_options({option: 1})
 

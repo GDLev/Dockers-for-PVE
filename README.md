@@ -1,6 +1,6 @@
 # Proxmox BetterDockers
 
-[![Version 0.19.0](https://img.shields.io/badge/version-0.19.0-blue?style=flat-square)](packaging/build-deb.sh)
+[![Version 0.20.0](https://img.shields.io/badge/version-0.20.0-blue?style=flat-square)](packaging/build-deb.sh)
 [![Proxmox VE 9.1 and 9.2](https://img.shields.io/badge/Proxmox_VE-9.1_%7C_9.2-E57000?style=flat-square&logo=proxmox&logoColor=white)](#installation)
 
 [Install](#installation) · [Features](#available-features) · [CLI and API](API_DOCS.md) · [Contributing](CONTRIBUTING.md)
@@ -20,8 +20,10 @@ DCT summaries show managed data-disk usage separately from container filesystem 
 
 Run as **root** on a Proxmox VE 9.1 or 9.2 node with internet access. Other versions are not currently supported.
 
+The v0.20.0 download commands below require published release artifacts. Until that release is published, run `bash start.sh` from this checkout.
+
 ```bash
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash
+curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/v0.20.0/install.sh | bash
 ```
 
 The terminal installer lets you choose **Install / Update**, **Repair** or **Uninstall**, select one or more cluster nodes and choose rootful or rootless for new installations. Use the arrow keys, Space to select nodes and Enter to continue. It uses PVE's existing SSH trust to reach other nodes.
@@ -31,14 +33,14 @@ After applying changes, it shows a result and log path for each node. Press **En
 Run the same command to update or repair. Existing nodes keep their saved runtime mode. Rootless is the default for fresh installations. For an unattended installation, choose explicitly:
 
 ```bash
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash -s -- install --runtime=rootless --yes
+curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/v0.20.0/install.sh | bash -s -- install --runtime=rootless --yes
 ```
 
 Add `--nodes=pve1,pve2` to target specific cluster nodes or `--no-restart` to defer service reload. Without a terminal, specify an operation; no menu is opened. Running `bash start.sh` from a downloaded checkout opens the same installer. DEB configuration and PVE update triggers keep their package workflow and reload services automatically.
 
 Rootless runs Docker under the dedicated `betterdocker` account. PVE still manages host networking, storage and guest permissions as root. Both modes use the same web interface. Updates and repair preserve the saved choice; existing installations stay rootful. A DEB installation uses the package configuration choice.
 
-Rootless needs cgroup v2, delegated CPU/memory/PID controllers, compatible Docker rootless binaries and unused `10.240.0.0/16` and `169.254.240.0/30` network ranges. The installer rejects incompatible setups. Rootless uses PVE-managed forwarding for published ports, including 80 and 443.
+Rootless needs cgroup v2, delegated CPU/memory/PID controllers, compatible Docker rootless binaries and unused `10.240.0.0/16` and `169.254.240.0/30` network ranges. The installer rejects incompatible setups. Release downloads use a fixed version and a SHA-256 checksum. A custom source URL also requires `BETTERDOCKER_SOURCE_SHA256`. Rootless uses PVE-managed forwarding for published ports, including 80 and 443.
 
 Rootless containers use user namespaces and Docker's seccomp filtering. The Docker AppArmor profile is unavailable in this mode on the tested PVE kernels; containers use `apparmor=unconfined`. The extension does not disable host AppArmor.
 
@@ -62,10 +64,10 @@ For a controlled rootless Docker restart, run `/usr/local/lib/betterdocker/runti
 Run the installation command again as **root** and choose **Uninstall**. For unattended removal:
 
 ```bash
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/HEAD/install.sh | bash -s -- uninstall --yes
+curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/v0.20.0/install.sh | bash -s -- uninstall --yes
 ```
 
-Remove DCT HA resources and replication jobs before uninstalling. Uninstallation removes the CLI and web/API integration. Interactive runs wait for Enter before reloading PVE services. **Docker, existing workloads, their data, network and firewall maintenance services remain on the node.** The uninstaller restores the restart policies declared for the services. Removing a DCT through the interface also retains its persistent data; permanent data cleanup is a separate manual step.
+Remove DCT HA resources and replication jobs before uninstalling. Uninstallation removes the CLI and web/API integration. Interactive runs wait for Enter before reloading PVE services. **Docker, existing workloads, their data, network and firewall maintenance services remain on the node.** The uninstaller restores the restart policies declared for the services. Guest removal retains data unless you select permanent removal of DCT-owned data. External mounts remain outside that removal scope.
 
 ## CLI and API
 
@@ -125,7 +127,7 @@ Without a managed data disk, application data stays in the bind-mount directorie
 
 In rootless mode, Docker data lives in `/var/lib/betterdocker/runtime/docker/`, the socket is `/run/user/<uid>/docker.sock`, and the daemon runs as a systemd user service with lingering. Those files, the account, its subordinate-ID ranges and host maintenance remain after uninstall. Backups store container-visible owners so restores can use a different subordinate-ID range. Do not manually renumber the account or its ranges.
 
-Permanent removal is a separate maintenance operation. Remove the DCTs and purge their retained managed disks with `/usr/local/lib/betterdocker/provision.py purge-retained-storage <project-id>` before uninstalling. Stop the rootless user Docker service, disable its host service and lingering, then run `/usr/local/lib/betterdocker/host.py remove` before deleting the runtime configuration. Remove the dedicated runtime directory, owned rootless units, user delegation, account and its subordinate-ID entries last. Keep shared networking and firewall helpers while any retained workloads still use them.
+Permanent removal is a separate maintenance operation. Remove the DCTs, inspect `dct cleanup <project-id>` and add `--destroy-owned-data 1` to delete their retained owned disks, volumes and snapshots before uninstalling. Stop the rootless user Docker service, disable its host service and lingering, then run `/usr/local/lib/betterdocker/host.py remove` before deleting the runtime configuration. Remove the dedicated runtime directory, owned rootless units, user delegation, account and its subordinate-ID entries last. Keep shared networking and firewall helpers while any retained workloads still use them.
 
 ## Available features
 
@@ -134,16 +136,24 @@ Permanent removal is a separate maintenance operation. Remove the DCTs and purge
 - **Runtime modes:** choose rootful or rootless Docker during installation. Rootless uses a shared unprivileged runtime account on each node.
 - **Resource settings:** set CPU, memory, swap and PID limits per service instance, along with restart policies. Changes that require a restart appear as pending and can be reverted.
 - **Disk limits:** limit application data with a managed data disk. Writable container layers can also have quotas in rootful mode with `overlay2` on XFS with project quotas.
-- **Networking:** configure up to 16 published endpoints with static IPv4, DHCP, static IPv6, VLAN tags, firewall, Disconnect and rate limits. Select a Linux bridge or supported SDN VNet using PVE permissions. The bridge needs a connected IPv4 subnet; DHCP needs a reachable server.
-- **Firewall:** configure native PVE guest rules, macros, aliases, IP sets, security groups and logs. Filtering covers incoming, outgoing and cross-DCT traffic on owned IPv4 Docker bridge networks.
+- **Networking:** configure up to 16 published endpoints with static IPv4, DHCP, static IPv6, SLAAC, DHCPv6, VLAN tags, firewall, Disconnect and rate limits. Select a Linux bridge or supported SDN VNet using PVE permissions. Static IPv4 needs a connected bridge subnet. Dynamic addresses need a reachable DHCP server or IPv6 router. Each endpoint carries one VLAN; use separate interfaces for separate VLANs.
+- **Firewall:** configure native PVE guest rules, macros, aliases, IP sets, security groups and logs. Filtering covers IPv4 and IPv6 endpoints and incoming, outgoing and cross-DCT traffic on owned Docker bridge networks.
 - **Storage:** managed data disks appear under Docker Volumes in the storage view. Local directory, LVM-thin and ZFS storage with `rootdir` content are supported. Create, grow or move disks while services are stopped.
-- **Snapshots:** capture deployment settings, writable container layers and owned application data. LVM-thin and ZFS data disks use PVE storage snapshots. Rollback leaves the DCT stopped.
+- **Snapshots:** capture deployment settings, writable container layers and owned application data. The primary LVM-thin or ZFS data disk uses PVE storage snapshots. Additional mounts use data copies. Rollback leaves the DCT stopped.
 - **Backup and restore:** use native vzdump, scheduled PVE backup jobs and PBS. Backups include deployment files, settings, images, writable layers and owned application data. Restore creates a stopped DCT with a new guest ID and endpoint.
-- **Clones, templates and migration:** create independent full clones and clone stopped templates. Migrate stopped DCTs or shut down and restart active instances between nodes using the same runtime mode. Static and DHCP endpoints and snapshot history are supported; native disk history needs snapshot-capable destination storage.
+- **Clones, templates and migration:** create independent full clones or linked clones of templates with LVM-thin managed disks. Migrate stopped DCTs or shut down and restart active instances between nodes using the same runtime mode. Static and DHCP endpoints and snapshot history are supported; native disk history needs snapshot-capable destination storage.
 - **Replication and HA:** use native PVE replication jobs with managed ZFS data disks and native HA management. Recovery requires quorum and a complete replica on an eligible destination node. HA relocation has downtime.
 - **Startup and hooks:** configure Start at boot, startup/shutdown order and guest hook scripts. Native node and datacenter bulk operations include DCTs. Hooks run for PVE-controlled guest start and stop operations.
 
+Additional mount points `mp1` through `mp15` can use separate PVE disks. Each records its service, path, read-only setting and backup setting. `backup=0` excludes its data from backups; clones, migration and snapshots still include it. Detached disks remain available under unused volumes.
+
+Container disk limits charge preserved writable history as well as the new writable layer. Committed history remains charged even after files are deleted from the current container. Image, log and snapshot sizes are reported separately.
+
+Use `dct recover <vmid>` for interrupted configuration changes. Image updates and interrupted snapshot rollback use the normal snapshot rollback action. After deleting a guest, `dct cleanup <project-id>` prints a retained-data cleanup plan; add `--destroy-owned-data 1` to remove it.
+
 Backups, clones and snapshots cover project-owned data. External mounts and shared volumes need separate protection. DCT networking and runtime isolation differ from LXC; Docker runs on the PVE node.
+
+Filesystem-preserving deployment edits reject Compose lifecycle hooks, API socket mounts and credential specifications rather than silently dropping them. Change deployed base images through the image update action.
 
 ## Permissions
 

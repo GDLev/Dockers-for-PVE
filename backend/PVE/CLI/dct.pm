@@ -45,7 +45,11 @@ my %resources = (
     'restart-policy' => option('string', 'Docker restart policy.'),
 );
 my %network_options = map { ('net' . $_) => $net0 } (0..15);
+my %mount_options = map { ('mp' . $_) => option('string', 'Managed disk: storage=<ID>,size=<MiB>,mp=<path>,service=<name>,backup=<0|1>,ro=<0|1>. Use delete to detach.') } (1..15);
 my %commands = (
+    cleanup => ['Inspect or remove retained data after deleting a DCT.', ['project-id'], {
+        'project-id' => { type => 'string', pattern => '^[0-9a-f]{32}$', description => 'Project ID reported when removing the guest.' },
+        'destroy-owned-data' => option('boolean', 'Remove the inspected project-owned data. The default only prints the cleanup plan.', default => 0) }],
     limits => ['Read or set administrator-owned aggregate DCT limits.', ['vmid'], {
         vmid => $vmid, cpus => option('number', 'Aggregate CPU ceiling; 0 means unlimited.', minimum => 0, maximum => 8192),
         memory => option('integer', 'Aggregate memory ceiling in MiB; 0 means unlimited.', minimum => 0, maximum => 1048576),
@@ -58,11 +62,12 @@ my %commands = (
         ports => option('string', 'Published:container port mappings for an image, separated by commas.'),
         'env-file' => option('string', 'Import environment variables from this file.'),
     }],
+    recover => ['Recover interrupted local configuration operations.', ['vmid'], { vmid => $vmid }],
     config => ['Get DCT configuration.', ['vmid'], { vmid => $vmid, service => $service, current => option('boolean', 'Show current values instead of pending values.') }],
     status => ['Show DCT status.', ['vmid'], { vmid => $vmid, verbose => option('boolean', 'Verbose output format.') }],
     pending => ['Show current and pending configuration.', ['vmid'], { vmid => $vmid, service => $service }],
     network => ['Show the published IPv4 endpoint configuration.', ['vmid'], { vmid => $vmid }],
-    set => ['Set DCT options.', ['vmid'], { vmid => $vmid, %config, %resources, service => $service, %network_options, delete => option('string', 'Remove startup, hookscript or comma-separated network interfaces.') }],
+    set => ['Set DCT options.', ['vmid'], { vmid => $vmid, %config, %resources, service => $service, %network_options, %mount_options, delete => option('string', 'Remove startup, hookscript or comma-separated network interfaces.') }],
     start => ['Start the DCT.', ['vmid'], { vmid => $vmid }],
     stop => ['Stop the DCT immediately.', ['vmid'], { vmid => $vmid }],
     shutdown => ['Shut down the DCT gracefully.', ['vmid'], { vmid => $vmid, timeout => $timeout }],
@@ -71,15 +76,15 @@ my %commands = (
     migrate => ['Migrate a DCT to another node, optionally shutting down and restarting it.', ['vmid', 'target'], {
         vmid => $vmid, target => { type => 'string', description => 'Target node.' }, 'target-storage' => $storage, restart => option('boolean', 'Shutdown and restart a running DCT.', default => 0),
         timeout => option('integer', 'Shutdown timeout in seconds.', minimum => 1, maximum => 86400, default => 180) }],
-    clone => ['Create an independent full clone, initially stopped.', ['vmid', 'newid'], {
+    clone => ['Clone a DCT, initially stopped.', ['vmid', 'newid'], {
         vmid => $vmid, newid => $vmid, hostname => $hostname, net0 => { %$net0, optional => 0 }, pool => $pool,
-        storage => $storage, full => option('boolean', 'Create a full copy. Linked clones are unavailable.', enum => [1], default => 1) }],
+        storage => $storage, full => option('boolean', 'Create a full copy. Set 0 for an LVM-thin template linked clone.', default => 1) }],
     listsnapshot => ['List all snapshots.', ['vmid'], { vmid => $vmid }],
     snapshot => ['Snapshot the DCT.', ['vmid', 'snapname'], { vmid => $vmid, snapname => $snapname,
         description => option('string', 'A textual description or comment.') }],
     delsnapshot => ['Delete a DCT snapshot.', ['vmid', 'snapname'], { vmid => $vmid, snapname => $snapname }],
     rollback => ['Roll back to a snapshot. The DCT remains stopped.', ['vmid', 'snapname'], { vmid => $vmid, snapname => $snapname }],
-    template => ['Convert a stopped DCT to a full-clone template.', ['vmid'], { vmid => $vmid }],
+    template => ['Convert a stopped DCT to a template.', ['vmid'], { vmid => $vmid }],
 );
 
 for my $action (qw(status log wait stop)) {
