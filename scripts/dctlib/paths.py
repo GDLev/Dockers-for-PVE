@@ -12,7 +12,7 @@ CONTROL_NAMES = frozenset(CONFIG_FILES) | frozenset({
     'network-transaction.json', 'network-resume.json', 'network-reconcile.json',
     'dhcp-address.json', 'dhclient.conf', 'dhclient.leases', 'metrics.json',
     'disk-usage.json', 'rootfs-quota.json', 'replication.json', 'transfer-cleanup.json',
-    'owned-volumes.json', 'disk-transaction.json', 'storage-usage.json', 'linked-clone.json',
+    'owned-volumes.json', 'disk-transaction.json', 'storage-usage.json', 'linked-clone.json', 'runtime-owner.json',
 })
 
 

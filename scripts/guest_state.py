@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -536,7 +537,9 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
         if 'interfaces' in request:
             info['interfaces'] = request['interfaces']
         info['runtime_mode'] = worker.node_runtime.load().mode
+        from dctlib.authorization import remember_owner
         project.mkdir(parents=True, mode=0o700)
+        remember_owner(identifier)
         worker.node_runtime.read_access(project)
         imports = worker.ROOT.parent / 'imports'
         imports.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -837,4 +840,12 @@ def main():
     elif args.action=='cleanup-capture': cleanup_capture(*args.values)
     elif args.action=='cleanup-import': cleanup_import(*args.values)
 
-if __name__=='__main__': main()
+if __name__ == '__main__':
+    from dctlib.authorization import require_host_root
+    from dctlib.security_errors import public_error
+    try:
+        require_host_root(sys.argv[1:])
+        main()
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        print('BetterDocker: ' + public_error(error), file=sys.stderr)
+        raise SystemExit(1)

@@ -66,6 +66,14 @@ sub register_api {
                 $info->{capabilities}->{power} && ($ENV{BETTERDOCKER_TASK_SYS_MODIFY} eq '1' ||
                 ($owner ne '' && $owner eq $actor))) ? 1 : 0;
             delete $info->{deployment} unless $info->{capabilities}->{configure};
+            delete $info->{image_update}->{token} unless $info->{capabilities}->{images};
+            if (!$info->{capabilities}->{configure}) {
+                for my $service (@{$info->{services} // []}) {
+                    $service->{mounts} = [map { my $mount = $_;
+                        +{ map { exists($mount->{$_}) ? ($_ => $mount->{$_}) : () } qw(type source target read_only) }
+                    } @{$service->{mounts} // []}];
+                }
+            }
             delete $info->{digest} unless $info->{capabilities}->{settings} || $info->{capabilities}->{clone} || $info->{capabilities}->{migrate} || $info->{capabilities}->{template};
             return $info; },
     });

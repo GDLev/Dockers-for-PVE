@@ -217,13 +217,25 @@ if ($action eq 'linked-clone') {
     }
     else { PVE::Storage::volume_rollback_is_possible($cfg, $volid, $name); }
 } elsif ($action eq 'free' || $action eq 'free-check') {
+    my %planned;
+    if ($action eq 'free-check' && exists($p->{snapshots})) {
+        die "Invalid planned snapshots\n" unless ref($p->{snapshots}) eq 'ARRAY';
+        for my $name (@{$p->{snapshots}}) {
+            die "Invalid planned snapshot\n" unless $name =~ /\A[a-zA-Z][a-zA-Z0-9_-]{0,39}\z/;
+            my $manifest = read_json("/var/lib/betterdocker/snapshots/$id/$name/manifest.json");
+            die "Planned snapshot ownership changed\n" unless $manifest->{id} eq $id && $manifest->{name} eq $name
+                && $manifest->{native_storage}->{volid} eq $volid && $manifest->{native_storage}->{name} eq $name;
+            $planned{$name} = 1;
+        }
+    }
     if ($scfg->{type} eq 'lvmthin') {
         my (undef, $volume) = PVE::Storage::parse_volume_id($volid);
         my $volumes = PVE::Storage::LVMPlugin::lvm_list_volumes($scfg->{vgname});
-        die "Remove storage snapshots before freeing the disk\n" if grep { index($_, "snap_${volume}_") == 0 } keys %{$volumes->{$scfg->{vgname}} // {}};
+        my $prefix = "snap_${volume}_";
+        die "Remove storage snapshots before freeing the disk\n" if grep { index($_, $prefix) == 0 && !$planned{substr($_, length($prefix))} } keys %{$volumes->{$scfg->{vgname}} // {}};
     } elsif ($scfg->{type} eq 'zfspool' && -e PVE::Storage::path($cfg, $volid)) {
         my $snapshots = PVE::Storage::volume_snapshot_info($cfg, $volid);
-        die "Remove storage snapshots before freeing the disk\n" if keys %$snapshots;
+        die "Remove storage snapshots before freeing the disk\n" if grep { !$planned{$_} } keys %$snapshots;
     }
     if ($action eq 'free-check') { print "{}\n"; exit; }
     my $path = PVE::Storage::path($cfg, $volid);

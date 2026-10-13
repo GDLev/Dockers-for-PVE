@@ -7,6 +7,13 @@ import runtime as node_runtime
 import service_security
 from .paths import control_path
 
+DELEGATED_SERVICE_KEYS = frozenset('image command entrypoint environment env_file ports expose volumes networks labels restart '
+                  'depends_on healthcheck user working_dir hostname domainname stop_signal stop_grace_period '
+                  'init tty stdin_open read_only tmpfs cap_drop cpus cpu_shares cpu_period cpu_quota '
+                  'mem_limit mem_reservation memswap_limit mem_swappiness pids_limit ulimits dns dns_search '
+                  'dns_opt shm_size deploy logging pull_policy platform attach container_name name '
+                  'blkio_config oom_score_adj oom_kill_disable storage_opt security_opt'.split())
+
 LOG_DEFAULTS = {'max-size': '10m', 'max-file': '3'}
 
 
@@ -88,7 +95,7 @@ def validate_bind_layout(paths, identifier):
                     raise ValueError('Bind source ancestors must belong to the host or this runtime and be non-writable by others')
 
 
-def validate_delegated_source(source):
+def validate_delegated_source(source, identifier=None, directory=None):
     # Check file-loading directives before Compose can read anything as host root.
     import yaml
     try:
@@ -103,6 +110,8 @@ def validate_delegated_source(source):
     for service in services.values():
         if not isinstance(service, dict):
             raise ValueError('Invalid Compose service')
+        if set(service) - DELEGATED_SERVICE_KEYS - {k for k in service if isinstance(k, str) and k.startswith('x-')}:
+            raise ValueError('Delegated Compose contains unsafe or unsupported service options')
         for key in ('extends', 'build', 'label_file', 'secrets', 'configs', 'credential_spec', 'develop', 'provider', 'use_api_socket'):
             if key in service:
                 raise ValueError('Delegated Compose does not support ' + key)
@@ -110,22 +119,33 @@ def validate_delegated_source(source):
         files = [files] if isinstance(files, str) else files
         if not isinstance(files, list) or any(item != '.env' for item in files):
             raise ValueError('Delegated Compose can only read the imported .env file')
+    if identifier is not None:
+        for service in services.values():
+            for mount in service.get('volumes') or []:
+                if isinstance(mount, str):
+                    source = mount.split(':')[0] if ':' in mount else ''
+                    source = source if '/' in source or source.startswith('.') else ''
+                elif isinstance(mount, dict):
+                    source = mount.get('source', '') if mount.get('type') == 'bind' else ''
+                else:
+                    raise ValueError('Invalid Compose mount')
+                if source:
+                    path = Path(source) if Path(source).is_absolute() else Path(directory) / source
+                    worker.safe_bind(str(path), identifier)
+        for kind in ('volumes', 'networks'):
+            for definition in (value.get(kind) or {}).values():
+                if isinstance(definition, dict) and (definition.get('external') or definition.get('driver_opts')):
+                    raise ValueError('Delegated Compose cannot use external resources or driver options')
     return value
 
 
 def validate_delegated_config(config, identifier):
-    allowed = set('image command entrypoint environment env_file ports expose volumes networks labels restart '
-                  'depends_on healthcheck user working_dir hostname domainname stop_signal stop_grace_period '
-                  'init tty stdin_open read_only tmpfs cap_drop cpus cpu_shares cpu_period cpu_quota '
-                  'mem_limit mem_reservation memswap_limit mem_swappiness pids_limit ulimits dns dns_search '
-                  'dns_opt shm_size deploy logging pull_policy platform attach container_name name '
-                  'blkio_config oom_score_adj oom_kill_disable storage_opt security_opt'.split())
     if not isinstance(config, dict) or set(config) - {'name', 'version', 'services', 'volumes', 'networks'}:
         raise ValueError('Delegated configuration contains unsupported resources')
     validate_bind_layout([mount['source'] for service in config.get('services', {}).values()
                           for mount in service.get('volumes') or [] if isinstance(mount, dict) and mount.get('type') == 'bind'], identifier)
     for service in config.get('services', {}).values():
-        if not isinstance(service, dict) or set(service) - allowed:
+        if not isinstance(service, dict) or set(service) - DELEGATED_SERVICE_KEYS:
             raise ValueError('Delegated configuration contains unsafe or unsupported service options')
         service_security.delegated(service_security.options(service))
         validate_oom(service.get('oom_kill_disable', False), service.get('oom_score_adj', 0))
@@ -241,6 +261,8 @@ def delegated_access(identifier, node):
                     volume = json.loads(worker.capture(['docker', 'volume', 'inspect', mount['Name']]))[0]
                     if not owned_local_volume(volume, mount['Name'], identifier):
                         raise ValueError('This deployment uses an external volume')
+                    from .data import check_volume_claim
+                    check_volume_claim(mount['Name'], identifier)
                     users = set(worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + mount['Name']]).split())
                     if users - {record['id'] for record in records}:
                         raise ValueError('This deployment uses a shared volume')

@@ -184,6 +184,7 @@ def main():
     nonce = uuid.uuid4().hex[:8]
     roles, users, guests = [], [], []
     created = set()
+    backup_archive = None
     source = 'services:\n  app:\n    image: busybox:1.37\n    command: ["sh", "-c", "trap \'exit 0\' TERM INT; echo delegation-ready; while true; do sleep 1; done"]\n    volumes:\n      - ./data:/data\n'
 
     def deploy(label, address, compose=source):
@@ -333,6 +334,7 @@ def main():
         task(http('POST', f'/nodes/{node}/vzdump', {'vmid': safe['vmid'], 'storage': args.backup_storage, 'mode': 'stop'}, headers=headers['editor']))
         backups = api('get', f'/nodes/{node}/storage/{args.backup_storage}/content', content='backup', vmid=safe['vmid'])
         archive = sorted(backups, key=lambda r: r.get('ctime', 0))[-1]['volid']
+        backup_archive = archive
         vmid = int(api('get', '/cluster/nextid'))
         grant('/vms/' + str(vmid), roles[3])
         task(http('POST', f'/nodes/{node}/docker', {'archive': archive, 'newid': vmid, 'storage': 'local-lvm',
@@ -348,6 +350,17 @@ def main():
         base = f"/nodes/{args.target}/docker/{safe['id']}"
         data = http('GET', base + '/management', headers=headers['editor'])
         assert data['node'] == args.target and data['vmid'] == safe['vmid'] and data['capabilities']['console']
+        http('POST', f"/nodes/{node}/docker/{safe['id']}/action", {'action': 'start'}, headers=headers['editor'], expected=500)
+        import transfer, shlex
+        old_context = json.dumps({key: safe[key] for key in ('id', 'vmid', 'node', 'runtime_mode')})
+        code = ('import os,sys;sys.path.insert(0,"/usr/local/lib/betterdocker");from dctlib import projects as w;'
+                'os.environ["BETTERDOCKER_REQUEST_CONTEXT"]=sys.argv[2]\n'
+                'with w.operation(sys.argv[1],"update"): raise AssertionError("stale migrated request accepted")')
+        stale = subprocess.run(transfer.ssh_command(args.target) + [shlex.join(['python3', '-c', code, safe['id'], old_context])],
+                               text=True, capture_output=True)
+        assert stale.returncode and 'ownership changed after authorization' in stale.stderr
+        assert http('GET', base + '/management', headers=headers['editor'])['digest'] == data['digest']
+        print('OK stale pre-migration request rejected on old and new owners', flush=True)
         task(http('POST', base + '/action', {'action': 'start'}, headers=headers['editor']))
         import transfer, shlex
         remote_cid = subprocess.check_output(transfer.ssh_command(args.target) + [shlex.join(['docker', 'ps', '--no-trunc', '-q', '--filter', 'label=betterdocker.id=' + safe['id']])], text=True).strip().splitlines()[0]
@@ -395,6 +408,8 @@ def main():
                     worker.release_id(identifier)
                 except Exception as error:
                     print('Cleanup requires attention:', identifier, str(error), file=sys.stderr)
+        if backup_archive:
+            api('delete', f'/nodes/{node}/storage/{args.backup_storage}/content/' + backup_archive)
         for user in reversed(users):
             api('delete', '/access/users/' + user)
         for role in reversed(roles):

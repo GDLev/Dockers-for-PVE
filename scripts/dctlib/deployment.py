@@ -178,8 +178,10 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
     source = data['compose'] if data['mode'] == 'compose' else worker.image_compose(data)
+    from .security_errors import remember_environment
+    remember_environment(data.get('environment', ''))
     if not worker.trusted_management():
-        worker.validate_delegated_source(source)
+        worker.validate_delegated_source(source, identifier, project_directory)
     (directory / 'compose.source.yaml').write_text(source)
     (directory / '.env').write_text(data.get('environment', ''))
     for name in ('compose.source.yaml', '.env'):
@@ -194,6 +196,8 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
         locations = sorted(set(re.findall(r'line [0-9]+', error.stderr or '')))
         location = ' (' + ', '.join(locations) + ')' if locations else ''
         raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
+    for service in config.get('services', {}).values():
+        remember_environment(service.get('environment'))
     config = worker.bind_ports(config, data['address'], identifier, data['interfaces']) if 'interfaces' in data else worker.bind_ports(config, data['address'], identifier)
     if 'interfaces' in data and all(endpoint['ipv4mode'] != 'dhcp' and endpoint.get('ipv6mode') not in ('auto', 'dhcp') for endpoint in data['interfaces'].values()):
         from .endpoints import bind_runtime
@@ -258,6 +262,8 @@ def create(data, node, identifier=None, hookscript=None, start=True):
         if 'interfaces' in data:
             info['interfaces'] = data['interfaces']
         info['runtime_mode'] = node_runtime.load().mode
+        from .authorization import remember_owner
+        remember_owner(identifier)
         if hookscript:
             info['hookscript'] = hookscript
         worker.write_json(worker.METADATA / (identifier + '.json'), info)

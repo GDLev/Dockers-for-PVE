@@ -34,7 +34,7 @@ class SwapTests(unittest.TestCase):
         self.creates = 0
         self.fail_at = None
         self.interrupt = False
-        patches = [patch.object(worker, 'ROOT', self.root), patch.object(worker, 'storage_config', return_value={}),
+        patches = [patch.object(worker, 'LOCK', self.root / 'node.lock'), patch.object(worker, 'ROOT', self.root), patch.object(worker, 'storage_config', return_value={}),
             patch.object(worker, 'container_records', side_effect=lambda _: [{'id': r['Id'], 'service': 'web', 'state': 'exited'} for r in self.rows.values() if r['Id'][0] in '12']),
             patch.object(worker, 'capture', side_effect=lambda command: str(self.root) if command[:2] == ['docker', 'info'] else json.dumps([copy.deepcopy(self.rows[str(i)*64]) for i in (1, 2)])),
             patch.object(worker, 'run', side_effect=self.docker_run), patch.object(worker, 'docker_engine', side_effect=self.engine)]

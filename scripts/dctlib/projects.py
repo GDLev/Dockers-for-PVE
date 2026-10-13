@@ -226,6 +226,11 @@ def release_id(identifier):
 
 
 def run(args, **kwargs):
+    # Compose diagnostics can echo interpolated environment values. Keep stderr
+    # out of native task logs until it has passed through credential redaction.
+    private_stderr = bool(args and args[0] == 'docker' and not kwargs.get('capture_output') and 'stderr' not in kwargs)
+    if private_stderr:
+        kwargs['stderr'] = subprocess.PIPE
     inherited = set(kwargs.get('pass_fds', ())) | set(getattr(_operation_fds, 'values', {}).values())
     if inherited:
         kwargs['pass_fds'] = tuple(sorted(inherited))
@@ -250,12 +255,16 @@ def run(args, **kwargs):
         client = ROOT.parent / 'delegated-client'
         client.mkdir(parents=True, exist_ok=True, mode=0o700)
         kwargs['env'] = dict(kwargs['env'], DOCKER_CONFIG=str(client))
-    for key in ('BETTERDOCKER_TASK_USER', 'BETTERDOCKER_TRUSTED', 'BETTERDOCKER_REQUIRE_SAFE', 'BETTERDOCKER_CONFIG_KEYS', 'BETTERDOCKER_TASK_SYS_MODIFY'):
+    for key in ('BETTERDOCKER_TASK_USER', 'BETTERDOCKER_TRUSTED', 'BETTERDOCKER_REQUIRE_SAFE', 'BETTERDOCKER_CONFIG_KEYS', 'BETTERDOCKER_TASK_SYS_MODIFY', 'BETTERDOCKER_REQUEST_CONTEXT'):
         if key in os.environ:
             kwargs['env'][key] = os.environ[key]
     kwargs.setdefault('check', True)
     kwargs.setdefault('text', True)
-    return node_runtime.run(args, delegated=not trusted_management(), **kwargs)
+    result = node_runtime.run(args, delegated=not trusted_management(), **kwargs)
+    if private_stderr and result.stderr:
+        from .security_errors import redact
+        print(redact(result.stderr), file=sys.stderr, end='')
+    return result
 
 
 def capture(args):
@@ -471,8 +480,12 @@ def detail(identifier, node):
     info = json.loads((METADATA / (identifier + '.json')).read_text())
     if info['node'] != node or node != current_node():
         raise ValueError('Project belongs to another node')
+    from .authorization import check_context
+    check_context(identifier, info)
     directory = ROOT / identifier
     deployment = json.loads((directory / 'request.json').read_text())
+    from .security_errors import remember_environment
+    remember_environment(deployment.get('environment', ''))
     return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup', 'template', 'hookscript') if info.get(key)}))
 
 
@@ -878,13 +891,23 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
         write_json(path, state)
         os.chmod(path, 0o600)
         try:
+            # Read identity again after acquiring the operation lock, before recovery
+            # can mutate resources selected by an earlier API authorization.
+            from .authorization import check_context
+            current = json.loads(metadata.read_text()) if metadata.exists() else {}
+            check_context(identifier, current)
+            if current.get('migration') and name not in ('migrate', 'migration-prepare', 'migration-abort', 'migration-recovery'):
+                raise ValueError('DCT migration is in progress; recover it before another operation')
             from .service_recreate import recover as recover_settings
             with locked(identifier):
+                if os.environ.get('BETTERDOCKER_REQUIRE_SAFE') == '1' and (ROOT / identifier / 'compose.runtime.json').exists():
+                    delegated_access(identifier, current_node())
+                if current and current.get('node') == current_node() and (ROOT / identifier).exists():
+                    from .authorization import remember_owner
+                    remember_owner(identifier)
                 recover_settings(identifier)
                 from .disks import recover as recover_disks
                 recover_disks(identifier)
-            if os.environ.get('BETTERDOCKER_REQUIRE_SAFE') == '1' and (ROOT / identifier / 'compose.runtime.json').exists():
-                delegated_access(identifier, current_node())
             previous_fds = getattr(_operation_fds, 'values', {})
             _operation_fds.values = dict(previous_fds, **{identifier: handle.fileno()})
             try:

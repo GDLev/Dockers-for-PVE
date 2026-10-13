@@ -347,16 +347,20 @@ def project_storage_status(identifier):
 def purge_retained_storage(identifier):
     """Explicit root maintenance after guest deletion; never called by DELETE DCT."""
     worker.project_id(identifier)
-    with worker.locked(identifier):
+    with worker.operation(identifier, 'disk-cleanup'), worker.locked(identifier):
         if (worker.METADATA / (identifier + '.json')).exists():
             raise ValueError('Remove the DCT before permanently freeing retained disks')
+        from .data import check_data_dependencies
+        check_data_dependencies(identifier)
         if any(worker.snapshot_root(identifier).glob('*/manifest.json')):
             raise ValueError('Remove snapshots before freeing retained disks')
         settings = worker.storage_config(identifier)
         if not settings.get('volid'):
             raise ValueError('No retained PVE disks')
-        worker.storage_unmount(identifier)
         from .disks import volume_ids
+        for volid in volume_ids(settings):
+            worker.pve_storage(identifier, 'free-check', volid=volid)
+        worker.storage_unmount(identifier)
         for volid in volume_ids(settings):
             worker.pve_storage(identifier, 'free', volid=volid)
             if volid in settings.get('unused', []):

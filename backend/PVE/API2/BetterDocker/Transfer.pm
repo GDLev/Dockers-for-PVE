@@ -37,6 +37,10 @@ sub register_api {
             $identifier = PVE::API2::BetterDocker::worker_id($identifier);
             my $vmid = eval { PVE::API2::BetterDocker::reserve_guest_id($identifier, $param->{node}, $param->{newid}); };
             if (my $error = $@) { unlink $path; die $error; }
+            my $context = decode_json($ENV{BETTERDOCKER_REQUEST_CONTEXT});
+            $context->{destination_id} = $identifier;
+            $context->{destination_vmid} = 0 + $vmid;
+            local $ENV{BETTERDOCKER_REQUEST_CONTEXT} = JSON::encode_json($context);
             my $upid = eval { $rpc->fork_worker('betterdockerclone', $vmid, $user, sub {
                 eval { PVE::Tools::run_command(['/usr/local/lib/betterdocker/guest_state.py', 'clone',
                     $param->{id}, $param->{node}, $identifier, $path]); };

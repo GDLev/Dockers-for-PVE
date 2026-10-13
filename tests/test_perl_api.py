@@ -252,6 +252,8 @@ use Exporter 'import';
 our @EXPORT_OK = qw(decode_json encode_json);
 use JSON::PP ();
 sub decode_json { JSON::PP::decode_json($_[0]); }
+sub encode_json { JSON::PP::encode_json($_[0]); }
+sub new { JSON::PP->new() }
 1;
 ''')
             subprocess.run(['perl', '-T', '-I' + folder, '-I' + str(ROOT / 'backend'), '-MPVE::API2::BetterDocker', '-e', r'''

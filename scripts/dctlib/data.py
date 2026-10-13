@@ -10,21 +10,23 @@ from .disks import volume_ids, source, records
 
 def remember_volumes(identifier, containers):
     """Keep anonymous ownership when a service or replica is later removed."""
-    names = {mount['Name'] for row in containers for mount in row.get('Mounts', []) if mount.get('Type') == 'volume'}
-    ledger = worker.ROOT / identifier / 'owned-volumes.json'
-    if ledger.exists():
-        names.update(json.loads(ledger.read_text())['volumes'])
-    verified = []
-    for name in sorted(names):
-        volume = worker.run(['docker', 'volume', 'inspect', name], check=False, capture_output=True)
-        if volume.returncode:
-            if 'no such volume' not in (volume.stderr or '').lower():
-                raise ValueError('Cannot inspect retained volume ownership')
-            continue
-        if owned_local_volume(json.loads(volume.stdout)[0], name, identifier):
-            verified.append(name)
-    if verified:
-        worker.write_json(ledger, {'volumes': verified})
+    with worker.locked():
+        names = {mount['Name'] for row in containers for mount in row.get('Mounts', []) if mount.get('Type') == 'volume'}
+        ledger = worker.ROOT / identifier / 'owned-volumes.json'
+        if ledger.exists():
+            names.update(json.loads(ledger.read_text())['volumes'])
+        verified = []
+        for name in sorted(names):
+            volume = worker.run(['docker', 'volume', 'inspect', name], check=False, capture_output=True)
+            if volume.returncode:
+                if 'no such volume' not in (volume.stderr or '').lower():
+                    raise ValueError('Cannot inspect retained volume ownership')
+                continue
+            if owned_local_volume(json.loads(volume.stdout)[0], name, identifier):
+                check_volume_claim(name, identifier)
+                verified.append(name)
+        if verified:
+            worker.write_json(ledger, {'volumes': verified})
 
 
 def storage_owner(vmid, node):
@@ -59,8 +61,17 @@ def check_data_dependencies(identifier, info=None, allow_snapshots=False):
         raise ValueError('Finish the interrupted import before deleting data')
 
 
-def owned_data_plan(identifier, info):
-    check_data_dependencies(identifier, info)
+def check_volume_claim(name, identifier):
+    """An unlabelled anonymous volume may still belong to a deleted guest."""
+    for ledger in worker.ROOT.glob('*/owned-volumes.json'):
+        if ledger.parent.name == identifier:
+            continue
+        if name in json.loads(ledger.read_text()).get('volumes', []):
+            raise ValueError('Docker volume is retained by another DCT')
+
+
+def owned_data_plan(identifier, info, native_snapshots=None):
+    check_data_dependencies(identifier, info, allow_snapshots=native_snapshots is not None)
     folder = worker.ROOT / identifier
     if folder.is_symlink() or folder.resolve().parent != worker.ROOT.resolve():
         raise ValueError('Invalid project data directory')
@@ -90,6 +101,9 @@ def owned_data_plan(identifier, info):
             continue  # External storage remains outside the deletion scope.
         if not owned_local_volume(volume, name, identifier):
             raise ValueError('Docker volume ownership changed')
+        if volume.get('Name', name) != name:
+            raise ValueError('Docker volume identity changed')
+        check_volume_claim(name, identifier)
         users = set(worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + name]).split())
         if users - container_ids:
             raise ValueError('A DCT volume is shared with another container')
@@ -102,7 +116,8 @@ def owned_data_plan(identifier, info):
             raise ValueError('Unmount foreign filesystems before deleting DCT data')
     settings = worker.storage_config(identifier)
     for volid in volume_ids(settings):
-        worker.pve_storage(identifier, 'free-check', volid=volid)
+        options = {'snapshots': native_snapshots.get(volid, [])} if native_snapshots is not None else {}
+        worker.pve_storage(identifier, 'free-check', volid=volid, **options)
     if owned:
         worker.write_json(ledger, {'volumes': owned})
     return owned
@@ -139,19 +154,22 @@ def retained_data(identifier, destroy=False):
         for path in worker.snapshot_root(identifier).glob('*/manifest.json'):
             folder, manifest = worker.snapshot_check(identifier, path.parent.name)
             snapshots.append((folder, manifest))
-        if snapshots and not destroy:
-            ledger = worker.ROOT / identifier / 'owned-volumes.json'
-            return {'id': identifier, 'snapshots': [manifest['name'] for _, manifest in snapshots],
-                'disks': volume_ids(worker.storage_config(identifier)),
-                'volumes': json.loads(ledger.read_text()).get('volumes', []) if ledger.exists() else [],
-                'dry_run': True, 'directory': str(worker.ROOT / identifier)}
+        native = {}
+        for _, manifest in snapshots:
+            disk = manifest.get('native_storage')
+            if disk:
+                native.setdefault(disk['volid'], []).append(disk['name'])
+        # Complete ownership checks before deleting even the first snapshot.
+        volumes = owned_data_plan(identifier, {}, native_snapshots=native)
+        plan = {'id': identifier, 'volumes': volumes, 'disks': volume_ids(worker.storage_config(identifier)),
+                'snapshots': [manifest['name'] for _, manifest in snapshots],
+                'directory': str(worker.ROOT / identifier), 'dry_run': not destroy}
+        if not destroy:
+            return plan
         for folder, manifest in snapshots:
             if manifest.get('native_storage'):
                 worker.pve_storage(identifier, 'snapshot-delete', **manifest['native_storage'])
             shutil.rmtree(folder)
-        volumes = owned_data_plan(identifier, {})
-        plan = {'id': identifier, 'volumes': volumes, 'disks': volume_ids(worker.storage_config(identifier)),
-                'directory': str(worker.ROOT / identifier), 'dry_run': not destroy}
         if destroy:
             remove_owned_data(identifier, volumes)
             shutil.rmtree(worker.snapshot_root(identifier), ignore_errors=True)

@@ -14,7 +14,9 @@ sub register_api {
         description => 'Read the prepared image update and its recovery snapshot.',
         parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
         returns => { type => 'object' },
-        code => sub { my ($p) = @_; return decode_json(PVE::API2::BetterDocker::output(['image-state', $p->{id}, $p->{node}])); },
+        code => sub { my ($p) = @_; my $state = decode_json(PVE::API2::BetterDocker::output(['image-state', $p->{id}, $p->{node}]));
+            delete $state->{token} unless PVE::API2::BetterDocker::capabilities($p->{id}, $p->{node})->{images};
+            return $state; },
     });
     PVE::API2::BetterDocker::register_docker_method({
         name => 'image_preview', path => '{id}/images/preview', method => 'POST', protected => 1, proxyto => 'node',

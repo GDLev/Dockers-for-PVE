@@ -64,7 +64,7 @@ class StorageTests(TestCase):
             ids.assert_not_called()
 
     def test_purge_never_accepts_an_existing_guest(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, 'METADATA', Path(tmp)), patch.object(worker, 'locked'):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, 'METADATA', Path(tmp)), patch.object(worker, 'locked'), patch.object(worker, 'operation'):
             (Path(tmp) / (ID + '.json')).write_text('{}')
             with self.assertRaisesRegex(ValueError, 'Remove the DCT'):
                 worker.purge_retained_storage(ID)

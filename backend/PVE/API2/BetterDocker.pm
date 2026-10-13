@@ -303,9 +303,12 @@ __PACKAGE__->register_method({
         local $ENV{BETTERDOCKER_TASK_USER} = $user;
         local $ENV{BETTERDOCKER_TRUSTED} = $guest ? ($caps->{trusted} ? '1' : '0') : '1';
         local $ENV{BETTERDOCKER_REQUIRE_SAFE} = $guest && !$caps->{trusted} ? '1' : '0';
+        local $ENV{BETTERDOCKER_REQUEST_CONTEXT} = $guest ? encode_json({id => $p->{id}, node => $p->{node},
+            vmid => 0 + $p->{vmid}, runtime_mode => $guest->{runtime_mode}}) : '';
         my $state = decode_json(output(['storage-volume-state', $p->{id}, $p->{node}, $p->{vmid}]));
         my @allowed = @{$state->{unused} // []};
         push @allowed, $state->{volid} if !$guest && $state->{volid};
+        push @allowed, map { $_->{volid} } values %{$state->{additional} // {}} if !$guest;
         die "Cannot delete an attached or unowned DCT disk\n" unless grep { $_ eq $p->{volume} } @allowed;
         return $rpc->fork_worker('betterdockerdiskdelete', worker_id($p->{vmid}), $user, sub {
             PVE::Tools::run_command([$helper, 'delete-storage-volume', $p->{vmid}, $p->{node}, $p->{volume}]);
@@ -433,13 +436,49 @@ sub hook_pools {
     };
 }
 
+# Every extension route must declare an authorization policy. Unknown routes fail closed.
+my %method_scopes = (
+    list => 'audit', management => 'audit', rrddata => 'audit', notes => 'audit',
+    capabilities => 'audit', pending => 'audit', snapshots => 'audit', snapshot_config => 'audit',
+    network_config => 'audit', project_limits => 'audit', image_state => 'audit',
+    termproxy => 'console', vncwebsocket => 'console', logs => 'console',
+    storage_limit => 'disk', set_disk => 'disk', image_preview => 'images', image_apply => 'images',
+    clone => 'clone', migrate => 'migrate', template => 'template', recover => 'configure',
+    destroy => 'remove', settings => 'settings', revert_settings => 'settings',
+    set_network => 'network', set_notes => 'options', snapshot_edit => 'snapshot',
+    service_action => 'power', shutdown => 'power', detail => 'configure',
+    create => 'configure', preview => 'configure', update => 'configure',
+    reset_settings => 'configure', set_project_limits => 'configure',
+    action => 'power', snapshot => 'snapshot',
+);
+
+sub method_scope {
+    my ($name, $param) = @_;
+    die "No authorization policy for DCT method $name\n" unless exists($method_scopes{$name});
+    return 'trusted' if $name eq 'list' && $param->{diagnostics};
+    return 'remove' if $name eq 'action' && ($param->{action} // '') eq 'delete';
+    return 'rollback' if $name eq 'snapshot' && ($param->{action} // '') eq 'restore';
+    return $method_scopes{$name};
+}
+
+sub request_context {
+    my ($identifier, $node) = @_;
+    return '' unless defined($identifier);
+    my ($info) = grep { $_->{id} eq $identifier && $_->{node} eq $node } @{summaries()};
+    die "DCT ownership changed\n" unless $info;
+    return JSON->new->canonical->encode({ id => $identifier, node => $node,
+        vmid => $info->{vmid}, runtime_mode => $info->{runtime_mode} });
+}
+
 sub register_docker_method {
     my ($method) = @_;
     my $code = $method->{code};
     my $name = $method->{name};
+    method_scope($name, {});
     $method->{permissions} = { user => 'all' };
     $method->{code} = sub {
         my ($param) = @_;
+        my $context = request_context($param->{id}, $param->{node});
         # Websocket authorization runs in unprivileged pveproxy, like native LXC.
         # The root terminal helper checks deployment safety again before exec.
         my $caps;
@@ -455,18 +494,7 @@ sub register_docker_method {
             ($name ne 'snapshot' || ($param->{action} // '') eq 'restore') && ha_managed($param->{id}, $param->{node})) {
             die "Remove the DCT from HA before changing its deployment, services or persistent state\n";
         }
-        my $scope = $name eq 'list' && $param->{diagnostics} ? 'trusted' :
-                    $name =~ /^(list|management|rrddata|notes|capabilities|pending|snapshots|snapshot_config|network_config|project_limits|image_state)$/ ? 'audit' :
-                    $name =~ /^(termproxy|vncwebsocket|logs)$/ ? 'console' :
-                    $name =~ /^(storage_limit|storage_config|set_disk)$/ ? 'disk' :
-                    $name eq 'image_apply' ? 'images' : $name eq 'clone' ? 'clone' : $name eq 'migrate' ? 'migrate' :
-                    $name eq 'template' ? 'template' : $name eq 'recover' ? 'configure' :
-                    ($name eq 'destroy' || ($name eq 'action' && ($param->{action} // '') eq 'delete')) ? 'remove' :
-                    ($name eq 'settings' || $name eq 'revert_settings') ? 'settings' :
-                    $name eq 'set_network' ? 'network' : $name eq 'set_notes' ? 'options' :
-                    ($name eq 'snapshot' && ($param->{action} // '') eq 'restore') ? 'rollback' :
-                    ($name eq 'snapshot' || $name eq 'snapshot_edit') ? 'snapshot' :
-                    $name eq 'action' || $name eq 'service_action' || $name eq 'shutdown' ? 'power' : 'configure';
+        my $scope = method_scope($name, $param);
         my $creating = $name eq 'create' || ($name eq 'preview' && !$param->{id});
         raise_perm_exc('DCT') unless $creating || ($name eq 'list' && !$param->{diagnostics}) || $caps->{$scope};
         if ($creating) {
@@ -478,6 +506,8 @@ sub register_docker_method {
         }
         my $rpc = PVE::RPCEnvironment::get();
         my $user = $rpc->get_user();
+        die "DCT ownership changed during authorization\n" if request_context($param->{id}, $param->{node}) ne $context;
+        local $ENV{BETTERDOCKER_REQUEST_CONTEXT} = $context;
         local $ENV{BETTERDOCKER_TASK_USER} = $user;
         local $ENV{BETTERDOCKER_TRUSTED} = $caps->{trusted} ? '1' : '0';
         local $ENV{BETTERDOCKER_REQUIRE_SAFE} = (!$caps->{trusted} && ($scope =~ /^(configure|images|settings|console|disk|clone|migrate|template|remove)$/ || $name eq 'set_network' || $scope eq 'rollback')) ? '1' : '0';

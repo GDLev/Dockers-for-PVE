@@ -424,4 +424,12 @@ def main():
     else: migrate(*args.values)
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    from dctlib.authorization import require_host_root
+    from dctlib.security_errors import public_error
+    try:
+        require_host_root(sys.argv[1:])
+        main()
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        print('BetterDocker: ' + public_error(error), file=sys.stderr)
+        raise SystemExit(1)
