@@ -74,7 +74,7 @@ check_uninstall() {
         '
 }
 check_repair_dependencies() {
-    for command in python3 curl arping dhclient nft iptables-translate; do
+    for command in python3 curl arping dhclient ndisc6 nft iptables-translate; do
         command -v "$command" >/dev/null || { echo "Missing $command; run start.sh install." >&2; return 1; }
     done
     python3 -c 'import yaml' >/dev/null 2>&1 || { echo 'Missing python3-yaml; run start.sh install.' >&2; return 1; }

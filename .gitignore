@@ -5,3 +5,6 @@ dist/
 .idea/
 /frontend/betterdocker.js
 .venv/
+
+# Private acceptance reports contain test-cluster inventory.
+.acceptance/

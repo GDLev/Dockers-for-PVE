@@ -54,6 +54,11 @@ def render(infos, bindings=None, rootless=False):
                         if bound == str(parsed):
                             protocol, port = binding[:2]
                             lines.append(match + ' ' + protocol + ' dport ' + str(port) + ' accept')
+                            # A node-local client may use its endpoint as the source.
+                            # Admit only replies belonging to this published service.
+                            lines.append(match + ' ct direction reply ct state established ' +
+                                         'ct original ' + family + ' daddr ' + str(parsed) +
+                                         ' ct original proto-dst ' + str(port) + ' meta l4proto ' + protocol + ' accept')
                     lines.append(match + ' drop')
         lines.append('}')
     lines.append('}')

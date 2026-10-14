@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: '22'
       - run: python3 -m pip install --require-hashes -r requirements-test.txt
-      - run: sudo env PATH=/opt/betterdocker-ci-python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /opt/betterdocker-ci-python/bin/python tests/check_release_ci.py
+      - run: sudo env PATH=/opt/betterdocker-ci-python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /opt/betterdocker-ci-python/bin/python /opt/betterdocker-ci-source/tests/check_release_ci.py
       - run: python3 tests/check_unit.py
       - run: bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
       - run: python3 scripts/build_frontend.py | node --check

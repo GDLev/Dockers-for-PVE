@@ -33,6 +33,8 @@ CASES = (
     'test_abandoned_operations.AbandonedOperations',
     'test_network_isolation.NetworkIsolation',
     'test_network_isolation.FirewallReload',
+    'test_security_failure_models.FailureModels',
+    'test_shutdown_cancel.ShutdownCancellationTests',
 )
 
 

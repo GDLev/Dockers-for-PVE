@@ -7,6 +7,8 @@ profile betterdocker-default flags=(attach_disconnected,mediate_deleted) {
   file,
   umount,
   signal (receive) peer=unconfined,
+  # Debian confines runc separately; it must be able to stop container init.
+  signal (receive) peer=runc,
   signal (send,receive) peer=betterdocker-default,
   deny mount,
   deny /sys/** wklx,

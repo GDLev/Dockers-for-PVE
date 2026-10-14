@@ -19,4 +19,15 @@ def render(guards):
                 lines.append(prefix + ('ether saddr != { ' + ', '.join(macs) + ' } ' if macs else '') + 'drop')
                 lines.append(prefix + 'meta nfproto ipv6 drop')
         lines.append('}')
+    # Each DCT is one private network trust domain. Published cross-DCT
+    # connections traverse bd-uplink and host DNAT, not a direct bridge hop.
+    all_bridges = {bridge for bridges in guards.values() for bridge in bridges}
+    lines.append('chain private_isolation { type filter hook forward priority -25; policy accept;')
+    for bridges in guards.values():
+        other = sorted(all_bridges - set(bridges))
+        if not bridges or not other: continue
+        source = '{ ' + ', '.join(json.dumps(b) for b in sorted(bridges)) + ' }'
+        destination = '{ ' + ', '.join(json.dumps(b) for b in other) + ' }'
+        lines.append('iifname ' + source + ' oifname ' + destination + ' drop')
+    lines.append('}')
     return lines

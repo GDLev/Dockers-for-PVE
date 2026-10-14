@@ -21,3 +21,14 @@ class InstallerTests(unittest.TestCase):
                     result=subprocess.run(['perl','-e',code.replace('/etc/pve/ha/resources.cfg',str(config))],capture_output=True,text=True)
                     self.assertEqual(bool(result.returncode),blocked,result.stderr)
                     if blocked:self.assertIn('Remove DCT HA resources',result.stderr)
+
+    def test_repair_rejects_missing_ipv6_duplicate_address_probe(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / 'start.sh').read_text()
+        body = source.split('check_repair_dependencies() {', 1)[1].split('\n}', 1)[0]
+        mock = 'command() { [[ "$2" != ndisc6 ]]; }; python3() { return 0; };'
+        result = subprocess.run(['bash', '-c', mock + '\ncheck() {' + body + '\n}; check'], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing ndisc6', result.stderr)
+        depends = (root / 'packaging/build-deb.sh').read_text().split('Depends: ', 1)[1].split('\n', 1)[0]
+        self.assertIn('ndisc6', [part.strip() for part in depends.split(',')])

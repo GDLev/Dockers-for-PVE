@@ -469,6 +469,9 @@ def reconcile_rootless(infos, config, bridges, bindings):
              # A published cross-DCT connection must return through host conntrack.
              # Otherwise the inner bridges return directly with the untranslated IP.
              'iifname "bd-rootless" oifname "bd-rootless" ct status dnat masquerade',
+             # Node-local clients need a namespace-reachable return address.
+             # External clients retain their original identity for guest policy.
+             'oifname "bd-rootless" ct status dnat fib saddr type local masquerade',
              'ip saddr { 10.240.0.0/16, 169.254.240.2 } oifname != "bd-rootless" masquerade', '}'])
     for hook in ('prerouting', 'output'):
         lines.append(f'chain published_{hook} {{ type nat hook {hook} priority -102; policy accept;')

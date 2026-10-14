@@ -84,3 +84,20 @@ Required release checks run with Linux root privileges in disposable CI workers.
 GitHub jobs have read-only repository permissions. External actions use commit hashes; GitLab images use registry digests. Compose uses a version and SHA-256 pin, and Python packages use hashes. CI workers still obtain distribution packages from their authenticated package repositories. Protect release tags and signing access; a successful untrusted pull-request job is not authorization to publish.
 
 Review upstream security notices regularly. Update action commits, image digests, Compose and Python hashes in a dedicated PR. Obtain pins from the upstream repository, registry or release, review the change, rerun required checks and the supported PVE fixture matrix on that exact commit, then approve the new pins. Do not use automatic mutable-tag refreshes for releases.
+
+## Security acceptance
+
+`tests/live_security_acceptance.py` records the source revision, file hashes, node versions, runtime modes, baseline configuration and every temporary DCT allocation before creation. It runs required fixture checks and read-only kernel/native integration checks, then sends ordinary bounded HTTP requests between its own DCTs. It never switches global firewall backends, disables profiles, stops host services, changes quorum or reboots a node.
+
+Prepare the source manifest and copy the checkout and manifest to the test cluster through trusted SSH. Run on a disposable PVE cluster with local `busybox:1.37` images, rootful and rootless nodes and four unused IPv4 addresses. The default addresses are 192.0.2.245-248 on vmbr0; change them for your environment. IPv6 uses a private test prefix on the owned endpoints.
+
+```bash
+python3 tests/build_acceptance_manifest.py > source-manifest.json
+python3 tests/live_security_acceptance.py --revision <tested-commit> \
+    --source-manifest /root/source-manifest.json \
+    --report /root/betterdocker-acceptance/report.json
+```
+
+The report is private and includes exact fixture IDs, node, name and a run marker. Cleanup refuses other identities, even when names share a prefix. After an interrupted run, inspect the journal and use the same command with `--cleanup`. Never remove test resources by a name prefix alone.
+
+A disabled cluster firewall leaves native guest ACCEPT/DROP traffic tests unverified. Missing VLAN/SDN environments and untested backend/mode combinations stay unverified too. Both backend policy fixtures are not evidence of both backends enforcing real traffic. Availability failures use isolated models; the original host services remain running. An independent manual review and clean signed installation acceptance are separate release requirements.

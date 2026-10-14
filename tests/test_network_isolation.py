@@ -187,6 +187,38 @@ class NetworkIsolation(unittest.TestCase):
         self.assertNotIn('dport 8006',rules)
         self.assertNotIn('ip daddr 198.18.0.1 drop',rules)
 
+    def test_rootless_private_bridges_are_isolated_across_dcts_without_guest_firewall(self):
+        guards = {ID: {bridge: {'ips': ['10.240.1.2'], 'macs': [MAC]} for bridge in ('br-first', 'br-second')}, 'b' * 32: {'br-other': {'ips': ['10.240.2.2'], 'macs': [MAC]}}}
+        rules = '\n'.join(identity.render(guards))
+        self.assertIn('hook forward priority -25', rules)
+        self.assertIn('iifname { "br-first", "br-second" } oifname { "br-other" } drop', rules)
+        self.assertIn('iifname { "br-other" } oifname { "br-first", "br-second" } drop', rules)
+        self.assertNotIn('iifname { "br-first" } oifname { "br-second" } drop', rules)
+        self.assertNotIn('bd-uplink', rules)
+        self.assertLess(rules.index('ip saddr !='), rules.index('chain private_isolation'))
+
+    def test_rootless_local_nat_does_not_mask_external_client_addresses(self):
+        @contextmanager
+        def namespace():
+            yield None, None, [], ()
+        with patch('host.namespace', namespace), patch.object(f, 'render', return_value='fixture'), patch.object(reload, 'transaction') as transaction, patch.object(n, 'release_ready'):
+            f.reconcile_rootless([], config(), {}, {})
+        plans = transaction.call_args.args[0]
+        rules = next(plan[1] for plan in plans if plan[0] == 'betterdocker_rootless')
+        self.assertIn('oifname "bd-rootless" ct status dnat fib saddr type local masquerade', rules)
+        self.assertNotIn('oifname "bd-rootless" ct status dnat masquerade\n', rules.split('chain outbound', 1)[1].split('iifname "bd-rootless" oifname "bd-rootless"', 1)[0])
+
+    def test_rootless_local_client_replies_are_scoped_to_published_services(self):
+        guest = info(); guest['cidr6'] = 'fd00::20/64'
+        bindings = {ID: [('tcp', 8080, '10.240.1.2', 80), ('tcp', 8443, '10.240.1.2', 443, 'fd00::20')]}
+        rules = controls.render([guest], bindings=bindings, rootless=True)
+        for family, address, port in (('ip', '198.18.0.20', 8080), ('ip6', 'fd00::20', 8443)):
+            reply = family + ' daddr ' + address + ' ct direction reply ct state established ct original ' + family + ' daddr ' + address + ' ct original proto-dst ' + str(port) + ' meta l4proto tcp accept'
+            self.assertIn(reply, rules)
+            self.assertLess(rules.index(reply), rules.index(family + ' daddr ' + address + ' drop', rules.index('chain host_endpoint_guard')))
+        self.assertNotIn('ct state established,related accept', rules)
+        self.assertNotIn('proto-dst 8006', rules)
+
     def test_new_address_remains_closed_until_its_policy_is_ready(self):
         endpoint=info()
         with patch.object(w.node_runtime,'load',return_value=SimpleNamespace(rootless=True)),patch.object(w,'capture',return_value='[]'),patch.object(n,'apply_quarantine') as apply:
