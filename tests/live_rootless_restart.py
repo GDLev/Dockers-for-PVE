@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify protection and workload recovery during runtime restart and node reboot."""
+import live_environment as env
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -13,7 +14,7 @@ from live_firewall import remote
 
 state = json.loads(Path('/root/dct-rootless-firewall.json').read_text())
 node = state['node']
-assert node == 'pve3' and json.loads(remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'identity'], check=True).stdout)['mode'] == 'rootless'
+assert node == env.node('rootless') and json.loads(remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'identity'], check=True).stdout)['mode'] == 'rootless'
 assert remote(node, ['systemctl', 'is-active', '--quiet', 'docker.service', 'docker.socket']).returncode != 0
 info = next(i for i in worker.summaries() if i['id'] == state['guests'][0])
 base = '/nodes/' + node + '/docker/' + info['id']

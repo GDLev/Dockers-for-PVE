@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 
 CASES = (
-    'test_security_stage23.HardenedPolicy',
-    'test_security_stage23.ControlFiles.test_environment_read_group_is_only_the_selected_runtime',
+    'test_security_policy.HardenedPolicy',
+    'test_security_policy.ControlFiles.test_environment_read_group_is_only_the_selected_runtime',
     'test_private_images.PrivateImages',
     'test_security_contracts.SecurityContracts',
     'test_apparmor_start.AppArmorStart',
@@ -60,7 +60,7 @@ def _run_cases(verbosity, retention, space):
     result = unittest.TestResult()
     runner = unittest.TextTestRunner(verbosity=verbosity)
     for case in CASES:
-        # Older mutation fixtures mock the Engine for their original scope.
+        # Mutation fixtures isolate Engine behavior from retention checks.
         # Retention has its own image-accounting contracts below.
         with contextlib.ExitStack() as fixtures:
             if not case.startswith('test_network_isolation.'):

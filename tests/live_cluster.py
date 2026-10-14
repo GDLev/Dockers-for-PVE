@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Disposable migration and endpoint checks on the three-node test PVE cluster.
-
-Run on pve1 after deployment. The manifest records only test guests.
-Use --cleanup to remove them after a failed or interrupted run.
-"""
+f"Disposable migration and endpoint checks on the three-node test PVE cluster.\n\nRun on {env.node('primary')} after deployment. The manifest records only test guests.\nUse --cleanup to remove them after a failed or interrupted run.\n"
 import argparse
 import ipaddress
 import json
@@ -68,7 +65,7 @@ def cleanup():
     print('PASS disposable fixtures removed', flush=True)
 
 
-def create(saved, node, mode='static', cidr='192.0.2.229/20'):
+def create(saved, node, mode='static', cidr=f'{env.address(229)}/{env.prefix()}'):
     name = saved['prefix'] + '-' + str(len(saved['guests']))
     deployment = {'vmid': int(api('get', '/cluster/nextid')), 'name': name, 'mode': 'compose', 'bridge': 'vmbr0',
         'ipv4mode': mode, 'compose': 'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, "mkdir -p /data; test -e /data/value || echo initial > /data/value; exec httpd -f -p 8080 -h /data"]\n    ports: ["8080:8080"]\n    volumes: ["./data:/data"]\n'}
@@ -82,11 +79,11 @@ def create(saved, node, mode='static', cidr='192.0.2.229/20'):
 
 
 def run():
-    assert w.current_node() == 'pve1'
+    assert w.current_node() == env.node('primary')
     assert not MANIFEST.exists(), 'Clean up the earlier fixture first'
     saved = {'prefix': 'stage67-' + uuid.uuid4().hex[:8], 'guests': []}
     MANIFEST.write_text(json.dumps(saved))
-    identifier = create(saved, 'pve1')
+    identifier = create(saved, env.node('primary'))
     power(identifier, 'force-stop')
     task(api('set', base(get(identifier)) + '/storage-limit', size_mib=512, storage='local-lvm', digest=current(identifier)['digest']))
     power(identifier, 'start')
@@ -99,8 +96,8 @@ def run():
     time.sleep(1)
     task(api('create', base(get(identifier)) + '/snapshot', action='create', snapname='after'))
     power(identifier, 'start')
-    task(api('create', base(get(identifier)) + '/migrate', target='pve2', restart=1, timeout=10, storage='local-lvm', digest=current(identifier)['digest']))
-    assert get(identifier)['node'] == 'pve2'
+    task(api('create', base(get(identifier)) + '/migrate', target=env.node('secondary'), restart=1, timeout=10, storage='local-lvm', digest=current(identifier)['digest']))
+    assert get(identifier)['node'] == env.node('secondary')
     wait_for(lambda: fetch(get(identifier)['address']).stdout.strip() == 'after')
     assert command(identifier, 'cat', '/preserved') == 'layer-after'
     assert {row['name'] for row in api('get', base(get(identifier)) + '/snapshots')} >= {'before', 'after'}
@@ -111,33 +108,33 @@ def run():
     assert command(identifier, 'cat', '/data/value') == 'before'
     print('PASS running migration, native snapshot history and writable-layer rollback', flush=True)
     power(identifier, 'force-stop')
-    network(identifier, net='net1', bridge='vmbr0', cidr='192.0.2.230/20', ports='app:8080/tcp')
+    network(identifier, net='net1', bridge='vmbr0', cidr=f'{env.address(230)}/{env.prefix()}', ports='app:8080/tcp')
     power(identifier, 'start')
-    wait_for(lambda: fetch('192.0.2.230').stdout.strip() == 'before')
+    wait_for(lambda: fetch(env.address(230)).stdout.strip() == 'before')
     assert command(identifier, 'cat', '/preserved') == 'layer-before'
     assert fetch(get(identifier)['address']).returncode != 0
     network(identifier, net='net1', link_down=1)
     assert current(identifier)['pending_network']['interfaces']['net1']['link_down'] == 1
-    assert fetch('192.0.2.230').returncode == 0
+    assert fetch(env.address(230)).returncode == 0
     power(identifier, 'reboot')
-    assert fetch('192.0.2.230').returncode != 0
+    assert fetch(env.address(230)).returncode != 0
     network(identifier, net='net1', link_down=0)
     power(identifier, 'reboot')
-    wait_for(lambda: fetch('192.0.2.230').returncode == 0)
+    wait_for(lambda: fetch(env.address(230)).returncode == 0)
     assert command(identifier, 'cat', '/preserved') == 'layer-before'
     print('PASS independent port assignment, pending Disconnect and preserved filesystem', flush=True)
     command(identifier, 'sh', '-c', 'dd if=/dev/zero of=/data/big bs=1M count=8 >/dev/null 2>&1')
     network(identifier, net='net1', rate=1)
     power(identifier, 'reboot')
     started = time.monotonic()
-    result = fetch('192.0.2.230', path='big', timeout=25)
+    result = fetch(env.address(230), path='big', timeout=25)
     elapsed = time.monotonic() - started
     assert result.returncode == 0 and len(result.stdout) == 8 * 1048576 and elapsed >= 3, (result.returncode, elapsed)
     print('PASS actual byte-rate limit', flush=True)
-    dhcp = create(saved, 'pve1', mode='dhcp')
+    dhcp = create(saved, env.node('primary'), mode='dhcp')
     command(dhcp, 'sh', '-c', 'echo migrated >/preserved')
-    task(api('create', base(get(dhcp)) + '/migrate', target='pve2', restart=1, timeout=10, digest=current(dhcp)['digest']))
-    assert get(dhcp)['node'] == 'pve2'
+    task(api('create', base(get(dhcp)) + '/migrate', target=env.node('secondary'), restart=1, timeout=10, digest=current(dhcp)['digest']))
+    assert get(dhcp)['node'] == env.node('secondary')
     wait_for(lambda: fetch(get(dhcp)['address']).stdout.strip() == 'initial')
     assert command(dhcp, 'cat', '/preserved') == 'migrated'
     print('PASS DHCP migration and preserved writable layer', flush=True)

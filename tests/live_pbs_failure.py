@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify an unavailable PBS target cannot change the source DCT."""
+import live_environment as env
 import json
 from pathlib import Path
 import uuid
@@ -13,16 +14,7 @@ def main():
     identifier = None
     # Storage creation probes PBS, so write a deliberately offline fixture under
     # the native storage lock. No real PBS configuration or credential is changed.
-    program = '''use PVE::Storage; use PVE::Tools; use Storable qw(dclone);
-PVE::Storage::lock_storage_config(sub {
- my $cfg=PVE::Storage::config(); my $id=$ARGV[0]; die "fixture exists" if $cfg->{ids}->{$id};
- my $copy=dclone($cfg->{ids}->{pbs1});
- $copy->{server}="127.0.0.1"; $copy->{port}=1; $copy->{username}="fixture\\@pbs";
- $copy->{nodes}={$ARGV[1]=>1}; delete $copy->{disable};
- $cfg->{ids}->{$id}=$copy;
- PVE::Tools::file_set_contents("/etc/pve/priv/storage/$id.pw", "invalid-test-credential\\n", 0600, 1);
- PVE::Storage::write_config($cfg);
-});'''
+    program = f'use PVE::Storage; use PVE::Tools; use Storable qw(dclone);\nPVE::Storage::lock_storage_config(sub {{\n my $cfg=PVE::Storage::config(); my $id=$ARGV[0]; die "fixture exists" if $cfg->{{ids}}->{{$id}};\n my $copy=dclone($cfg->{{ids}}->{{{env.backup_storage()}}});\n $copy->{{server}}="127.0.0.1"; $copy->{{port}}=1; $copy->{{username}}="fixture\\@pbs";\n $copy->{{nodes}}={{$ARGV[1]=>1}}; delete $copy->{{disable}};\n $cfg->{{ids}}->{{$id}}=$copy;\n PVE::Tools::file_set_contents("/etc/pve/priv/storage/$id.pw", "invalid-test-credential\\n", 0600, 1);\n PVE::Storage::write_config($cfg);\n}});'
     call('perl', '-e', program, storage, node)
     try:
         deployment = {'name': 'pbs-failure-' + suffix, 'mode': 'compose', 'bridge': 'vmbr0', 'ipv4mode': 'none',

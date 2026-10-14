@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Verify replicated DCT ownership changes and native HA relocation."""
+import live_environment as env
 import json
 from pathlib import Path
 import sys
 import uuid
 sys.path[:0] = ['/usr/local/lib/betterdocker', '/tmp/bd-stage45-source/tests']
-from live_stage67 import *
+from live_cluster import *
 
 STATE = Path('/root/bd-migration-cluster.json')
 
@@ -34,9 +35,9 @@ def cleanup():
 def run():
     assert not STATE.exists()
     saved = {'name': 'migration-cluster-' + uuid.uuid4().hex[:8]}; STATE.write_text(json.dumps(saved))
-    deployment = {'name': saved['name'], 'mode': 'compose', 'bridge': 'vmbr0', 'cidr': '192.0.2.236/20',
+    deployment = {'name': saved['name'], 'mode': 'compose', 'bridge': 'vmbr0', 'cidr': f'{env.address(236)}/{env.prefix()}',
         'compose': 'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, "mkdir -p /data; test -e /data/value || echo cluster-ok >/data/value; exec httpd -f -p 8080 -h /data"]\n    ports: ["8080:8080"]\n    volumes: ["./data:/data"]\n'}
-    task(api('create', '/nodes/pve1/docker', deployment=json.dumps(deployment), start=1))
+    task(api('create', f"/nodes/{env.node('primary')}/docker", deployment=json.dumps(deployment), start=1))
     identifier = next(row['id'] for row in w.summaries() if row['name'] == saved['name'])
     saved['id'] = identifier; STATE.write_text(json.dumps(saved))
     power(identifier, 'force-stop')
@@ -44,25 +45,25 @@ def run():
     power(identifier, 'start')
     command(identifier, 'sh', '-c', 'echo retained >/preserved')
     job = str(get(identifier)['vmid']) + '-0'
-    api('create', '/cluster/replication', id=job, target='pve2', type='local', schedule='00:59')
+    api('create', '/cluster/replication', id=job, target=env.node('secondary'), type='local', schedule='00:59')
     saved['job'] = job; STATE.write_text(json.dumps(saved))
-    remote('pve1', ['pvesr', 'run', '--id', job], check=True, timeout=300)
-    wait_for(lambda: 'pve2' in current(identifier).get('replication', {}).get('targets', {}))
-    task(api('create', base(get(identifier)) + '/migrate', target='pve2', restart=1, timeout=10, digest=current(identifier)['digest']))
-    assert get(identifier)['node'] == 'pve2' and command(identifier, 'cat', '/preserved') == 'retained'
+    remote(env.node('primary'), ['pvesr', 'run', '--id', job], check=True, timeout=300)
+    wait_for(lambda: env.node('secondary') in current(identifier).get('replication', {}).get('targets', {}))
+    task(api('create', base(get(identifier)) + '/migrate', target=env.node('secondary'), restart=1, timeout=10, digest=current(identifier)['digest']))
+    assert get(identifier)['node'] == env.node('secondary') and command(identifier, 'cat', '/preserved') == 'retained'
     jobs = api('get', '/cluster/replication')
-    assert next(row for row in jobs if row['id'] == job)['target'] == 'pve1'
+    assert next(row for row in jobs if row['id'] == job)['target'] == env.node('primary')
     print('PASS migration switches replication target with guest ownership', flush=True)
-    remote('pve2', ['pvesr', 'run', '--id', job], check=True, timeout=300)
-    wait_for(lambda: 'pve1' in current(identifier).get('replication', {}).get('targets', {}))
+    remote(env.node('secondary'), ['pvesr', 'run', '--id', job], check=True, timeout=300)
+    wait_for(lambda: env.node('primary') in current(identifier).get('replication', {}).get('targets', {}))
     sid = 'docker:' + str(get(identifier)['vmid'])
     api('create', '/cluster/ha/resources', sid=sid, state='started')
     saved['ha'] = sid; STATE.write_text(json.dumps(saved))
     wait_for(lambda: current(identifier)['status'] == 'running', timeout=180)
-    task(api('create', base(get(identifier)) + '/migrate', target='pve1', digest=current(identifier)['digest']))
-    wait_for(lambda: get(identifier)['node'] == 'pve1' and current(identifier)['status'] == 'running', timeout=300)
+    task(api('create', base(get(identifier)) + '/migrate', target=env.node('primary'), digest=current(identifier)['digest']))
+    wait_for(lambda: get(identifier)['node'] == env.node('primary') and current(identifier)['status'] == 'running', timeout=300)
     assert command(identifier, 'cat', '/preserved') == 'retained'
-    assert fetch('192.0.2.236').stdout.strip() == 'cluster-ok'
+    assert fetch(env.address(236)).stdout.strip() == 'cluster-ok'
     print('PASS native HA relocation preserves data and service', flush=True)
     cleanup()
 

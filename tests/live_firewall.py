@@ -4,6 +4,7 @@
 Retains a manifest after failures so the same fixtures can be checked again or
 removed with --cleanup. Changes only recorded guests and firewall options.
 """
+import live_environment as env
 import argparse
 import json
 from pathlib import Path
@@ -30,12 +31,12 @@ def main():
     parser.add_argument('--manifest', default='/root/dct-firewall-acceptance.json')
     parser.add_argument('--cleanup', action='store_true')
     parser.add_argument('--from-reload', action='store_true')
-    parser.add_argument('--backup-storage', default='pbs1')
+    parser.add_argument('--backup-storage', default=env.backup_storage())
     parser.add_argument('--phase', choices=['basic', 'extended', 'lifecycle'], default='basic')
     args = parser.parse_args()
     path = Path(args.manifest)
     state = json.loads(path.read_text()) if path.exists() else {'prefix': 'fwtest-' + uuid.uuid4().hex[:8], 'guests': [],
-        'cluster': api('get', '/cluster/firewall/options'), 'node': 'pve3'}
+        'cluster': api('get', '/cluster/firewall/options'), 'node': env.node('rootless')}
     def save():
         path.write_text(json.dumps(state)); path.chmod(0o600)
     def base(info):
@@ -90,7 +91,7 @@ def main():
         if missing: values['delete'] = ','.join(missing)
         api('set', '/cluster/firewall/options', **values)
         if state.get('archive'):
-            api('delete', '/nodes/' + worker.current_node() + '/storage/' + state.get('backup_storage', 'pbs1') + '/content/' + state['archive'])
+            api('delete', '/nodes/' + worker.current_node() + '/storage/' + state.get('backup_storage', env.backup_storage()) + '/content/' + state['archive'])
         path.unlink(); print('PASS cleanup', flush=True); return
     if args.phase != 'basic':
         guests = [next(i for i in worker.summaries() if i['id'] == identifier) for identifier in state['guests'][:2]]
@@ -113,22 +114,22 @@ def main():
             if not args.from_reload:
                 rules(a, [allow]); rules(b, [allow])
                 api('set', fw + '/options', policy_out='DROP')
-                assert exec_guest(a, ['ping', '-c', '1', '-W', '2', '192.0.2.40']).returncode != 0
+                assert exec_guest(a, ['ping', '-c', '1', '-W', '2', env.address(40)]).returncode != 0
                 assert exec_guest(a, ['wget', '-q', '-T', '3', '-O', '-', 'http://internal/']).returncode == 0
                 api('create', fw + '/rules', type='out', action='ACCEPT', macro='Ping', enable=1)
-                assert exec_guest(a, ['ping', '-c', '1', '-W', '2', '192.0.2.40']).returncode == 0
+                assert exec_guest(a, ['ping', '-c', '1', '-W', '2', env.address(40)]).returncode == 0
                 print('PASS host access, native Ping macro and internal service traffic', flush=True)
                 api('set', fw + '/options', policy_out='ACCEPT')
                 for alias in api('get', fw + '/aliases'):
                     if alias['name'] == 'testclient': api('delete', fw + '/aliases/testclient')
-                api('create', fw + '/aliases', name='testclient', cidr='192.0.2.28')
+                api('create', fw + '/aliases', name='testclient', cidr=env.address(28))
                 rules(a, [dict(allow, source='testclient')])
                 probe(a, True); probe(a, False, b)
                 rules(a, [])
                 sets = api('get', fw + '/ipset')
                 if not any(i['name'] == 'testclients' for i in sets):
                     api('create', fw + '/ipset', name='testclients')
-                    api('create', fw + '/ipset/testclients', cidr='192.0.2.28')
+                    api('create', fw + '/ipset/testclients', cidr=env.address(28))
                 rules(a, [dict(allow, source='+testclients')])
                 probe(a, True); probe(a, False, b)
                 print('PASS native aliases and IP sets enforce client identity through DNAT', flush=True)
@@ -203,7 +204,7 @@ def main():
             power(a, 'shutdown')
             name = state['prefix'] + '-clone'
             if not any(i['name'] == name for i in worker.summaries()):
-                task(api('create', base(a) + '/clone', deployment={'name': name, 'bridge': 'vmbr0', 'cidr': '192.0.2.220/20'}))
+                task(api('create', base(a) + '/clone', deployment={'name': name, 'bridge': 'vmbr0', 'cidr': f'{env.address(220)}/{env.prefix()}'}))
             clone = next(i for i in worker.summaries() if i['name'] == name)
             assert api('get', base(clone) + '/firewall/options')['enable'] == 1
             assert api('get', base(clone) + '/network')['firewall'] == 1
@@ -216,12 +217,12 @@ def main():
             archive = max(backups, key=lambda i: i.get('ctime', 0))['volid']
             state['archive'] = archive; save()
             name = state['prefix'] + '-restore'
-            task(api('create', '/nodes/' + a['node'] + '/docker', archive=archive, storage='local-lvm', deployment={'name': name, 'bridge': 'vmbr0', 'cidr': '192.0.2.219/20'}))
+            task(api('create', '/nodes/' + a['node'] + '/docker', archive=archive, storage='local-lvm', deployment={'name': name, 'bridge': 'vmbr0', 'cidr': f'{env.address(219)}/{env.prefix()}'}))
             restored = next(i for i in worker.summaries() if i['name'] == name)
             power(restored, 'start'); probe(restored, True)
             rules(restored, []); probe(restored, False); rules(restored, [allow]); probe(restored, True)
             print('PASS PBS restore restores firewall and actual traffic policy', flush=True)
-            task(api('create', base(a) + '/migrate', target='pve2', storage='local-lvm'))
+            task(api('create', base(a) + '/migrate', target=env.node('secondary'), storage='local-lvm'))
             power(a, 'start'); probe(a, True)
             rules(a, []); probe(a, False); rules(a, [allow]); probe(a, True)
             power(a, 'shutdown')
@@ -230,7 +231,7 @@ def main():
             print('PASS cross-node migration preserves and enforces firewall', flush=True)
         return
     source = 'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, "mkdir -p /www; echo firewall-ok > /www/index.html; exec httpd -f -p 80 -h /www"]\n    ports: ["18080:80"]\n  internal:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, "mkdir -p /www; echo firewall-ok > /www/index.html; exec httpd -f -p 80 -h /www"]\n'
-    for index, address in enumerate(('192.0.2.222', '192.0.2.221')):
+    for index, address in enumerate((env.address(222), env.address(221))):
         name = state['prefix'] + '-' + str(index)
         info = next((i for i in worker.summaries() if i['name'] == name), None)
         if not info:

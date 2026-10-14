@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Swap application paths after validation while real copy/extraction uses pinned FDs."""
+import live_environment as env
 import os
 from pathlib import Path
 import subprocess
@@ -48,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix='bd-pinned-race-',dir='/var/lib/betterdo
  assert (folder/'manifest.json').read_text()=='{}'
  assert (outside/'marker').read_text()=='unrelated'
 '''
-    for node in ('pve1', 'pve3'):
+    for node in (env.node('primary'), env.node('rootless')):
         result = remote(node, ['python3', '-c', code])
         assert result.returncode == 0, result.stderr
         print('PASS ' + node + ' path replacements cannot redirect copying or archive extraction', flush=True)

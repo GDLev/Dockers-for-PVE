@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Policy conversion, real kernel flags and adversarial recovery on disposable DCTs."""
+import live_environment as env
 import json
 from pathlib import Path
 import shlex
@@ -27,7 +28,7 @@ def check_kernel(info):
     mask = int(fields['CapBnd'].strip(),16)
     assert mask & ~sum(1<<value for value in CAP_BITS.values()) == 0
     assert 'ALL' in row['HostConfig']['CapDrop']
-    if info['node'] in ('pve1', 'pve2'): assert row['AppArmorProfile'] == 'betterdocker-default'
+    if info['node'] in (env.node('primary'), env.node('secondary')): assert row['AppArmorProfile'] == 'betterdocker-default'
     # Inspect the mapped UID in host proc, not only the in-container identity.
     code = '''import sys,json,socket,struct
 sys.path.insert(0,'/usr/local/lib/betterdocker')
@@ -76,7 +77,7 @@ def run():
     def save(): STATE.write_text(json.dumps(saved))
     fixtures=[]
     try:
-        for node in (('pve3',) if '--rootless-only' in sys.argv else ('pve1','pve3')):
+        for node in ((env.node('rootless'),) if '--rootless-only' in sys.argv else (env.node('primary'),env.node('rootless'))):
             name=saved['prefix']+'-'+node
             existing=next((r for r in w.summaries() if r['name']==name),None)
             if not existing:
@@ -153,7 +154,7 @@ def cleanup():
     if not STATE.exists(): return
     saved=json.loads(STATE.read_text())
     for backup in saved.get('backups', []):
-        api('delete', '/nodes/' + backup['node'] + '/storage/pbs1/content/' + backup['archive'])
+        api('delete', '/nodes/' + backup['node'] + f'/storage/{env.backup_storage()}/content/' + backup['archive'])
     saved['backups'] = []; STATE.write_text(json.dumps(saved))
     recorded = {r['id'] for r in w.summaries() if r['name'].startswith(saved['prefix'])}
     for identifier in reversed(list(dict.fromkeys(saved['guests'] + sorted(recorded)))):

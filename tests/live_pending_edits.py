@@ -4,6 +4,7 @@
 Uses native PVE HTTP routes and the installed worker. --cleanup removes its own
 DCT, ACL, token and user. It does not touch existing guests or PBS configuration.
 """
+import live_environment as env
 import json
 from pathlib import Path
 import secrets
@@ -75,7 +76,7 @@ def reachable(ip):
 def run():
     assert not STATE.exists(), 'Clean up the previous fixture first'
     name = 'ux-pending-edits-check'
-    deployment = {'name':name, 'mode':'compose', 'bridge':'vmbr0', 'ipv4mode':'static', 'cidr':'192.0.2.216/20',
+    deployment = {'name':name, 'mode':'compose', 'bridge':'vmbr0', 'ipv4mode':'static', 'cidr':f'{env.address(216)}/{env.prefix()}',
         'compose': 'services:\n  app:\n    image: busybox:1.37\n    command: sh -c "mkdir -p /www; echo pending-edits > /www/index.html; httpd -p 8080 -h /www; trap \'exit 0\' TERM; while sleep 1; do :; done"\n    ports:\n      - "18080:8080"\n  sidecar:\n    image: busybox:1.37\n    command: sh -c "trap \'exit 0\' TERM; while sleep 1; do :; done"\n'}
     live.task(live.api('create', '/nodes/' + NODE + '/docker', deployment=json.dumps(deployment), start=1))
     row = next(row for row in live.api('get', '/cluster/resources', type='vm') if row.get('name') == name)
@@ -84,14 +85,14 @@ def run():
     state = {'id':identifier, 'base':base, 'vmid':row['vmid'], 'name':name}
     STATE.write_text(json.dumps(state))
     directory = worker.ROOT / identifier
-    reachable('192.0.2.216')
+    reachable(env.address(216))
     before = configuration(base)
     containers = {row['id'] for row in live.api('get', base + '/management')['containers']}
     live.task(live.api('set', base + '/network', mtu=1400, digest=before['digest']))
     queued = configuration(base)
     assert queued['mtu'] == 0 and queued['pending'] == {'mtu':1400}, queued
     assert {row['id'] for row in live.api('get', base + '/management')['containers']} == containers
-    reachable('192.0.2.216')
+    reachable(env.address(216))
     http('PUT', base + '/network', {'mtu':1401, 'digest':before['digest']}, live._ROOT_HEADERS, expected=500)
     assert configuration(base)['pending'] == {'mtu':1400}
     live.task(live.api('set', base + '/network', revert=1, digest=queued['digest']))
@@ -114,10 +115,10 @@ def run():
     live.task(http('PUT', base + '/network', {'revert':1, 'digest':configuration(base)['digest']}, headers))
     print('PASS guest-scoped network edit/Revert and CPU rejection', flush=True)
 
-    live.task(live.api('set', base + '/network', cidr='192.0.2.217/20', mtu=1400, digest=configuration(base)['digest']))
+    live.task(live.api('set', base + '/network', cidr=f'{env.address(217)}/{env.prefix()}', mtu=1400, digest=configuration(base)['digest']))
     live.task(live.api('create', base + '/service-action', service='sidecar', action='reboot'))
-    assert configuration(base)['pending'] == {'cidr':'192.0.2.217/20', 'mtu':1400}
-    reachable('192.0.2.216')
+    assert configuration(base)['pending'] == {'cidr':f'{env.address(217)}/{env.prefix()}', 'mtu':1400}
+    reachable(env.address(216))
     print('PASS service-only reboot leaves pending project network untouched', flush=True)
 
     live.task(live.api('create', base + '/action', action='force-stop'))
@@ -130,20 +131,20 @@ def run():
         else:
             raise AssertionError('Expected injected failure')
     assert (directory / 'request.json').read_text() == original
-    assert worker.detail(identifier, NODE)['address'] == '192.0.2.216'
-    assert worker.load_pending_network(directory) == {'cidr':'192.0.2.217/20', 'mtu':1400}
+    assert worker.detail(identifier, NODE)['address'] == env.address(216)
+    assert worker.load_pending_network(directory) == {'cidr':f'{env.address(217)}/{env.prefix()}', 'mtu':1400}
     assert not (directory / 'network-transaction.json').exists()
     assert all(row['state'] not in ('running','paused','restarting') for row in worker.container_records(identifier))
     live.task(live.api('create', base + '/action', action='start'))
-    reachable('192.0.2.217')
-    assert configuration(base)['pending'] == {} and configuration(base)['cidr'] == '192.0.2.217/20'
+    reachable(env.address(217))
+    assert configuration(base)['pending'] == {} and configuration(base)['cidr'] == f'{env.address(217)}/{env.prefix()}'
     print('PASS actual rollback after interruption and successful full-start retry', flush=True)
 
     live.task(live.api('set', base + '/network', mtu=1401, digest=configuration(base)['digest']))
     live.task(live.api('create', base + '/action', action='reboot', timeout=10))
     assert configuration(base)['pending'] == {} and configuration(base)['mtu'] == 1401
     assert len(live.api('get', base + '/management')['containers']) == 2
-    reachable('192.0.2.217')
+    reachable(env.address(217))
     # Leave a visible pending edit for the final browser check.
     live.task(live.api('set', base + '/network', mtu=1402, digest=configuration(base)['digest']))
     print('PASS full reboot applies pending network; fixture retained for UI', json.dumps({'vmid':state['vmid'], 'base':base}), flush=True)

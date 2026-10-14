@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Run unit fixtures with node-control state redirected to disposable directories.
+"""Run unit fixtures with disposable node-control state.
 
-Older unit fixtures mock the Engine but predate capacity and network admission.
-Their unrelated admission dependencies are replaced here; the dedicated policy
-suites run those helpers themselves in check_release_ci.py.
+Mock admission dependencies outside their dedicated policy suites. Real Engine,
+network traffic and node lifecycle verification belong to the live tests.
 """
 import contextlib
 from pathlib import Path

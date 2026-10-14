@@ -4,6 +4,7 @@
 Never changes cluster/node firewall options, runtime modes, HA or quorum.
 No raw packets, spoofing, host-service stops, stress tests or reboot.
 """
+import live_environment as env
 import argparse
 import ipaddress
 import json
@@ -289,8 +290,8 @@ def main():
     parser.add_argument('--revision',required=True)
     parser.add_argument('--source-manifest',type=Path,required=True)
     parser.add_argument('--report',type=Path,required=True)
-    parser.add_argument('--rootful',default='pve1');parser.add_argument('--rootless',default='pve3')
-    parser.add_argument('--rootful-address',default='192.0.2.245');parser.add_argument('--rootless-address',default='192.0.2.247')
+    parser.add_argument('--rootful',default=env.node('primary'));parser.add_argument('--rootless',default=env.node('rootless'))
+    parser.add_argument('--rootful-address',default=env.address(245));parser.add_argument('--rootless-address',default=env.address(247))
     parser.add_argument('--cleanup',action='store_true')
     parser.add_argument('--traffic-mode', choices=('both', 'rootful', 'rootless'), default='both', help='Repeat traffic only for an affected runtime; omitted traffic remains unverified in this report')
     args=parser.parse_args()

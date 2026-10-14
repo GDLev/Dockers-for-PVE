@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Confirm the kept rootless fixture recovers without starting host Docker."""
+import live_environment as env
 import json
 from pathlib import Path
 import subprocess
@@ -12,8 +13,8 @@ from live_pools_hooks import api, task, wait_for
 
 
 def main():
-    assert worker.current_node() == 'pve1'
-    node = 'pve3'
+    assert worker.current_node() == env.node('primary')
+    node = env.node('rootless')
     state = json.loads(remote(node, ['cat', '/root/betterdocker-rootless-fixture.json'], check=True).stdout)
     base = '/nodes/' + node + '/docker/' + state['id']
     assert remote(node, ['systemctl', 'is-active', '--quiet', 'docker.service', 'docker.socket']).returncode != 0

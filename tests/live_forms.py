@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Verify create errors and prepare a disposable DCT for final form checks.
-
-Run on pve1 after deployment. cleanup removes only the recorded fixture.
-The HTTP helpers are the same ones used by the other live PVE checks.
-"""
+f"Verify create errors and prepare a disposable DCT for final form checks.\n\nRun on {env.node('primary')} after deployment. cleanup removes only the recorded fixture.\nThe HTTP helpers are the same ones used by the other live PVE checks.\n"
 import json
 from pathlib import Path
 import shutil
@@ -34,9 +31,9 @@ def cleanup():
         if row.get('vmid') not in guests:
             continue
         name = guests[row['vmid']]
-        assert row.get('name') == name and row['node'] == 'pve1', 'Fixture identity changed'
+        assert row.get('name') == name and row['node'] == env.node('primary'), 'Fixture identity changed'
         identifier = row['id'].split('/')[-1]
-        base = '/nodes/pve1/docker/' + identifier
+        base = f"/nodes/{env.node('primary')}/docker/" + identifier
         live.task(live.api('create', base + '/action', action='force-stop'))
         live.task(live.api('delete', base))
         retained[identifier] = name
@@ -58,15 +55,15 @@ def prepare():
     state = {'vmid': vmid}
     STATE.write_text(json.dumps(state))
     payload = {'name': NAME, 'vmid': vmid, 'mode': 'compose', 'bridge': 'vmbr0',
-               'ipv4mode': 'static', 'cidr': '192.0.2.219/20', 'compose': 'services: [broken'}
-    http('POST', '/nodes/pve1/docker', {'deployment': json.dumps(payload), 'start': 0},
+               'ipv4mode': 'static', 'cidr': f'{env.address(219)}/{env.prefix()}', 'compose': 'services: [broken'}
+    http('POST', f"/nodes/{env.node('primary')}/docker", {'deployment': json.dumps(payload), 'start': 0},
          headers=live._ROOT_HEADERS, expected=500)
     assert {row['id'] for row in resources()} == before
     assert not (worker.METADATA / 'ids' / (str(vmid) + '.json')).exists(), 'Validation reserved a guest ID'
     payload['compose'] = 'services:\n  app:\n    image: busybox:1.37\n    command: sleep 3600\n'
-    live.task(live.api('create', '/nodes/pve1/docker', deployment=json.dumps(payload), start=0))
+    live.task(live.api('create', f"/nodes/{env.node('primary')}/docker", deployment=json.dumps(payload), start=0))
     row = next(row for row in resources() if row.get('name') == NAME)
-    state.update(id=row['id'].split('/')[-1], base='/nodes/pve1/docker/' + row['id'].split('/')[-1])
+    state.update(id=row['id'].split('/')[-1], base=f"/nodes/{env.node('primary')}/docker/" + row['id'].split('/')[-1])
     STATE.write_text(json.dumps(state))
     assert row['vmid'] == vmid and row['status'] == 'stopped'
     configuration = live.api('get', state['base'] + '/management')

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Rootless acceptance on a deployed test node. Retain only recorded fixtures for GUI checks."""
+import live_environment as env
 import argparse
 import json
 import os
@@ -130,7 +131,7 @@ def run(address, keep=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--address', default='192.0.2.211')
+    parser.add_argument('--address', default=env.address(211))
     parser.add_argument('--keep', action='store_true')
     parser.add_argument('--cleanup', action='store_true')
     args = parser.parse_args()

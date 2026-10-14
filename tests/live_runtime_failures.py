@@ -4,6 +4,7 @@
 Run from another cluster node. Only --reboot requests a node reboot.
 The fixture manifest stays on the controller until cleanup completes.
 """
+import live_environment as env
 import argparse
 import json
 from pathlib import Path
@@ -98,7 +99,7 @@ else: raise AssertionError("Unavailable daemon was interpreted as empty")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--node', default='pve3')
+    parser.add_argument('--node', default=env.node('rootless'))
     parser.add_argument('--reboot', action='store_true')
     parser.add_argument('--cleanup', action='store_true')
     args = parser.parse_args()
