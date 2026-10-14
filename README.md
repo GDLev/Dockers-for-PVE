@@ -10,8 +10,6 @@ Docker runs on the PVE host. A DCT can contain several services under one guest 
 > [!WARNING]
 > This is a development build, with no production release or established production signing key. Use it only on small, non-critical installations, preferably a single node. It is not recommended for commercial or complex deployments.
 
-![DCT overview](assets/screenshots/demo.png)
-
 ## Requirements
 
 - Proxmox VE 9.1 or 9.2 on Debian 13. Other PVE versions are not supported.
