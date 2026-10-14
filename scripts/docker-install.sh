@@ -13,20 +13,20 @@ require_compose() {
     fi
 }
 
-if [[ "$MODE" == rootless ]]; then
-    if ! command -v dockerd-rootless.sh >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
-        if [[ ${BETTERDOCKER_PACKAGE_CONFIGURE:-0} == 1 ]]; then
-            echo 'Install compatible Docker rootless binaries before selecting rootless. Package configuration cannot run apt inside dpkg.' >&2
-            exit 1
-        fi
-        . /etc/os-release
-        [[ "$ID" == debian && "$VERSION_ID" =~ ^(12|13)$ ]] || { echo 'Debian 12/13 required'; exit 1; }
-        apt-get install -y ca-certificates curl
-        install -m 0755 -d /etc/apt/keyrings
-        curl --retry 5 -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-        chmod a+r /etc/apt/keyrings/docker.asc
-        arch=$(dpkg --print-architecture)
-        cat > /etc/apt/sources.list.d/docker.sources <<SOURCES
+setup_repository() {
+    if [[ ${BETTERDOCKER_PACKAGE_CONFIGURE:-0} == 1 ]]; then
+        echo 'Package configuration cannot install Docker dependencies inside dpkg. Repair Docker and retry.' >&2
+        exit 1
+    fi
+    local arch
+    . /etc/os-release
+    [[ "$ID" == debian && "$VERSION_ID" == 13 ]] || { echo 'Debian 13 required'; exit 1; }
+    apt-get install -y ca-certificates curl
+    install -m 0755 -d /etc/apt/keyrings
+    curl --retry 5 -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    arch=$(dpkg --print-architecture)
+    cat > /etc/apt/sources.list.d/docker.sources <<SOURCES
 Types: deb
 URIs: https://download.docker.com/linux/debian
 Suites: ${VERSION_CODENAME}
@@ -34,7 +34,12 @@ Components: stable
 Architectures: ${arch}
 Signed-By: /etc/apt/keyrings/docker.asc
 SOURCES
-        apt-get update
+    apt-get update
+}
+
+if [[ "$MODE" == rootless ]]; then
+    if ! command -v dockerd-rootless.sh >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
+        setup_repository
         if command -v docker >/dev/null && ! dpkg-query -W docker-ce >/dev/null 2>&1; then
             echo 'Existing Docker distribution lacks rootless support. Install compatible rootless binaries explicitly.' >&2
             exit 1
@@ -51,22 +56,7 @@ if command -v docker >/dev/null && docker info >/dev/null 2>&1 && docker compose
     echo 'Using the existing Docker Engine and Compose.'
     exit 0
 fi
-. /etc/os-release
-[[ "$ID" == debian && "$VERSION_ID" =~ ^(12|13)$ ]] || { echo 'Debian 12/13 (Proxmox VE 8/9) required'; exit 1; }
-apt-get install -y ca-certificates curl
-install -m 0755 -d /etc/apt/keyrings
-curl --retry 5 -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-arch=$(dpkg --print-architecture)
-cat > /etc/apt/sources.list.d/docker.sources <<SOURCES
-Types: deb
-URIs: https://download.docker.com/linux/debian
-Suites: ${VERSION_CODENAME}
-Components: stable
-Architectures: ${arch}
-Signed-By: /etc/apt/keyrings/docker.asc
-SOURCES
-apt-get update
+setup_repository
 if command -v docker >/dev/null; then
     # Do not replace an existing engine with a different package distribution.
     apt-get install -y docker-compose-plugin
