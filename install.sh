@@ -126,7 +126,9 @@ with tarfile.open(fileobj=source) as handle:
     # Members now contain only sanitized regular files and directories.
     # Keep the root-only parent inaccessible to other nobody processes.
     # The data filter resolves that private parent and cannot use this FD.
-    handle.extractall('/proc/self/fd/' + str(output_fd), members=members, filter='fully_trusted')
+    # Debian 12's original Python 3.11 lacks the extraction-filter API.
+    options = {'filter': 'fully_trusted'} if hasattr(tarfile, 'fully_trusted_filter') else {}
+    handle.extractall('/proc/self/fd/' + str(output_fd), members=members, **options)
 PY
     [[ -f "$project_dir/start.sh" && -f "$project_dir/scripts/installer.py" ]] || {
         echo 'Downloaded archive does not contain the BetterDocker installer.' >&2
