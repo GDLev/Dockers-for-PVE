@@ -10,6 +10,10 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 chmod 0755 "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/DEBIAN" "$BUILD_DIR/opt/betterdocker" "$OUTPUT_DIR"
 cp -a "$SOURCE_DIR/assets" "$SOURCE_DIR/frontend" "$SOURCE_DIR/backend" "$SOURCE_DIR/scripts" "$SOURCE_DIR/systemd" "$SOURCE_DIR/start.sh" "$SOURCE_DIR/install.sh" "$BUILD_DIR/opt/betterdocker/"
+mkdir -p "$BUILD_DIR/usr/share/doc/proxmox-betterdockers"
+for document in README.md API_DOCS.md CONTRIBUTING.md SECURITY.md RELEASE_NOTES.md; do
+    cp "$SOURCE_DIR/$document" "$BUILD_DIR/usr/share/doc/proxmox-betterdockers/"
+done
 find "$BUILD_DIR/opt/betterdocker" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$BUILD_DIR/opt/betterdocker" -name .DS_Store -delete
 find "$BUILD_DIR/opt/betterdocker" -name '*.pyc' -delete

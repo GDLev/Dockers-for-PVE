@@ -8,7 +8,7 @@ RELEASE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$SOURCE_DIR" log -1 --format=%ct 2>
 BUILD_DIR=$(mktemp -d)
 trap 'rm -rf -- "$BUILD_DIR"' EXIT
 mkdir -p "$OUTPUT_DIR" "$BUILD_DIR/betterdockers-$RELEASE_VERSION"
-for path in assets frontend backend scripts systemd packaging install.sh start.sh README.md API_DOCS.md CONTRIBUTING.md requirements-test.txt; do
+for path in assets frontend backend scripts systemd packaging install.sh start.sh README.md API_DOCS.md CONTRIBUTING.md SECURITY.md RELEASE_NOTES.md requirements-test.txt; do
     cp -a "$SOURCE_DIR/$path" "$BUILD_DIR/betterdockers-$RELEASE_VERSION/"
 done
 find "$BUILD_DIR" -type d -name __pycache__ -prune -exec rm -rf {} +

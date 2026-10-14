@@ -3,7 +3,7 @@
 [![Version 0.20.0](https://img.shields.io/badge/version-0.20.0-blue?style=flat-square)](packaging/build-deb.sh)
 [![Proxmox VE 9.1 and 9.2](https://img.shields.io/badge/Proxmox_VE-9.1_%7C_9.2-E57000?style=flat-square&logo=proxmox&logoColor=white)](#installation)
 
-[Install](#installation) · [Features](#available-features) · [CLI and API](API_DOCS.md) · [Contributing](CONTRIBUTING.md)
+[Install](#installation) · [Features](#available-features) · [CLI and API](API_DOCS.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Release notes](RELEASE_NOTES.md)
 
 BetterDockers lets you manage Docker projects from the Proxmox VE web interface: deploy Compose files or images, control services, view logs, open consoles, set limits and take snapshots.
 
@@ -71,7 +71,7 @@ Rootless runs Docker under the dedicated `betterdocker` account. PVE still manag
 
 Rootless needs cgroup v2, delegated CPU/memory/PID controllers, compatible Docker rootless binaries and unused `10.240.0.0/16` and `169.254.240.0/30` network ranges. The installer rejects incompatible setups. Release downloads verify signed metadata, artifact hashes and source files. `BETTERDOCKER_RELEASE_URL` can select another HTTPS mirror; `BETTERDOCKER_SOURCE_URL` can select an archive URL, but its content must match the signed release. Checksum overrides are unsupported. Older releases are refused unless you explicitly pass `--allow-downgrade`. Each selected node needs its own trusted signing key. Rootless uses PVE-managed forwarding for published ports, including 80 and 443.
 
-Rootless containers use user namespaces and Docker's seccomp filtering. The Docker AppArmor profile is unavailable in this mode on the tested PVE kernels; containers use `apparmor=unconfined`. The extension does not disable host AppArmor.
+Rootless containers use user namespaces and Docker's seccomp filtering. The Docker AppArmor profile is unavailable in this mode on the tested PVE kernels; no container AppArmor profile is applied. The extension does not disable host AppArmor.
 
 ## Changing runtime mode
 
@@ -208,7 +208,7 @@ Grant guest privileges on `/vms/<vmid>` or through a native resource pool. Creat
 
 Selecting a bridge requires native `SDN.Use` access to that bridge. Restricted API tokens use the intersection of user and token permissions. Interactive consoles require a user session.
 
-Delegated Compose supports project-owned bind mounts, local volumes and bridge networks. Host namespaces, privileged mode, added capabilities, devices, Docker sockets, external resources and custom drivers require administrator access. Only the imported `.env` may be referenced as an environment file. Delegated pulls do not use the administrator's Docker credentials. Existing deployments with unsafe settings stay administrator-only for deployment, console and state-management operations.
+Delegated Compose supports project-owned bind mounts, local volumes and bridge networks. Host namespaces, privileged mode, devices, Docker sockets, external resources and custom drivers require administrator access. Delegated capability additions must stay within the Hardened allowlist. Only the imported `.env` may be referenced as an environment file. Delegated pulls do not use the administrator's Docker credentials. Existing deployments with unsafe settings stay administrator-only for deployment, console and state-management operations.
 
 New and edited deployments default to local `json-file` logging with `max-size=10m` and `max-file=3`. Explicit local logging options are preserved. Delegated deployments must use positive rotation limits, at most 100 MiB per file and 10 files per container. These are per-container limits, not a project disk quota. Existing containers keep their logging settings until recreated through deployment editing.
 
@@ -218,6 +218,16 @@ Administrators can set aggregate CPU, memory and PID budgets with `dct limits <v
 
 Deployment editors can read imported environment variables and source files. Console users can see application secrets through logs or a shell. Backup access includes the secrets stored in that backup. Audit-only responses do not include deployment source or environment variables.
 
+
+## Security and resource scope
+
+New delegated DCTs use Hardened policy. Administrator-created and legacy DCTs can use Standard. Hardened requires no new privileges, default seccomp, and dropped capabilities with a restricted addition allowlist. Rootful also requires the enforcing `betterdocker-default` AppArmor profile installed by the extension. Only a node administrator can change this policy.
+
+Rootless shares one runtime account and user namespace per node. Direct private bridge traffic between different DCTs is blocked independently of optional guest firewall filtering. Services within one DCT remain one trust domain. Both runtime modes share the host kernel and do not provide VM isolation.
+
+CPU, RAM, and PID caps apply per container. Aggregate budgets sum those caps across replicas, without reserving node capacity. A managed data disk limits only its own contents. Images, logs, snapshots, retained writable history, and backup staging use separate space. Rootless writable-layer quotas are unsupported. Read-only root filesystems are optional unless the node administrator requires them.
+
+See [SECURITY.md](SECURITY.md) for privileges, mandatory settings, resource exclusions, and vulnerability reporting. Send private security reports to [security@gdlev.dev](mailto:security@gdlev.dev). The remaining release acceptance is listed in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## Support the project
 

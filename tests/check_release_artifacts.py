@@ -42,6 +42,10 @@ def main():
         package = directory / 'package'; package.mkdir()
         subprocess.run(['dpkg-deb', '--extract', str(dist / ('proxmox-betterdockers_' + version + '_all.deb')), str(package)], check=True)
         release.verify_tree(package / 'opt/betterdocker', metadata, ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'install.sh', 'start.sh'))
+        documentation = package / 'usr/share/doc/proxmox-betterdockers'
+        for name in ('README.md', 'API_DOCS.md', 'CONTRIBUTING.md', 'SECURITY.md', 'RELEASE_NOTES.md'):
+            if release.digest(documentation / name) != metadata['source'][name]:
+                raise AssertionError('Packaged documentation differs from signed source: ' + name)
         controls = directory / 'controls'; controls.mkdir()
         subprocess.run(['dpkg-deb', '--control', str(dist / ('proxmox-betterdockers_' + version + '_all.deb')), str(controls)], check=True)
         trust = directory / 'trust'; trust.mkdir()
@@ -54,7 +58,7 @@ def main():
                 release.source(root)
         class FixtureNode:
             def __init__(self, corrupt=None):
-                self.folder = Path(tempfile.mkdtemp(prefix='betterdocker-install.'))
+                self.folder = Path(subprocess.check_output(['mktemp', '-d', '/tmp/betterdocker-install.XXXXXXXX'], text=True).strip())
                 self.corrupt = corrupt
             def run(self, node, args, **kwargs):
                 if args[0] == 'mktemp':
@@ -128,6 +132,7 @@ def main():
         print('PASS disposable source/DEB/installer build, signing, payload matching and altered-installer rejection')
         print('PASS actual DEB pre-install guard accepts matching fixtures and rejects changed package/metadata')
         print('PASS cluster transfer fixture authenticates before isolated extraction and rejects altered signature/archive')
+        print('PASS README/API/security/release documentation matches signed source and DEB contents')
         print('No package installed, production key provisioned or runtime changed.')
 
 

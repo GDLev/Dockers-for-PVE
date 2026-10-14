@@ -16,7 +16,7 @@ docker compose version
 id betterdocker-parser >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin betterdocker-parser
 BD_CI_SOURCE=/opt/betterdocker-ci-source
 mkdir -p "$BD_CI_SOURCE"
-for item in assets frontend backend scripts systemd packaging tests install.sh start.sh README.md API_DOCS.md CONTRIBUTING.md requirements-test.txt; do
+for item in assets frontend backend scripts systemd packaging tests install.sh start.sh README.md API_DOCS.md CONTRIBUTING.md SECURITY.md RELEASE_NOTES.md requirements-test.txt; do
     cp -a "$item" "$BD_CI_SOURCE/"
 done
 chown -R root:root "$BD_CI_SOURCE"
