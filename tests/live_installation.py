@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Package lifecycle on the disposable PVE cluster. Never install on PBS.
-
-Run on pve1 after live_native_management.py. A saved manifest and --restore
-recover the temporarily detached HA/replication configuration after interruption.
-"""
+f"Package lifecycle on the disposable PVE cluster. Never install on PBS.\n\nRun on {env.node('primary')} after live_native_management.py. A saved manifest and --restore\nrecover the temporarily detached HA/replication configuration after interruption.\n"
 import argparse
 import json
 from pathlib import Path
@@ -15,10 +12,10 @@ from transfer import ssh_command
 from live_pools_hooks import api
 
 STATE=Path('/root/dct-installation-acceptance.json')
-PACKAGE=Path('/root/betterdocker-stage4-package/proxmox-betterdockers_0.19.0_all.deb')
+PACKAGE=Path(f'{env.source()}-package/proxmox-betterdockers_0.19.0_all.deb')
 
 def remote(node,command,**kwargs):
-    return subprocess.run(['bash','-c',command] if node=='pve1' else ssh_command(node)+[command],check=True,**kwargs)
+    return subprocess.run(['bash','-c',command] if node==env.node('primary') else ssh_command(node)+[command],check=True,**kwargs)
 
 def restore(state):
     jobs=api('get','/cluster/replication')
@@ -42,25 +39,25 @@ def main():
     state={'ha':api('get','/cluster/ha/resources'),'replication':api('get','/cluster/replication')}
     assert [i['sid'] for i in state['ha']]==['docker:115'], 'Unexpected HA resources: review before testing'
     assert [i['id'] for i in state['replication']]==['115-0'], 'Unexpected replication jobs: review before testing'
-    state['containers']={node:containers(node) for node in ('pve1','pve2','pve3')}
+    state['containers']={node:containers(node) for node in (env.node('primary'),env.node('secondary'),env.node('rootless'))}
     STATE.write_text(json.dumps(state));STATE.chmod(0o600)
     fixture=json.loads(Path('/root/dct-native-management.json').read_text())
-    base='/nodes/pve3/docker/'+fixture['id']
+    base=f"/nodes/{env.node('rootless')}/docker/"+fixture['id']
     hook='/var/lib/vz/snippets/native-install-'+str(fixture['vmid'])+'.pl'
-    remote('pve3','mkdir -p /var/lib/vz/snippets && printf %s '+shlex.quote('#!/usr/bin/perl\nexit 0;\n')+' > '+shlex.quote(hook)+' && chmod 0755 '+shlex.quote(hook))
+    remote(env.node('rootless'),'mkdir -p /var/lib/vz/snippets && printf %s '+shlex.quote('#!/usr/bin/perl\nexit 0;\n')+' > '+shlex.quote(hook)+' && chmod 0755 '+shlex.quote(hook))
     api('set',base+'/config',hookscript='local:snippets/'+Path(hook).name)
     api('set',base+'/firewall/options',enable=1,policy_in='DROP')
     firewall=Path('/etc/pve/firewall/'+str(fixture['vmid'])+'.fw').read_bytes()
-    archive=Path('/root/betterdocker-stage4.tgz')
-    for node in ('pve3','pve2','pve1'):
-        if node!='pve1':
-            remote(node,'cat > /root/betterdocker-stage4.tgz',input=archive.read_bytes())
-            remote(node,'cat > /root/betterdocker-stage4.deb',input=PACKAGE.read_bytes())
-        package='/root/betterdocker-stage4.deb' if node!='pve1' else str(PACKAGE)
-        remote(node,'mkdir -p /root/betterdocker-stage4 && tar -xzf /root/betterdocker-stage4.tgz -C /root/betterdocker-stage4 && dpkg -i '+shlex.quote(package)+' > /root/stage4-package.log 2>&1')
+    archive=Path(f'{env.source()}.tgz')
+    for node in (env.node('rootless'),env.node('secondary'),env.node('primary')):
+        if node!=env.node('primary'):
+            remote(node,f'cat > {env.source()}.tgz',input=archive.read_bytes())
+            remote(node,f'cat > {env.package()}',input=PACKAGE.read_bytes())
+        package=env.package() if node!=env.node('primary') else str(PACKAGE)
+        remote(node,f'mkdir -p {env.source()} && tar -xzf {env.source()}.tgz -C {env.source()} && dpkg -i '+shlex.quote(package)+' > /root/stage4-package.log 2>&1')
         assert containers(node)==state['containers'][node],node+' workload restarted'
         print('PASS package install/update with workloads',node,flush=True)
-    guarded= subprocess.run(ssh_command('pve3')+['bash /root/betterdocker-stage4/start.sh uninstall'],capture_output=True,text=True)
+    guarded= subprocess.run(ssh_command(env.node('rootless'))+[f'bash {env.source()}/start.sh uninstall'],capture_output=True,text=True)
     assert guarded.returncode and 'Remove DCT HA resources' in guarded.stderr
     print('PASS uninstall refuses active DCT HA registration before mutation',flush=True)
     try:
@@ -68,16 +65,16 @@ def main():
         # The workload remains running while its HA registration is temporarily detached.
         for resource in state['ha']:api('delete','/cluster/ha/resources/'+resource['sid'])
         for job in state['replication']:api('delete','/cluster/replication/'+job['id'],force=1)
-        remote('pve3','dpkg -r proxmox-betterdockers > /root/stage4-remove.log 2>&1')
-        remote('pve3','test ! -e /usr/sbin/dct && test ! -e /usr/share/perl5/PVE/API2/BetterDocker.pm && systemctl is-active --quiet betterdocker-firewall.service')
-        assert containers('pve3')==state['containers']['pve3']
+        remote(env.node('rootless'),'dpkg -r proxmox-betterdockers > /root/stage4-remove.log 2>&1')
+        remote(env.node('rootless'),'test ! -e /usr/sbin/dct && test ! -e /usr/share/perl5/PVE/API2/BetterDocker.pm && systemctl is-active --quiet betterdocker-firewall.service')
+        assert containers(env.node('rootless'))==state['containers'][env.node('rootless')]
         assert Path('/etc/pve/firewall/'+str(fixture['vmid'])+'.fw').read_bytes()==firewall
-        remote('pve3','test -f '+shlex.quote(hook))
+        remote(env.node('rootless'),'test -f '+shlex.quote(hook))
         print('PASS package removal retains workloads, firewall, pool and hook files',flush=True)
-        remote('pve3','bash /root/betterdocker-stage4/start.sh install > /root/stage4-clean-install.log 2>&1')
-        remote('pve3','dpkg -i /root/betterdocker-stage4.deb > /root/stage4-reinstall.log 2>&1 && dpkg-trigger --no-await /usr/share/perl5/PVE/API2/Nodes.pm && dpkg --triggers-only proxmox-betterdockers > /root/stage4-trigger.log 2>&1')
-        remote('pve3','python3 /usr/local/lib/betterdocker/patch.py status && dct status '+str(fixture['vmid'])+' --output-format json > /root/stage4-cli-status.json')
-        assert containers('pve3')==state['containers']['pve3']
+        remote(env.node('rootless'),f'bash {env.source()}/start.sh install > /root/stage4-clean-install.log 2>&1')
+        remote(env.node('rootless'),f'dpkg -i {env.package()} > /root/stage4-reinstall.log 2>&1 && dpkg-trigger --no-await /usr/share/perl5/PVE/API2/Nodes.pm && dpkg --triggers-only proxmox-betterdockers > /root/stage4-trigger.log 2>&1')
+        remote(env.node('rootless'),'python3 /usr/local/lib/betterdocker/patch.py status && dct status '+str(fixture['vmid'])+' --output-format json > /root/stage4-cli-status.json')
+        assert containers(env.node('rootless'))==state['containers'][env.node('rootless')]
         assert api('get',base+'/config')['hookscript']=='local:snippets/'+Path(hook).name
         assert any(i.get('vmid')==fixture['vmid'] for i in api('get','/pools',poolid=fixture['pool'])[0]['members'])
         print('PASS clean installation, package reinstall and triggers preserve configuration and runtime',flush=True)
@@ -86,7 +83,7 @@ def main():
     for node in state['containers']:
         assert containers(node)==state['containers'][node],node+' workload changed'
     api('set',base+'/config',delete='hookscript')
-    remote('pve3','rm -- '+shlex.quote(hook))
+    remote(env.node('rootless'),'rm -- '+shlex.quote(hook))
     state['complete']=True;STATE.write_text(json.dumps(state))
     print('PASS package lifecycle acceptance',flush=True)
 

@@ -76,9 +76,7 @@ class ArchiveReaders(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'Bootstrap privilege drop requires a Linux root fixture')
     def test_bootstrap_extracts_small_release_without_running_it(self):
-        source = Path('/tmp/bd-sec23-source/install.sh')
-        if not source.exists():
-            source = Path(__file__).resolve().parents[1] / 'install.sh'
+        source = Path(__file__).resolve().parents[1] / 'install.sh'
         reader = source.read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
         with tempfile.TemporaryDirectory(prefix='bd-release-reader-') as temporary:
             archive = Path(temporary) / 'source.tar.gz'

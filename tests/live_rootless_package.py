@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Package updates and PVE repair triggers must retain mode and live containers."""
+import live_environment as env
 import json
 from pathlib import Path
 import subprocess
@@ -18,11 +19,11 @@ def containers(node):
 
 
 def run():
-    for node in ('pve3', 'pve2', 'pve1'):
+    for node in (env.node('rootless'), env.node('secondary'), env.node('primary')):
         selected = remote(node, ['cat', '/etc/betterdocker/runtime.json'], check=True).stdout
         before = containers(node)
         package = str(PACKAGE)
-        if node != 'pve1':
+        if node != env.node('primary'):
             package = '/root/betterdocker-rootless-package.deb'
             subprocess.run(transfer.ssh_command(node) + ['cat > ' + package], input=PACKAGE.read_bytes(), check=True)
         remote(node, ['bash', '-c', 'DEBIAN_FRONTEND=noninteractive dpkg -i ' + package + ' > /root/dct-rootless-package.log 2>&1'], check=True, timeout=300)

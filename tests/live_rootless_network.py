@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check real rootless DHCP acquisition, published traffic and DNS on the test LAN."""
+import live_environment as env
 import json
 import subprocess
 import sys
@@ -12,8 +13,8 @@ from live_pools_hooks import api, task, wait_for
 
 
 def main():
-    node = 'pve3'
-    assert worker.current_node() == 'pve1'
+    node = env.node('rootless')
+    assert worker.current_node() == env.node('primary')
     identity = json.loads(remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'identity'], check=True).stdout)
     assert identity['mode'] == 'rootless'
     name = 'rootless-dhcp-' + uuid.uuid4().hex[:8]

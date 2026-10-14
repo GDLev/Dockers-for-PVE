@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify DCT firewall through HA start, Docker restart and a test-node reboot."""
+import live_environment as env
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -57,11 +58,11 @@ for info in guests:
 # HA requires a completed native ZFS replica. Use the existing test storage on
 # pve1/pve2; the reboot target pve3 has no ZFS pool.
 ha_name = state['prefix'] + '-ha'
-ha_node = 'pve1'
+ha_node = env.node('primary')
 ha = next((i for i in worker.summaries() if i['name'] == ha_name), None)
 if not ha:
     source = 'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, "mkdir -p /www; echo firewall-ok > /www/index.html; exec httpd -f -p 80 -h /www"]\n    ports: ["18080:80"]\n    volumes: [data:/www]\nvolumes:\n  data: {}\n'
-    task(api('create', '/nodes/' + ha_node + '/docker', deployment=dict(name=ha_name, mode='compose', compose=source, bridge='vmbr0', cidr='192.0.2.217/20', firewall=1)))
+    task(api('create', '/nodes/' + ha_node + '/docker', deployment=dict(name=ha_name, mode='compose', compose=source, bridge='vmbr0', cidr=f'{env.address(217)}/{env.prefix()}', firewall=1)))
     ha = next(i for i in worker.summaries() if i['name'] == ha_name)
 ha_base = f'/nodes/{ha_node}/docker/{ha["id"]}'
 power(ha, 'shutdown')
@@ -69,10 +70,10 @@ api('set', ha_base + '/firewall/options', enable=1)
 task(api('set', ha_base + '/storage-limit', size_mib=512, storage='bdstage7-zfs'))
 job = str(ha['vmid']) + '-0'
 state['ha_job'] = job; path.write_text(json.dumps(state))
-api('create', '/cluster/replication', id=job, target='pve2', type='local', schedule='00:59')
+api('create', '/cluster/replication', id=job, target=env.node('secondary'), type='local', schedule='00:59')
 result = remote(ha_node, ['pvesr', 'run', '--id', job], timeout=300)
 assert result.returncode == 0, result.stderr
-wait_for(lambda: 'pve2' in api('get', ha_base + '/management').get('replication', {}).get('targets', {}))
+wait_for(lambda: env.node('secondary') in api('get', ha_base + '/management').get('replication', {}).get('targets', {}))
 sid = 'docker:' + str(ha['vmid'])
 state['ha_sid'] = sid; path.write_text(json.dumps(state))
 api('create', '/cluster/ha/resources', sid=sid, state='started')

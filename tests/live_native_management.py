@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Stage 4 acceptance on disposable DCTs; retain the manifest for GUI and cleanup."""
+import live_environment as env
 import argparse
 import json
 from pathlib import Path
@@ -40,16 +41,16 @@ def main():
     if not any(i['name']==state['name'] for i in worker.summaries()):
         state['pool']=state['name'];save();api('create','/pools',poolid=state['pool'])
         deployment={'name':state['name'],'mode':'compose','compose':'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, "trap \'\' TERM; while :; do sleep 1; done"]\n',
-                    'bridge':'vmbr0','ipv4mode':'static','cidr':'192.0.2.216/20'}
+                    'bridge':'vmbr0','ipv4mode':'static','cidr':f'{env.address(216)}/{env.prefix()}'}
         vmid=api('get','/cluster/nextid')
         path=Path('/root/'+state['name']+'.json');path.write_text(json.dumps(deployment));path.chmod(0o600)
-        try:remote('pve1',['dct','create',str(vmid),str(path),'--node','pve3','--pool',state['pool']])
+        try:remote(env.node('primary'),['dct','create',str(vmid),str(path),'--node',env.node('rootless'),'--pool',state['pool']])
         finally:path.unlink()
         assert api('get',base()+'/management')['status']=='stopped'
         print('PASS CLI creation leaves guest stopped',flush=True)
     guest=info();vmid=guest['vmid'];state['vmid']=vmid;state['id']=guest['id'];save()
-    remote('pve1',['dct','stop',str(vmid)])
-    assert json.loads(remote('pve1',['dct','status',str(vmid),'--output-format','json']).stdout)['status']=='stopped'
+    remote(env.node('primary'),['dct','stop',str(vmid)])
+    assert json.loads(remote(env.node('primary'),['dct','status',str(vmid),'--output-format','json']).stdout)['status']=='stopped'
     print('PASS CLI resolves guest on remote node',flush=True)
     state['role']='Native'+state['name'][-8:];state['user']=state['name']+'@pve';save()
     if not any(i['userid']==state['user'] for i in api('get','/access/users')):
@@ -67,21 +68,21 @@ def main():
         return http('POST',route,values,headers=headers,expected=expected)
     for action in ('start','migrate'):
         values={'vms':[vmid,100]}
-        if action=='migrate':values['target']='pve2'
+        if action=='migrate':values['target']=env.node('secondary')
         bulk(action,values,expected=403)
     task(bulk('start',{'vms':[vmid]}))
     assert api('get',base()+'/management')['status']=='running'
-    try:task(bulk('migrate',{'vms':[vmid],'target':'pve2'}))
+    try:task(bulk('migrate',{'vms':[vmid],'target':env.node('secondary')}))
     except RuntimeError as error: assert 'stop' in str(error).lower(),str(error)
     else:raise AssertionError('Running ordinary DCT migrated')
     task(bulk('shutdown',{'vms':[vmid],'timeout':1,'force-stop':1}))
     assert api('get',base()+'/management')['status']=='stopped'
-    task(bulk('migrate',{'vms':[vmid],'target':'pve2'}))
-    assert info()['node']=='pve2'
-    task(http('POST','/nodes/pve2/migrateall',{'vms':str(vmid),'target':'pve3','maxworkers':1},headers=headers))
-    assert info()['node']=='pve3'
+    task(bulk('migrate',{'vms':[vmid],'target':env.node('secondary')}))
+    assert info()['node']==env.node('secondary')
+    task(http('POST',f"/nodes/{env.node('secondary')}/migrateall",{'vms':str(vmid),'target':env.node('rootless'),'maxworkers':1},headers=headers))
+    assert info()['node']==env.node('rootless')
     print('PASS native cluster/node bulk operations, inherited token ACLs and running migration rejection',flush=True)
-    remote('pve1',['dct','start',str(vmid)])
+    remote(env.node('primary'),['dct','start',str(vmid)])
     upid=api('create',base()+'/action',action='shutdown',timeout=120)
     time.sleep(3)
     route='/nodes/'+upid.split(':')[1]+'/tasks/'+upid
@@ -89,12 +90,12 @@ def main():
     wait_for(lambda:api('get',route+'/status')['status']=='stopped')
     assert api('get',route+'/status')['exitstatus']!='OK'
     wait_for(lambda:not api('get',base()+'/management')['operation'].get('active'))
-    remote('pve1',['dct','stop',str(vmid)])
+    remote(env.node('primary'),['dct','stop',str(vmid)])
     upid=api('create',base()+'/shutdown',timeout=1,**{'force-stop':1})
     assert isinstance(upid,str) and upid.startswith('UPID:'),repr(upid)
     task(upid)
     assert api('get',base()+'/management')['status']=='stopped'
-    remote('pve1',['dct','start',str(vmid)])
+    remote(env.node('primary'),['dct','start',str(vmid)])
     print('PASS native task cancellation releases operation lock and permits the next command',flush=True)
     api('set',base()+'/config',protection=1)
     try:api('delete',base())

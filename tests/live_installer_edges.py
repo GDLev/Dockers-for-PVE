@@ -4,6 +4,7 @@
 Test cluster only. Uses live_terminal_installer's journaled HA maintenance.
 Run after its ordinary cluster acceptance, using the same deployed source.
 """
+import live_environment as env
 import argparse
 from pathlib import Path
 import shutil
@@ -46,13 +47,13 @@ def main():
     text = patch.read_text()
     assert 'args = parser.parse_args()' in text
     patch.write_text(text.replace('args = parser.parse_args()', "args = parser.parse_args()\n    if args.action == 'apply': raise RuntimeError('Injected installer acceptance failure')"))
-    result = subprocess.run(['bash', str(failed / 'start.sh'), 'repair', '--nodes=pve3', '--yes', '--no-restart'], text=True, capture_output=True, timeout=300)
+    result = subprocess.run(['bash', str(failed / 'start.sh'), 'repair', f"--nodes={env.node('rootless')}", '--yes', '--no-restart'], text=True, capture_output=True, timeout=300)
     (folder / 'failed-apply.log').write_text(result.stdout + result.stderr)
     assert result.returncode != 0 and 'Injected installer acceptance failure' in result.stdout
     assert 'restoring integration' in result.stdout
     assert panels() == baseline and workloads() == original
-    assert remote('pve3', ['test', '-f', PENDING]).returncode == 0
-    result = subprocess.run(['bash', str(source / 'start.sh'), 'finish', '--nodes=pve3', '--yes'], text=True, capture_output=True, timeout=240)
+    assert remote(env.node('rootless'), ['test', '-f', PENDING]).returncode == 0
+    result = subprocess.run(['bash', str(source / 'start.sh'), 'finish', f"--nodes={env.node('rootless')}", '--yes'], text=True, capture_output=True, timeout=240)
     assert result.returncode == 0, result.stdout + result.stderr
     assert workloads() == original
     print('PASS late apply failure restores integration, keeps workloads and defers panel reload for recovery', flush=True)

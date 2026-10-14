@@ -4,6 +4,7 @@
 run keeps two fixtures for the final GUI comparison. cleanup removes only the
 recorded guests, users, roles and snippet. No PBS or existing guest is modified.
 """
+import live_environment as env
 import argparse
 import json
 from pathlib import Path
@@ -250,7 +251,7 @@ def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('run', 'cross-node', 'cleanup'))
-    parser.add_argument('--address', nargs=2, default=['192.0.2.216', '192.0.2.217'])
+    parser.add_argument('--address', nargs=2, default=[env.address(216), env.address(217)])
     parser.add_argument('--bridge', default='vmbr0')
     parser.add_argument('--prefix', type=int, default=20)
     arguments = parser.parse_args()

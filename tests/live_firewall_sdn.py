@@ -1,5 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Exercise a disposable native SDN VNet on pve3, including SDN.Use."""
+f"Exercise a disposable native SDN VNet on {env.node('rootless')}, including SDN.Use."
 import json
 from pathlib import Path
 import secrets
@@ -13,7 +14,7 @@ from live_firewall import remote
 from live_permissions import http
 
 path = Path('/root/dct-firewall-sdn.json')
-state = json.loads(path.read_text()) if path.exists() else {'zone': 'fwzone', 'vnet': 'fwvnet', 'name': 'fwtest-sdn', 'node': 'pve3'}
+state = json.loads(path.read_text()) if path.exists() else {'zone': 'fwzone', 'vnet': 'fwvnet', 'name': 'fwtest-sdn', 'node': env.node('rootless')}
 if not path.exists():
     assert not any(i['zone'] == state['zone'] for i in api('get', '/cluster/sdn/zones'))
     assert not any(i['vnet'] == state['vnet'] for i in api('get', '/cluster/sdn/vnets'))

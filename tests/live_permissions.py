@@ -4,6 +4,7 @@
 Creates test users/tokens and three Docker guests, then removes those resources.
 Does not install anything on PBS or grant node console privileges.
 """
+import live_environment as env
 import argparse
 import base64
 import os
@@ -11,7 +12,6 @@ import socket
 import struct
 import json
 import secrets
-import ssl
 import subprocess
 import sys
 import time
@@ -25,10 +25,10 @@ sys.path.insert(0, '/usr/local/lib/betterdocker')
 from dctlib import projects as worker
 from live_acceptance import api, task
 
-TLS = ssl._create_unverified_context()
 
 
-def http(method, path, values=None, headers=None, expected=200, origin="127.0.0.1"):
+def http(method, path, values=None, headers=None, expected=200, origin=None):
+    origin = origin or env.server()
     encoded = urllib.parse.urlencode({k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in (values or {}).items()}).encode()
     url = 'https://' + origin + ':8006/api2/json' + path
     if method == 'GET' and encoded:
@@ -36,7 +36,7 @@ def http(method, path, values=None, headers=None, expected=200, origin="127.0.0.
     req = urllib.request.Request(url, data=encoded if method != 'GET' else None,
                                  headers=headers or {}, method=method)
     try:
-        with urllib.request.urlopen(req, context=TLS, timeout=90) as response:
+        with urllib.request.urlopen(req, context=env.tls(), timeout=90) as response:
             status, body = response.status, response.read()
     except urllib.error.HTTPError as error:
         status, body = error.code, error.read()
@@ -52,12 +52,13 @@ def expired_console_ticket(user, vmid):
     return subprocess.check_output(['perl', '-e', code, user, '/vms/' + str(vmid)], text=True).strip()
 
 
-def terminal_session(base, terminal, cookie, container, origin="127.0.0.1", hostname=None):
+def terminal_session(base, terminal, cookie, container, origin=None, hostname=None):
+    origin = origin or env.server()
     path = '/api2/json' + base + '/vncwebsocket?' + urllib.parse.urlencode({'port': terminal['port'], 'vncticket': terminal['ticket']})
-    connection = TLS.wrap_socket(socket.create_connection((origin, 8006), timeout=20), server_hostname='localhost')
+    connection = env.tls().wrap_socket(socket.create_connection((origin, 8006), timeout=20), server_hostname=origin)
     connection.settimeout(20)
     key = base64.b64encode(os.urandom(16)).decode()
-    request = (f'GET {path} HTTP/1.1\r\nHost: localhost:8006\r\nUpgrade: websocket\r\n'
+    request = (f'GET {path} HTTP/1.1\r\nHost: {origin}:8006\r\nUpgrade: websocket\r\n'
                f'Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n'
                f'Cookie: {cookie["Cookie"]}\r\n\r\n')
     connection.sendall(request.encode())
@@ -130,7 +131,7 @@ def console_acceptance(args):
         assert data['capabilities']['console'] and not data['capabilities']['trusted']
         assert not data['capabilities']['configure'] and 'deployment' not in data
         cid = data['containers'][0]['id']
-        for origin in ('127.0.0.1', args.target_address):
+        for origin in (env.server(), args.target_address):
             terminal = http('POST', base + '/termproxy', {'container': cid}, headers=cookie, origin=origin)
             terminal_session(base, terminal, cookie, cid, origin=origin, hostname=name)
             print('OK guest-only console through ' + origin, flush=True)
@@ -170,13 +171,13 @@ def main():
     parser.add_argument('--unsafe-address', required=True)
     parser.add_argument('--console-only', action='store_true')
     parser.add_argument('--bridge', default='vmbr0')
-    parser.add_argument('--prefix', type=int, default=20)
-    parser.add_argument('--target', default='pve3')
-    parser.add_argument('--target-address', default='192.0.2.40')
-    parser.add_argument('--backup-storage', default='pbs1')
-    parser.add_argument('--clone-address', default='192.0.2.219')
-    parser.add_argument('--restore-address', default='192.0.2.218')
-    parser.add_argument('--create-address', default='192.0.2.217')
+    parser.add_argument('--prefix', type=int, default=env.prefix())
+    parser.add_argument('--target', default=env.node('rootless'))
+    parser.add_argument('--target-address', default=env.node('rootless'), help='Destination API hostname matching its certificate')
+    parser.add_argument('--backup-storage', default=env.backup_storage())
+    parser.add_argument('--clone-address', default=env.address(219))
+    parser.add_argument('--restore-address', default=env.address(218))
+    parser.add_argument('--create-address', default=env.address(217))
     args = parser.parse_args()
     if args.console_only:
         return console_acceptance(args)

@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Verify writable layers and interrupted service swaps on a disposable PVE guest.
-
-Run on a test PVE node: python3 live_service_preservation.py 192.0.2.225/20
-The guest and its volumes are removed, leaving the original guests untouched.
-"""
+f'Verify writable layers and interrupted service swaps on a disposable PVE guest.\n\nRun on a test PVE node: python3 live_service_preservation.py {env.address(225)}/{env.prefix()}\nThe guest and its volumes are removed, leaving the original guests untouched.\n'
 import copy
 import json
 from pathlib import Path

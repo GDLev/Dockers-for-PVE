@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Rootless data and cluster acceptance on explicitly approved test nodes.
-
-Run on pve1. Retain the manifest on failure; --cleanup removes only fixtures
-recorded here. The temporary ZFS pools never touch an existing storage pool.
-"""
+f"Rootless data and cluster acceptance on explicitly approved test nodes.\n\nRun on {env.node('primary')}. Retain the manifest on failure; --cleanup removes only fixtures\nrecorded here. The temporary ZFS pools never touch an existing storage pool.\n"
 import argparse
 import json
 from pathlib import Path
@@ -22,7 +19,7 @@ VDEV = '/var/lib/betterdocker/rootless-test-vdev'
 
 
 def run(cleanup=False):
-    assert worker.current_node() == 'pve1'
+    assert worker.current_node() == env.node('primary')
     state = json.loads(STATE.read_text()) if STATE.exists() else dict(name='rootless-cluster-' + uuid.uuid4().hex[:8], guests=[])
     def save():
         STATE.write_text(json.dumps(state, indent=2)); STATE.chmod(0o600)
@@ -87,9 +84,9 @@ def run(cleanup=False):
             remote(node, ['zpool', 'destroy', POOL], check=True)
             remote(node, ['rm', '--', VDEV], check=True)
         STATE.unlink(); print('PASS rootless cluster fixtures removed', flush=True); return
-    identities = [json.loads(remote(n, ['/usr/local/lib/betterdocker/runtime.py', 'identity'], check=True).stdout) for n in ('pve2', 'pve3')]
+    identities = [json.loads(remote(n, ['/usr/local/lib/betterdocker/runtime.py', 'identity'], check=True).stdout) for n in (env.node('secondary'), env.node('rootless'))]
     assert all(i['mode'] == 'rootless' for i in identities) and identities[0]['subuid'] != identities[1]['subuid']
-    for node in ('pve2', 'pve3'):
+    for node in (env.node('secondary'), env.node('rootless')):
         state.setdefault('pools', [])
         if node not in state['pools']:
             assert remote(node, ['zpool', 'list', POOL]).returncode != 0
@@ -98,11 +95,11 @@ def run(cleanup=False):
             remote(node, ['zpool', 'create', '-m', 'none', POOL, VDEV], check=True)
             state['pools'].append(node); save()
     if not any(i['storage'] == STORAGE for i in api('get', '/storage')):
-        api('create', '/storage', storage=STORAGE, type='zfspool', pool=POOL, nodes='pve2,pve3', content='rootdir', sparse=1)
+        api('create', '/storage', storage=STORAGE, type='zfspool', pool=POOL, nodes=f"{env.node('secondary')},{env.node('rootless')}", content='rootdir', sparse=1)
     current = next((i for i in worker.summaries() if i['name'] == state['name']), None)
     if not current:
         compose = 'services:\n  app:\n    image: busybox:stable\n    init: true\n    command: [sh, -c, "mkdir -p /data; test -f /data/proof || { echo rootless-data-proof > /data/proof; chown 1234:2345 /data/proof; }; exec sleep infinity"]\n    volumes: [data:/data]\nvolumes:\n  data: {}\n'
-        task(api('create', '/nodes/pve3/docker', deployment=dict(name=state['name'], mode='compose', compose=compose, bridge='vmbr0', cidr='192.0.2.214/20')))
+        task(api('create', f"/nodes/{env.node('rootless')}/docker", deployment=dict(name=state['name'], mode='compose', compose=compose, bridge='vmbr0', cidr=f'{env.address(214)}/{env.prefix()}')))
         current = next(i for i in worker.summaries() if i['name'] == state['name'])
     if current['id'] not in state['guests']:
         state['guests'].append(current['id']); save()
@@ -113,14 +110,14 @@ def run(cleanup=False):
     if not disk.get('size_mib'):
         task(api('set', base(current) + '/storage-limit', size_mib=512, storage=STORAGE))
     power(current, 'start'); check(current); power(current, 'shutdown')
-    if info(current['id'])['node'] != 'pve2':
-        task(api('create', base(current) + '/migrate', target='pve2', storage=STORAGE))
+    if info(current['id'])['node'] != env.node('secondary'):
+        task(api('create', base(current) + '/migrate', target=env.node('secondary'), storage=STORAGE))
     power(current, 'start'); check(current); power(current, 'shutdown')
     assert info(current['id'])['vmid'] == state['vmid']
     print('PASS rootless migration preserves logical owners across different UID ranges', flush=True)
     before = info(current['id'])
     try:
-        task(api('create', base(current) + '/migrate', target='pve1', storage='local-lvm'))
+        task(api('create', base(current) + '/migrate', target=env.node('primary'), storage='local-lvm'))
     except RuntimeError as error:
         assert 'modes differ' in str(error), str(error)
     else:
@@ -129,9 +126,9 @@ def run(cleanup=False):
     print('PASS incompatible target rejected before source changes', flush=True)
     job = str(current['vmid']) + '-0'; state['job'] = job; save()
     if not any(i['id'] == job for i in api('get', '/cluster/replication')):
-        api('create', '/cluster/replication', id=job, target='pve3', type='local', schedule='00:59')
-    remote('pve2', ['pvesr', 'run', '--id', job], check=True, timeout=300)
-    wait_for(lambda: 'pve3' in api('get', base(current) + '/management').get('replication', {}).get('targets', {}))
+        api('create', '/cluster/replication', id=job, target=env.node('rootless'), type='local', schedule='00:59')
+    remote(env.node('secondary'), ['pvesr', 'run', '--id', job], check=True, timeout=300)
+    wait_for(lambda: env.node('rootless') in api('get', base(current) + '/management').get('replication', {}).get('targets', {}))
     print('PASS native ZFS replication completes between rootless nodes', flush=True)
     state['replicated'] = True; save()
 

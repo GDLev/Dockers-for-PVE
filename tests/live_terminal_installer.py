@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Installer acceptance on the named disposable PVE cluster, using real PTYs.
-
-Run on pve1 with --source=<deployed checkout>. Never contacts PBS.
-Logs preserve the terminal transcript. No guest configuration is changed.
-"""
+f"Installer acceptance on the named disposable PVE cluster, using real PTYs.\n\nRun on {env.node('primary')} with --source=<deployed checkout>. Never contacts PBS.\nLogs preserve the terminal transcript. No guest configuration is changed.\n"
 import argparse
 import atexit
 import fcntl
@@ -24,7 +21,7 @@ import uuid
 from live_firewall import remote
 from live_rootless_package import containers
 
-NODES = ('pve1', 'pve2', 'pve3')
+NODES = (env.node('primary'), env.node('secondary'), env.node('rootless'))
 PENDING = '/var/lib/betterdocker/installer/pending-restart.json'
 
 
@@ -107,42 +104,42 @@ def lifecycle(source, logs, state_path):
     name = state['fixture']
     try:
         maintenance.hold(state)
-        remote('pve3', ['docker', 'run', '--pull=never', '-d', '--name', name,
+        remote(env.node('rootless'), ['docker', 'run', '--pull=never', '-d', '--name', name,
                            '--label', 'betterdocker.installer-test=' + name, '-v', name + ':/data',
                            'busybox:stable', 'sh', '-c', 'echo installer-retained >/data/marker; sleep 7200'], check=True)
         original = workloads()
         baseline = panels()
-        ui = Session(['bash', str(source / 'start.sh'), 'uninstall', '--interactive', '--nodes=pve3'], logs / 'uninstall.tty')
+        ui = Session(['bash', str(source / 'start.sh'), 'uninstall', '--interactive', f"--nodes={env.node('rootless')}"], logs / 'uninstall.tty')
         ui.wait('Press Enter to start'); ui.send(b'\r')
         ui.wait('Press Enter to reload the PVE panel')
         assert panels() == baseline
         assert workloads() == original
-        assert remote('pve3', ['test', '-f', '/usr/share/perl5/PVE/API2/BetterDocker.pm']).returncode == 1
+        assert remote(env.node('rootless'), ['test', '-f', '/usr/share/perl5/PVE/API2/BetterDocker.pm']).returncode == 1
         ui.send(b'\r'); ui.finish()
         assert workloads() == original
-        assert 'installer-retained' in remote('pve3', ['docker', 'exec', name, 'cat', '/data/marker'], check=True).stdout
+        assert 'installer-retained' in remote(env.node('rootless'), ['docker', 'exec', name, 'cat', '/data/marker'], check=True).stdout
         print('PASS real uninstall removes PVE integration and retains rootless workload, volume and mode', flush=True)
 
         baseline = panels()
-        ui = Session(['bash', str(source / 'start.sh'), 'install', '--interactive', '--nodes=pve3'], logs / 'reinstall.tty')
+        ui = Session(['bash', str(source / 'start.sh'), 'install', '--interactive', f"--nodes={env.node('rootless')}"], logs / 'reinstall.tty')
         ui.wait('Press Enter to start'); ui.send(b'\r')
         ui.wait('Press Enter to reload the PVE panel', timeout=600)
         assert panels() == baseline
         assert workloads() == original
         ui.send(b'\r'); ui.finish()
         assert workloads() == original
-        assert remote('pve3', ['test', '-f', '/usr/share/perl5/PVE/API2/BetterDocker.pm']).returncode == 0
-        assert 'installer-retained' in remote('pve3', ['docker', 'exec', name, 'cat', '/data/marker'], check=True).stdout
+        assert remote(env.node('rootless'), ['test', '-f', '/usr/share/perl5/PVE/API2/BetterDocker.pm']).returncode == 0
+        assert 'installer-retained' in remote(env.node('rootless'), ['docker', 'exec', name, 'cat', '/data/marker'], check=True).stdout
         print('PASS real Install / Update reinstalls rootless integration without recreating workload', flush=True)
     finally:
         # Restore integration before releasing cluster HA maintenance, even if
         # the terminal check failed halfway through removal or installation.
-        remote('pve3', ['bash', str(source / 'start.sh'), 'repair'], check=True, timeout=300)
-        owned = remote('pve3', ['docker', 'inspect', name])
+        remote(env.node('rootless'), ['bash', str(source / 'start.sh'), 'repair'], check=True, timeout=300)
+        owned = remote(env.node('rootless'), ['docker', 'inspect', name])
         if owned.returncode == 0:
             assert json.loads(owned.stdout)[0]['Config']['Labels']['betterdocker.installer-test'] == name
-            remote('pve3', ['docker', 'rm', '-f', name], check=True)
-            remote('pve3', ['docker', 'volume', 'rm', name], check=True)
+            remote(env.node('rootless'), ['docker', 'rm', '-f', name], check=True)
+            remote(env.node('rootless'), ['docker', 'volume', 'rm', name], check=True)
         maintenance.restore(state)
         state['restored'] = True
         state_path.write_text(json.dumps(state, indent=2))
@@ -156,7 +153,7 @@ def main():
     parser.add_argument('--lifecycle-state', default='/root/betterdocker-installer-lifecycle.json')
     parser.add_argument('--restore', action='store_true', help='Release HA maintenance from the saved lifecycle manifest after interruption.')
     args = parser.parse_args()
-    assert subprocess.check_output(['hostname', '-s'], text=True).strip() == 'pve1'
+    assert subprocess.check_output(['hostname', '-s'], text=True).strip() == env.node('primary')
     source = Path(args.source)
     logs = Path(args.logs)
     logs.mkdir(mode=0o700, exist_ok=True)
@@ -164,7 +161,7 @@ def main():
         import live_rootless_installation as maintenance
         maintenance.DROPIN = '/etc/systemd/system/{unit}.service.d/betterdocker-installer-test.conf'
         maintenance.CONDITION = '/run/betterdocker-installer-test-allow'
-        remote('pve3', ['bash', str(source / 'start.sh'), 'repair'], check=True, timeout=300)
+        remote(env.node('rootless'), ['bash', str(source / 'start.sh'), 'repair'], check=True, timeout=300)
         maintenance.restore(json.loads(Path(args.lifecycle_state).read_text()))
         return
     before = workloads()
@@ -204,18 +201,18 @@ def main():
 
     # TERM=dumb, then cancel final reload and recover from cached source.
     baseline = panels()
-    ui = Session(['bash', str(source / 'start.sh'), 'repair', '--interactive', '--nodes=pve3'], logs / 'plain-terminal.tty', term='dumb')
+    ui = Session(['bash', str(source / 'start.sh'), 'repair', '--interactive', f"--nodes={env.node('rootless')}"], logs / 'plain-terminal.tty', term='dumb')
     ui.wait('Press Enter to start')
     ui.send(b'\n')
     ui.wait('Press Enter to reload the PVE panel')
     assert panels() == baseline
     ui.send(b'q\n')
     ui.finish(130)
-    assert remote('pve3', ['test', '-f', PENDING]).returncode == 0
+    assert remote(env.node('rootless'), ['test', '-f', PENDING]).returncode == 0
     assert b'\x1b[' not in ui.output
-    result = subprocess.run(['bash', '/var/lib/betterdocker/installer/source/start.sh', 'finish', '--nodes=pve3', '--yes'], capture_output=True, text=True, timeout=240)
+    result = subprocess.run(['bash', '/var/lib/betterdocker/installer/source/start.sh', 'finish', f"--nodes={env.node('rootless')}", '--yes'], capture_output=True, text=True, timeout=240)
     assert result.returncode == 0, result.stderr + result.stdout
-    assert panels()['pve3'] != baseline['pve3']
+    assert panels()[env.node('rootless')] != baseline[env.node('rootless')]
     assert workloads() == before
     print('PASS plain terminal, deferred cancellation and cached finish recovery', flush=True)
 

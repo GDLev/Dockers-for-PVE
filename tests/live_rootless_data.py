@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Actual rootless disk, clone, template and PBS ownership checks.
-
-Run after live_rootless_cluster.py on pve1. Disposable guest IDs and backup
-volumes are recorded for --cleanup; PBS receives backups only.
-"""
+f"Actual rootless disk, clone, template and PBS ownership checks.\n\nRun after live_rootless_cluster.py on {env.node('primary')}. Disposable guest IDs and backup\nvolumes are recorded for --cleanup; PBS receives backups only.\n"
 import argparse
 import json
 from pathlib import Path
@@ -19,7 +16,7 @@ PBS = 'bdrootless-pbs'
 
 
 def run(cleanup=False):
-    assert worker.current_node() == 'pve1'
+    assert worker.current_node() == env.node('primary')
     state = json.loads(STATE.read_text()) if STATE.exists() else dict(name='rootless-data-' + uuid.uuid4().hex[:8], guests=[], backups=[])
     def save():
         STATE.write_text(json.dumps(state, indent=2)); STATE.chmod(0o600)
@@ -49,14 +46,14 @@ def run(cleanup=False):
             if not current.get('template'):
                 power(current, 'force-stop')
             task(api('delete', base(current)))
-            for node in ('pve1', 'pve2', 'pve3'):
+            for node in (env.node('primary'), env.node('secondary'), env.node('rootless')):
                 script = 'import json,shutil; from pathlib import Path; from dctlib import projects as w; p=w.ROOT/' + repr(identifier) + ';\nif p.exists():\n assert json.loads((p/"request.json").read_text())["name"].startswith(' + repr(state['name']) + ');\n if w.storage_config(' + repr(identifier) + ').get("volid"): w.purge_retained_storage(' + repr(identifier) + ');\n shutil.rmtree(p)\n'
                 remote(node, ['python3', '-c', 'import sys; sys.path.insert(0,"/usr/local/lib/betterdocker");\n' + script], check=True)
                 volumes = remote(node, ['docker', 'volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=bd-' + identifier], check=True).stdout.split()
                 if volumes:
                     remote(node, ['docker', 'volume', 'rm', *volumes], check=True)
         for archive in state['backups']:
-            api('delete', '/nodes/pve1/storage/' + PBS + '/content/' + archive)
+            api('delete', f"/nodes/{env.node('primary')}/storage/" + PBS + '/content/' + archive)
         STATE.unlink(); print('PASS data fixtures and PBS backups removed', flush=True); return
     cluster = json.loads(Path('/root/dct-rootless-cluster.json').read_text())
     source = info(cluster['id'])
@@ -70,7 +67,7 @@ def run(cleanup=False):
     name = state['name'] + '-clone'
     clone = next((i for i in worker.summaries() if i['name'] == name), None)
     if not clone:
-        task(api('create', base(source) + '/clone', storage='bdrootless-zfs', deployment=dict(name=name, bridge='vmbr0', cidr='192.0.2.215/20')))
+        task(api('create', base(source) + '/clone', storage='bdrootless-zfs', deployment=dict(name=name, bridge='vmbr0', cidr=f'{env.address(215)}/{env.prefix()}')))
         clone = next(i for i in worker.summaries() if i['name'] == name)
     remember(clone)
     if not clone.get('template'):
@@ -79,7 +76,7 @@ def run(cleanup=False):
     name = state['name'] + '-template-clone'
     child = next((i for i in worker.summaries() if i['name'] == name), None)
     if not child:
-        task(api('create', base(clone) + '/clone', storage='bdrootless-zfs', deployment=dict(name=name, bridge='vmbr0', cidr='192.0.2.218/20')))
+        task(api('create', base(clone) + '/clone', storage='bdrootless-zfs', deployment=dict(name=name, bridge='vmbr0', cidr=f'{env.address(218)}/{env.prefix()}')))
         child = next(i for i in worker.summaries() if i['name'] == name)
     remember(child); check(child)
     print('PASS full clone and template clone preserve data and logical owners', flush=True)
@@ -89,7 +86,7 @@ def run(cleanup=False):
             master = next((i for i in worker.summaries() if i['name'] == name), None)
             if not master:
                 compose = 'services:\n  app:\n    image: busybox:stable\n    init: true\n    command: [sh, -c, "mkdir -p /data; test -f /data/proof || { echo rootless-data-proof > /data/proof; chown 1234:2345 /data/proof; }; exec sleep infinity"]\n    volumes: [data:/data]\nvolumes:\n  data: {}\n'
-                task(api('create', '/nodes/pve1/docker', deployment=dict(name=name, mode='compose', compose=compose, bridge='vmbr0', cidr='192.0.2.216/20')))
+                task(api('create', f"/nodes/{env.node('primary')}/docker", deployment=dict(name=name, mode='compose', compose=compose, bridge='vmbr0', cidr=f'{env.address(216)}/{env.prefix()}')))
                 master = next(i for i in worker.summaries() if i['name'] == name)
             remember(master); check(master)
         if kind not in state:
@@ -100,7 +97,7 @@ def run(cleanup=False):
         name = state['name'] + '-' + kind + '-restore'
         restored = next((i for i in worker.summaries() if i['name'] == name), None)
         if not restored:
-            task(api('create', '/nodes/pve3/docker', archive=state[kind], storage='local-lvm', deployment=dict(name=name, bridge='vmbr0', cidr=('192.0.2.223' if kind == 'rootless' else '192.0.2.224') + '/20')))
+            task(api('create', f"/nodes/{env.node('rootless')}/docker", archive=state[kind], storage='local-lvm', deployment=dict(name=name, bridge='vmbr0', cidr=(env.address(223) if kind == 'rootless' else env.address(224)) + '/20')))
             restored = next(i for i in worker.summaries() if i['name'] == name)
         remember(restored); check(restored)
         print('PASS', kind, 'PBS backup and restore preserve data and logical owners', flush=True)

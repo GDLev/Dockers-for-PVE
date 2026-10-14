@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """A known private image ID must not substitute for permission to clone its guest."""
+import live_environment as env
 import json
 import sys
 import uuid
 sys.path.insert(0, '/usr/local/lib/betterdocker')
 from dctlib import projects as w
-from live_security_stage23 import STATE
+from live_security_policy import STATE
 from live_pools_hooks import api, task
 from live_permissions import http
 from live_firewall import remote
@@ -13,7 +14,7 @@ from live_firewall import remote
 
 def main():
     saved = json.loads(STATE.read_text())
-    node = 'pve1'
+    node = env.node('primary')
     source = next(r for r in w.summaries() if r['name'] == saved['prefix'] + '-clone-' + node)
     base = '/nodes/' + node + '/docker/' + source['id']
     task(api('create', base + '/action', action='start'))
@@ -23,8 +24,8 @@ def main():
     task(api('set', base + '/security-policy', mode='hardened', digest=api('get', base + '/management')['digest']))
     cid = api('get', base + '/management')['containers'][0]['id']
     image = json.loads(remote(node, ['docker', 'inspect', cid], check=True).stdout)[0]['Image']
-    user = next(u for u in saved['users'] if 'pve1@' in u)
-    role = next(r for r in saved['roles'] if r.endswith('pve1'))
+    user = next(u for u in saved['users'] if f"{env.node('primary')}@" in u)
+    role = next(r for r in saved['roles'] if r.endswith(env.node('primary')))
     token_name = 'private-image-' + uuid.uuid4().hex[:8]
     token = api('create', '/access/users/' + user + '/token/' + token_name, privsep=1)
     vmid = int(api('get', '/cluster/nextid'))

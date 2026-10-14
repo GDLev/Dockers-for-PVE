@@ -5,6 +5,7 @@ Run on a test PVE node after installing BetterDockers on the target. No PBS code
 is installed. --keep leaves only these named fixtures for final GUI inspection;
 --cleanup removes them using the saved manifest.
 """
+import live_environment as env
 import argparse
 import json
 import os
@@ -165,15 +166,15 @@ def main():
     parser.add_argument('--cleanup')
     parser.add_argument('--check-hooks')
     parser.add_argument('--keep', action='store_true')
-    parser.add_argument('--target', default='pve2')
-    parser.add_argument('--third', default='pve3')
-    parser.add_argument('--third-address', default='192.0.2.218')
-    parser.add_argument('--backup-storage', default='pbs1')
-    parser.add_argument('--address', default='192.0.2.222')
-    parser.add_argument('--other-address', default='192.0.2.221')
-    parser.add_argument('--clone-address', default='192.0.2.220')
-    parser.add_argument('--restore-address', default='192.0.2.219')
-    parser.add_argument('--failure-address', default='192.0.2.217')
+    parser.add_argument('--target', default=env.node('secondary'))
+    parser.add_argument('--third', default=env.node('rootless'))
+    parser.add_argument('--third-address', default=env.address(218))
+    parser.add_argument('--backup-storage', default=env.backup_storage())
+    parser.add_argument('--address', default=env.address(222))
+    parser.add_argument('--other-address', default=env.address(221))
+    parser.add_argument('--clone-address', default=env.address(220))
+    parser.add_argument('--restore-address', default=env.address(219))
+    parser.add_argument('--failure-address', default=env.address(217))
     parser.add_argument('--ha-storage', default='bdstage7-zfs')
     args = parser.parse_args()
     if args.check_hooks:

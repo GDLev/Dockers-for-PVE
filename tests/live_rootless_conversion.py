@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Offline conversion, resume and rollback on the explicitly borrowed pve2.
-
-Run after the cluster/data fixtures are removed and the empty conversion has
-been rolled back. Interruptions happen in child processes, leaving real journals.
-"""
+f"Offline conversion, resume and rollback on the explicitly borrowed {env.node('secondary')}.\n\nRun after the cluster/data fixtures are removed and the empty conversion has\nbeen rolled back. Interruptions happen in child processes, leaving real journals.\n"
 import argparse
 import json
 from pathlib import Path
@@ -15,12 +12,12 @@ from live_firewall import remote
 from live_pools_hooks import api, task
 
 STATE = Path('/root/dct-rootless-conversion.json')
-NODE = 'pve2'
+NODE = env.node('secondary')
 SCRIPT = '/usr/local/lib/betterdocker/migrate-runtime.py'
 
 
 def run(cleanup=False):
-    assert worker.current_node() == 'pve1'
+    assert worker.current_node() == env.node('primary')
     state = json.loads(STATE.read_text()) if STATE.exists() else dict(name='rootless-conversion-' + uuid.uuid4().hex[:8])
     def save():
         STATE.write_text(json.dumps(state, indent=2)); STATE.chmod(0o600)
@@ -88,7 +85,7 @@ m.guest_state.restore_state=stop
     if not state.get('id'):
         assert json.loads(remote(NODE, ['/usr/local/lib/betterdocker/runtime.py', 'identity'], check=True).stdout)['mode'] == 'rootful'
         compose = 'services:\n  app:\n    image: busybox:stable\n    init: true\n    command: [sh, -c, "mkdir -p /data; test -f /data/proof || { echo conversion-proof > /data/proof; chown 1234:2345 /data/proof; }; exec sleep infinity"]\n    volumes: [data:/data]\nvolumes:\n  data: {}\n'
-        task(api('create', '/nodes/' + NODE + '/docker', deployment=dict(name=state['name'], mode='compose', compose=compose, bridge='vmbr0', cidr='192.0.2.225/20')))
+        task(api('create', '/nodes/' + NODE + '/docker', deployment=dict(name=state['name'], mode='compose', compose=compose, bridge='vmbr0', cidr=f'{env.address(225)}/{env.prefix()}')))
         current = next(i for i in worker.summaries() if i['name'] == state['name'])
         state.update(id=current['id'], vmid=current['vmid']); save()
     api('set', base() + '/config', description='Offline conversion acceptance')

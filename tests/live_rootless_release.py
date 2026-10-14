@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Rootless image/clone/PBS acceptance on exactly registered disposable DCTs."""
+import live_environment as env
 import argparse
 import hashlib
 import json
 from pathlib import Path
-import ssl
 import sys
 import time
 import urllib.error
@@ -17,12 +17,9 @@ from acceptance_report import Report
 
 def request(token, method, route, **data):
     encoded = urllib.parse.urlencode({k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in data.items()}).encode() if data else None
-    req = urllib.request.Request('https://pve1:8006/api2/json' + route, data=encoded, method=method,
+    req = urllib.request.Request(f"https://{env.server()}:8006/api2/json" + route, data=encoded, method=method,
         headers={'Authorization': 'PVEAPIToken=' + token})
-    context = ssl.create_default_context(cafile='/etc/pve/pve-root-ca.pem')
-    # Native PVE CAs predate Python 3.13's strict extension requirements.
-    # Keep CA signature, validity and hostname verification enabled.
-    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    context = env.tls()
     with urllib.request.urlopen(req, context=context, timeout=300) as response:
         return json.load(response)['data']
 
@@ -100,8 +97,8 @@ def cleanup(report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--node', default='pve3')
-    parser.add_argument('--storage', default='pbs1')
+    parser.add_argument('--node', default=env.node('rootless'))
+    parser.add_argument('--storage', default=env.backup_storage())
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--cleanup', action='store_true')

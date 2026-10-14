@@ -1,8 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Prepare, change and remove one disposable DCT for stable-refresh GUI checks.
-
-Run on pve1 after deployment. No changes to existing guests or PBS.
-"""
+f"Prepare, change and remove one disposable DCT for stable-refresh GUI checks.\n\nRun on {env.node('primary')} after deployment. No changes to existing guests or PBS.\n"
 import json
 from pathlib import Path
 import shutil
@@ -18,17 +16,17 @@ STATE = Path('/root/ux-refresh-fixture.json')
 def run(action):
     if action == 'prepare':
         assert not STATE.exists(), 'Remove the previous fixture first'
-        guests = live.api('get', '/nodes/pve1/docker')
-        assert not any(row.get('address') == '192.0.2.216' for row in guests)
+        guests = live.api('get', f"/nodes/{env.node('primary')}/docker")
+        assert not any(row.get('address') == env.address(216) for row in guests)
         ports = ''.join(f'      - "{18400 + index}:8080"\n' for index in range(24))
         deployment = {'name': 'ux-refresh-check', 'mode': 'compose', 'bridge': 'vmbr0',
-            'ipv4mode': 'static', 'cidr': '192.0.2.216/20',
+            'ipv4mode': 'static', 'cidr': f'{env.address(216)}/{env.prefix()}',
             'compose': 'services:\n  app:\n    image: busybox:1.37\n    command: sh -c "trap \'exit 0\' TERM; while sleep 1; do :; done"\n    ports:\n' + ports +
             '  sidecar:\n    image: busybox:1.37\n    command: sh -c "trap \'exit 0\' TERM; while sleep 1; do :; done"\n'}
-        live.task(live.api('create', '/nodes/pve1/docker', deployment=json.dumps(deployment), start=1))
+        live.task(live.api('create', f"/nodes/{env.node('primary')}/docker", deployment=json.dumps(deployment), start=1))
         row = next(row for row in live.api('get', '/cluster/resources', type='vm') if row.get('name') == deployment['name'])
         identifier = row['id'].split('/')[-1]
-        state = {'id': identifier, 'base': '/nodes/pve1/docker/' + identifier, 'name': row['name'], 'vmid': row['vmid']}
+        state = {'id': identifier, 'base': f"/nodes/{env.node('primary')}/docker/" + identifier, 'name': row['name'], 'vmid': row['vmid']}
         STATE.write_text(json.dumps(state))
         live.task(live.api('create', state['base'] + '/snapshot', action='create', snapname='refresh', description='Before metadata edit'))
         print(json.dumps(state), flush=True)

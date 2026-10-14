@@ -1,9 +1,6 @@
+import live_environment as env
 #!/usr/bin/env python3
-"""Verify Stage 1 authorization on disposable rootful and rootless DCTs.
-
-Run on pve1 after deployment. A manifest supports explicit cleanup after interruption.
-No extension code is installed on PBS.
-"""
+f"Verify Stage 1 authorization on disposable rootful and rootless DCTs.\n\nRun on {env.node('primary')} after deployment. A manifest supports explicit cleanup after interruption.\nNo extension code is installed on PBS.\n"
 import argparse
 import json
 from pathlib import Path
@@ -55,7 +52,7 @@ def run():
         for name, rights in ((role, privileges), (audit, 'VM.Audit'), (allocate, 'VM.Allocate')):
             api('create', '/access/roles', roleid=name, privs=rights); saved['roles'].append(name); save()
         fixtures = []
-        for index, node in enumerate(('pve1', 'pve3')):
+        for index, node in enumerate((env.node('primary'), env.node('rootless'))):
             secret = 'private-environment-' + secrets.token_hex(12)
             compose = 'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sleep, "86400"]\n    environment: {SENTINEL: "${SENTINEL}"}\n    volumes: ["./data:/data", "/anonymous"]\n'
             name = saved['prefix'] + '-' + str(index)
