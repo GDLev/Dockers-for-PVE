@@ -43,6 +43,21 @@ python3 tests/check_native.py /
 
 This checks native integration and reversible patch application in memory. It does not install or restart services.
 
+Live tests require an explicit private configuration. On the disposable test node, save a JSON file with mode `0600`, owned by the user running the test:
+
+```json
+{
+  "nodes": {"primary": "pve1", "secondary": "pve2", "rootless": "pve3"},
+  "api_host": "pve1.example",
+  "addresses": "192.0.2.0/24",
+  "backup_storage": "backup",
+  "source": "/root/Proxmox-BetterDockers",
+  "package": "/root/proxmox-betterdockers_0.20.0_all.deb"
+}
+```
+
+Replace the documentation subnet with a reserved test subnet, and use the API certificate's hostname. Set `BETTERDOCKER_TEST_CONFIG` to the file's absolute path. Each script has additional prerequisites; this configuration alone does not prepare fixtures or make a scenario safe to run.
+
 Live tests can change test guests or host configuration. Read their prerequisites and use disposable nodes. Keep fixture journals private, record ownership before creation, and clean up only registered identities. Never use a name prefix alone to delete resources. Installation, restart, uninstall, real traffic, backup/restore, and cluster recovery require live verification; mocks do not establish those results.
 
 ## Build and sign

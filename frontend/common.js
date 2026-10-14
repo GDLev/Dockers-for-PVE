@@ -198,7 +198,7 @@ const task = response => {
 };
 const dockerTaskLabels = { security: 'Security policy', imagepreview: 'Preview images', imageupdate: 'Update images', create: 'Create', update: 'Edit deployment', start: 'Start', stop: 'Shutdown',
     diskdelete: 'Remove disk', restart: 'Restart', shutdown: 'Shutdown', reboot: 'Reboot', forcestop: 'Stop', delete: 'Destroy', settings: 'Edit resources / options', network: 'Network', console: 'Console', snapshotcreate: 'Snapshot', snapshotrestore: 'Rollback', snapshotdelete: 'Delete Snapshot', restore: 'Restore', clone: 'Clone', template: 'Convert to template', migrate: 'Migrate' };
-const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action (legacy)' };
+const dockerTaskDescriptions = { betterdocker: () => 'Docker - Deployment action' };
 Object.entries(dockerTaskLabels).forEach(([action, label]) => {
     dockerTaskDescriptions['betterdocker' + action] = (type, id) =>
         (id && !/^[0-9a-f]{32}$/.test(String(id)) ? 'DCT ' + id : 'Docker') + ' - ' + translate(label);
