@@ -1,4 +1,5 @@
 """Replace stopped service instances while retaining their files and rollback originals."""
+from .secure_io import read_json, read_text
 import copy
 import json
 import os
@@ -10,7 +11,10 @@ from .rebind import preserved_body, network_endpoints, storage_bindings
 import service_security
 
 JOURNAL = 'settings-transaction.json'
-FILES = ('compose.runtime.json', 'settings.json', 'pending.json', 'snapshot-restored.json', 'service-defaults.json', 'compose.source.yaml', '.env', 'request.json', 'images.json', 'image-update.json', 'storage.json', 'disk-transaction.json')
+FILES = ('compose.runtime.json', 'settings.json', 'pending.json', 'snapshot-restored.json', 'service-defaults.json', 'compose.source.yaml', '.env', 'request.json', 'images.json', 'image-update.json', 'storage.json', 'disk-transaction.json', 'security-policy.json')
+
+
+from .operation_capacity import bounded
 
 
 def durable_write(path, value):
@@ -26,27 +30,13 @@ def durable_write(path, value):
 
 
 def durable_text(path, value):
-    import tempfile
-    fd, temporary = tempfile.mkstemp(prefix='.transaction-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w') as output:
-            output.write(value)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    from .secure_io import atomic_text
+    atomic_text(path, value)
 
 
 def defaults_state(directory):
     path = directory / 'service-defaults.json'
-    value = json.loads(path.read_text()) if path.exists() else {}
+    value = read_json(path) if path.exists() else {}
     if not isinstance(value, dict) or any(not re.fullmatch(r'sha256:[0-9a-f]{64}', key) or not isinstance(user, str) for key, user in value.items()):
         raise ValueError('Invalid original image user defaults')
     return value
@@ -143,6 +133,7 @@ def settings_body(row, before, service, defaults):
     host['StorageOpt'] = service.get('storage_opt') or {}
     host['ReadonlyRootfs'] = bool(service.get('read_only', False))
     host['CapDrop'] = service.get('cap_drop') or []
+    host['CapAdd'] = service.get('cap_add') or []
     opts = [o for o in host.get('SecurityOpt') or [] if not o.startswith(('no-new-privileges', 'apparmor'))]
     security = service_security.values(service)
     if security['no_new_privileges']:
@@ -184,7 +175,7 @@ def replace(info, service, candidate, settings, pending):
         execute(info, service, [], candidate, settings, pending, defaults_state(directory))
         return
     rows = json.loads(w.capture(['docker', 'inspect', '--size', *[r['id'] for r in records]]))
-    original = json.loads((directory / 'compose.runtime.json').read_text())
+    original = read_json(directory / 'compose.runtime.json')
     defaults_path = directory / 'service-defaults.json'
     defaults = defaults_state(directory)
     remember_defaults(rows, original['services'][service], defaults)
@@ -203,7 +194,7 @@ def replace_bindings(info, candidate=None, storage=None, updates=None):
     """Replace all stopped bindings as one recoverable container transaction."""
     from . import projects as w
     directory = w.ROOT / info['id']
-    candidate = candidate if candidate is not None else json.loads((directory / 'compose.runtime.json').read_text())
+    candidate = candidate if candidate is not None else read_json(directory / 'compose.runtime.json')
     storage = storage if storage is not None else w.storage_config(info['id'])
     records = w.container_records(info['id'])
     w.require_stopped(records)
@@ -222,6 +213,7 @@ def replace_bindings(info, candidate=None, storage=None, updates=None):
         execute(info, '*', entries, candidate, w.load_settings(directory), w.load_pending(directory), defaults_state(directory), updates=updates)
 
 
+@bounded
 def execute(info, service, entries, candidate, settings, pending, defaults, updates=None, metadata=None, prepare=None):
     from . import projects as w
     identifier = info['id']
@@ -230,20 +222,38 @@ def execute(info, service, entries, candidate, settings, pending, defaults, upda
     defaults_path = directory / 'service-defaults.json'
     if marker.exists():
         raise ValueError('Recover the previous container transaction first')
+    from . import hardening
+    policy = hardening.mode(directory)
+    if updates and hardening.FILE in updates:
+        change = json.loads(updates[hardening.FILE])
+        if not isinstance(change, dict) or set(change) != {'mode'} or change['mode'] not in hardening.MODES:
+            raise ValueError('Invalid transaction security policy')
+        policy = change['mode']
+    hardening.apply(candidate, w.node_runtime.load(), policy)
+    for entry in entries:
+        if entry.get('body'):
+            hardening.host(entry['body'], w.node_runtime.load(), policy)
+            from .retention import container_logs
+            container_logs(entry['body'])
+    w.project_limits.preflight(identifier, candidate, entries=entries)
     token = uuid.uuid4().hex
+    from .space import replacement
+    replacement(identifier, entries, candidate)
     from .capacity import docker_space, preserve_quota
     for entry in entries:
         if entry.get('source') and entry.get('body') and entry.get('preserve', True):
             preserve_quota(entry['source'], entry['body'])
     required = sum(max(0, (entry.get('source') or {}).get('SizeRw', 0)) for entry in entries)
+    from .retention import preservation
+    preservation(identifier, [entry['source'] for entry in entries if entry.get('source') and entry.get('body') and entry.get('preserve', True)])
     docker_space(required)
     for index, entry in enumerate(entries):
         entry['backup'] = 'bd-settings-' + identifier + '-' + token + '-' + str(index)
         entry['tag'] = 'betterdocker-settings/' + identifier + ':' + token + '-' + str(index)
     journal = {'id': identifier, 'service': service, 'token': token, 'phase': 'preparing', 'entries': entries,
-        'files': {name: (directory / name).read_text() if (directory / name).exists() else None for name in FILES}}
+        'files': {name: read_text(directory / name) if (directory / name).exists() else None for name in FILES}}
     if metadata is not None:
-        journal['metadata'] = json.loads((w.METADATA / (identifier + '.json')).read_text())
+        journal['metadata'] = read_json(w.METADATA / (identifier + '.json'))
     from .data import remember_volumes
     remember_volumes(identifier, [entry['source'] for entry in entries if entry.get('source')])
     durable_write(marker, journal)
@@ -260,6 +270,9 @@ def execute(info, service, entries, candidate, settings, pending, defaults, upda
             if not re.fullmatch(r'sha256:[0-9a-f]{64}', entry['image']):
                 raise ValueError('Docker did not return a committed image ID')
             durable_write(marker, journal)
+        from .retention import preservation
+        if any(entry.get('source') and entry.get('body') and entry.get('preserve', True) for entry in entries):
+            preservation(identifier)
         for entry in entries:
             row = entry.get('source')
             if row:
@@ -295,7 +308,7 @@ def execute(info, service, entries, candidate, settings, pending, defaults, upda
         durable_write(defaults_path, defaults)
         restored = directory / 'snapshot-restored.json'
         if restored.exists():
-            value = json.loads(restored.read_text())
+            value = read_json(restored)
             changed = {e['source']['Id']: e.get('created') for e in entries if e.get('source')}
             value['containers'] = [changed.get(cid, cid) for cid in value.get('containers', []) if changed.get(cid, cid)]
             durable_write(restored, value)
@@ -350,6 +363,8 @@ def validate_journal(identifier, journal):
 def finish(identifier, journal):
     from . import projects as w
     validate_journal(identifier, journal)
+    from .recovery import require_docker
+    require_docker()
     for entry in journal['entries']:
         if not entry.get('body'):
             continue
@@ -378,11 +393,13 @@ def recover(identifier):
     marker = directory / JOURNAL
     if not marker.exists():
         return False
-    journal = json.loads(marker.read_text())
+    journal = read_json(marker)
     validate_journal(identifier, journal)
     if journal['phase'] == 'committed':
         finish(identifier, journal)
         return True
+    from .recovery import require_docker
+    require_docker()
     # Validate all originals before removing any replacement, including replicas.
     originals = []
     for entry in journal['entries']:
@@ -430,7 +447,7 @@ def recover(identifier):
             raise ValueError('Invalid deployment recovery resource')
         result = w.run(['docker', kind, 'inspect', name], check=False, capture_output=True)
         if result.returncode:
-            if 'no such ' not in result.stderr.lower() and 'not found' not in result.stderr.lower():
+            if not re.search(r'no such ' + kind + r'\b', result.stderr or '', re.IGNORECASE):
                 raise ValueError('Cannot inspect deployment recovery resource')
             continue
         labels = json.loads(result.stdout)[0].get('Labels') or {}

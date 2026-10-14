@@ -1,5 +1,7 @@
 """Capture and restore DCT configuration and persistent data."""
+from .secure_io import read_json, read_text
 import contextlib
+import copy
 import hashlib
 import ipaddress
 import json
@@ -27,7 +29,7 @@ def snapshot_root(identifier):
 
 def snapshot_tree_state(identifier, names=None):
     path = worker.ROOT / worker.project_id(identifier) / 'snapshot-tree.json'
-    state = json.loads(path.read_text()) if path.exists() else {'parents': {}, 'descriptions': {}, 'current': ''}
+    state = read_json(path) if path.exists() else {'parents': {}, 'descriptions': {}, 'current': ''}
     if names is None:
         names = {path.parent.name for path in worker.snapshot_root(identifier).glob('*/manifest.json') if not path.parent.name.startswith('.')}
     if names is not None:
@@ -40,13 +42,13 @@ def snapshot_tree_state(identifier, names=None):
             for name in names:
                 manifest = worker.snapshot_root(identifier) / name / 'manifest.json'
                 if manifest.exists():
-                    data = json.loads(manifest.read_text())
+                    data = read_json(manifest)
                     if not data.get('recovery'):
                         candidates.append((data['created'], name))
             latest = max(candidates, default=(0, ''))
             state['current'] = latest[1]
             if restored.exists() and restored.stat().st_mtime > latest[0]:
-                state['current'] = json.loads(restored.read_text()).get('name', '')
+                state['current'] = read_json(restored).get('name', '')
         if state.get('current') not in names:
             state['current'] = ''
         # An invalid legacy sidecar must never make the tree recursive.
@@ -71,7 +73,7 @@ def snapshot_list(identifier, node):
     rows = []
     for path in worker.snapshot_root(identifier).glob('*/manifest.json'):
         try:
-            data = json.loads(path.read_text())
+            data = read_json(path)
             if data.get('version') in (1, 2) and data.get('id') == identifier and data.get('name') == path.parent.name:
                 rows.append({key: data[key] for key in ('name', 'created', 'description', 'size', 'recovery')})
         except (OSError, ValueError, KeyError):
@@ -92,12 +94,12 @@ def snapshot_config(identifier, node, name):
     folder = worker.snapshot_root(identifier) / worker.snapshot_name(name)
     if folder.is_symlink():
         raise ValueError('Invalid snapshot directory')
-    manifest = json.loads((folder / 'manifest.json').read_text())
+    manifest = read_json(folder / 'manifest.json')
     if manifest.get('id') != identifier or manifest.get('name') != name:
         raise ValueError('Invalid snapshot manifest')
     state = worker.snapshot_tree_state(identifier)
-    metadata = json.loads((folder / 'configuration' / 'metadata.json').read_text())
-    config = json.loads((folder / 'configuration' / 'compose.runtime.json').read_text())
+    metadata = read_json(folder / 'configuration' / 'metadata.json')
+    config = read_json(folder / 'configuration' / 'compose.runtime.json')
     # Native snapshot details are an inventory, not a way to read deployment secrets.
     result = {'description': state.get('descriptions', {}).get(name, manifest['description']),
               'snaptime': manifest['created'], 'hostname': metadata.get('name', ''),
@@ -121,7 +123,7 @@ def snapshot_config(identifier, node, name):
             result[service + '.port' + str(index)] = str(port.get('host_ip', '')) + ':' + str(port.get('published', '')) + ':' + str(port.get('target', '')) + '/' + str(port.get('protocol', 'tcp'))
     storage = folder / 'configuration' / 'storage.json'
     if storage.exists():
-        result['data_disk'] = str(json.loads(storage.read_text())['size_mib']) + ' MiB'
+        result['data_disk'] = str(read_json(storage)['size_mib']) + ' MiB'
     result['digest'] = hashlib.sha256(json.dumps([identifier, name, result['description']], separators=(',', ':')).encode()).hexdigest()
     return result
 
@@ -229,7 +231,10 @@ def snapshot_digest(folder):
                 result[key] = 'directory'
             elif path.is_file():
                 digest = hashlib.sha256()
-                with path.open('rb') as handle:
+                with node_runtime.anchored(path) as descriptor, os.fdopen(os.dup(descriptor), 'rb') as handle:
+                    info = os.fstat(descriptor)
+                    if not stat.S_ISREG(info.st_mode):
+                        raise ValueError('Snapshot data changed during inspection')
                     for chunk in iter(lambda: handle.read(1024 * 1024), b''):
                         digest.update(chunk)
                 result[key] = digest.hexdigest()
@@ -242,11 +247,15 @@ def snapshot_check(identifier, name):
     folder = worker.snapshot_root(identifier) / worker.snapshot_name(name)
     if folder.is_symlink() or not folder.is_dir():
         raise ValueError('Snapshot does not exist')
-    manifest = json.loads((folder / 'manifest.json').read_text())
+    manifest = read_json(folder / 'manifest.json')
     if manifest.get('version') not in (1, 2) or manifest.get('id') != identifier or manifest.get('name') != name:
         raise ValueError('Invalid snapshot manifest')
-    if worker.snapshot_digest(folder) != json.loads((folder / 'checksums.json').read_text()):
+    if worker.snapshot_digest(folder) != read_json(folder / 'checksums.json'):
         raise ValueError('Snapshot integrity check failed; nothing was restored')
+    if not (folder / 'configuration').is_dir() or (folder / 'configuration').is_symlink():
+        raise ValueError('Snapshot configuration is missing or invalid')
+    for path in (folder / 'configuration').iterdir():
+        read_text(path)
     return folder, manifest
 
 
@@ -255,11 +264,13 @@ def recover_snapshot_transaction(identifier, restoring=False):
     journal = project / 'snapshot-transaction.json'
     if not journal.exists():
         return
-    state = json.loads(journal.read_text())
+    state = read_json(journal)
     if state['action'] == 'restore':
         if not restoring:
             raise ValueError('Interrupted rollback: retry restoration of snapshot ' + state['name'])
         return
+    from .recovery import require_docker
+    require_docker()
     owned = {row['id']: row for row in worker.container_records(identifier)}
     for cid in state.get('active', []):
         if cid in owned and owned[cid]['state'] == 'paused':
@@ -283,12 +294,12 @@ def recover_snapshot_transaction(identifier, restoring=False):
     for tag in state.get('tags', []):
         if not re.fullmatch('betterdocker-snapshot/' + identifier + ':[0-9a-f]{32}', tag):
             raise ValueError('Invalid snapshot recovery image')
-        worker.run(['docker', 'image', 'rm', tag], check=False, capture_output=True)
+        worker.run(['docker', 'image', 'rm', '--force', tag], check=False, capture_output=True)
     journal.unlink()
 
 
 def snapshot_restore_network(identifier, node, configs, current, check_only=False):
-    saved = json.loads((configs / 'metadata.json').read_text())
+    saved = read_json(configs / 'metadata.json')
     if 'interfaces' in saved or 'interfaces' in current:
         from .endpoints import interfaces, validate, resolved
         from .endpoint_network import preflight
@@ -300,7 +311,7 @@ def snapshot_restore_network(identifier, node, configs, current, check_only=Fals
         journal = project / 'network-transaction.json'
         if not journal.exists():
             from .endpoint_network import re_dhcp_file
-            files = {path.name: path.read_text() for path in project.iterdir()
+            files = {path.name: read_text(path) for path in project.iterdir()
                 if path.name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf') or re_dhcp_file(path.name)}
             worker.write_json(journal, {'metadata': {key: value for key, value in current.items() if key not in ('deployment', 'digest')},
                 'files': files, 'endpoints': True})
@@ -311,7 +322,7 @@ def snapshot_restore_network(identifier, node, configs, current, check_only=Fals
     saved.setdefault('firewall', 0)
     if not all(key in saved for key in worker.NETWORK_KEYS):
         return dict(saved, **{key: current[key] for key in ('id', 'vmid', 'node', 'address') if key in current})
-    request = json.loads((configs / 'request.json').read_text())
+    request = read_json(configs / 'request.json')
     data = worker.validate(dict(request, **{key: saved[key] for key in worker.NETWORK_KEYS}, address=saved.get('cidr', '')))
     candidate = dict(saved, id=identifier, vmid=current['vmid'], node=node, interface=current['interface'], status='stopped')
     changed = any(candidate.get(key) != current.get(key) for key in worker.NETWORK_KEYS)
@@ -334,7 +345,7 @@ def snapshot_restore_network(identifier, node, configs, current, check_only=Fals
         journal = project / 'network-transaction.json'
         if not journal.exists():
             worker.write_json(journal, {'metadata': {key: value for key, value in current.items() if key not in ('deployment', 'digest')},
-                'files': {name: (project / name).read_text() if (project / name).exists() else None
+                'files': {name: read_text(project / name) if (project / name).exists() else None
                           for name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf')}})
         worker.remove_network(current)
         for name in ('dhcp-address.json', 'dhclient.leases'):
@@ -355,7 +366,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
     containers = worker.snapshot_containers(identifier, quiesced=quiesced)
     if not containers:
         raise ValueError('DCT has no containers to snapshot')
-    config = json.loads((worker.ROOT / identifier / 'compose.runtime.json').read_text())
+    config = read_json(worker.ROOT / identifier / 'compose.runtime.json')
     expected = sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values())
     counts = {name: sum((row['Config'].get('Labels') or {}).get('com.docker.compose.service') == name for row in containers) for name in config['services']}
     if len(containers) != expected or any(counts[name] != service.get('deploy', {}).get('replicas', 1) for name, service in config['services'].items()):
@@ -373,6 +384,14 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
         if any(Path(item['target']).is_relative_to(path) and Path(item['target']) != path for item in mounted):
             raise ValueError('Nested filesystems in writable mounts are not supported by snapshots')
     root = worker.snapshot_root(identifier)
+    from .retention import snapshots as retention_snapshots, preservation
+    estimate = sum(max(0, row.get('SizeRootFs', 0)) for row in containers)
+    managed = worker.storage_config(identifier)
+    point = worker.ROOT / identifier / 'storage-data'
+    estimate += sum(int(worker.capture(['du', '-sx', '-B1', entry['source']]).split()[0]) for entry in mounts
+                    if not (managed.get('native_snapshots') and Path(entry['source']) == point))
+    retention_snapshots(identifier, estimate)
+    preservation(identifier, containers)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(root.parent, 0o700)
     os.chmod(root, 0o700)
@@ -382,7 +401,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
     temporary = Path(tempfile.mkdtemp(prefix='.creating-', dir=root))
     tags = []
     journal = worker.ROOT / identifier / 'snapshot-transaction.json'
-    transaction = json.loads(journal.read_text()) if journal.exists() else {'action': 'create', 'name': name, 'active': []}
+    transaction = read_json(journal) if journal.exists() else {'action': 'create', 'name': name, 'active': []}
     transaction.update(temporary=str(temporary), tree_state=tree_state, recovery=recovery)
     worker.write_json(journal, transaction)
     native = None
@@ -406,6 +425,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             source = worker.ROOT / identifier / filename
             if source.exists():
                 shutil.copy2(source, files / filename)
+                os.chmod(files / filename, 0o600)
         public = {key: value for key, value in info.items() if key != 'deployment'}
         worker.write_json(files / 'metadata.json', public)
         data = temporary / 'data'
@@ -429,6 +449,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
             container['SnapshotTag'] = tag
         if resume:
             resume()
+        preservation(identifier)
         from .images import saved_images
         worker.run(['docker', 'image', 'save', '-o', str(temporary / 'images.tar'), *tags, *saved_images(worker.ROOT / identifier)], timeout=86400)
         os.chmod(temporary / 'images.tar', 0o600)
@@ -441,6 +462,8 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
                    'created': int(time.time()), 'description': description, 'recovery': recovery,
                    'mounts': mounts, 'size': size, 'native_storage': native})
         worker.write_json(temporary / 'checksums.json', worker.snapshot_digest(temporary))
+        from .retention import tree_bytes
+        retention_snapshots(identifier, tree_bytes(temporary))
         os.replace(temporary, final)
         state = tree_state
         state.setdefault('parents', {})[name] = state.get('current', '')
@@ -451,7 +474,7 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
         if temporary.exists():
             shutil.rmtree(temporary)
         for tag in tags:
-            worker.run(['docker', 'image', 'rm', tag], check=False, capture_output=True)
+            worker.run(['docker', 'image', 'rm', '--force', tag], check=False, capture_output=True)
         if native and not final.exists():
             worker.pve_storage(identifier, 'snapshot-delete', **native)
         journal.unlink(missing_ok=True)
@@ -461,6 +484,18 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
 
 def docker_engine(method, path, body):
     """Only the local Docker socket is used; never log Config/Env or daemon responses."""
+    if method == 'POST' and path.startswith('/containers/create'):
+        from .retention import container_logs
+        container_logs(body)
+    if method == 'POST' and path.startswith('/containers/create'):
+        from .hardening import mode, host
+        labels = body.get('Labels') or {}
+        identifier = labels.get('betterdocker.id')
+        if identifier:
+            worker.project_id(identifier)
+            host(body, node_runtime.load(), mode(worker.ROOT / identifier))
+            from .filesystem_policy import engine_image
+            engine_image(body, node_runtime.load(), mode(worker.ROOT / identifier))
     descriptors = tuple(getattr(worker._operation_fds, 'values', {}).values())
     return node_runtime.request(method, path, body, pass_fds=descriptors)
 
@@ -473,22 +508,33 @@ def snapshot_apply(identifier, node, name, check_only=False):
     existing = worker.snapshot_containers(identifier, allow_running=check_only)
     # Validate both source and target ownership before touching containers or application files.
     worker.snapshot_mounts(identifier, existing, allow_missing=True)
-    saved = json.loads((folder / 'containers.json').read_text())
+    saved = read_json(folder / 'containers.json')
     configs = folder / 'configuration'
-    if not worker.trusted_management():
-        worker.validate_delegated_config(json.loads((configs / 'compose.runtime.json').read_text()), identifier)
+    from . import hardening
+    policy = 'hardened' if 'hardened' in (hardening.mode(worker.ROOT / identifier), hardening.mode(configs)) else 'standard'
+    disk_path = configs / 'storage.json'
+    filesystem_storage = read_json(disk_path) if disk_path.exists() else {}
+    restored_config = hardening.preserved(read_json(configs / 'compose.runtime.json'), node_runtime.load(), policy, storage=filesystem_storage)
+    for container in saved:
+        body = copy.deepcopy(container['Config'])
+        body['HostConfig'] = copy.deepcopy(container['HostConfig'])
+        hardening.host(body, node_runtime.load(), policy, storage=filesystem_storage)
+        from .retention import container_logs
+        container_logs(body)
+    if not worker.trusted_management() or policy == 'hardened':
+        worker.validate_delegated_config(restored_config, identifier)
         worker.validate_delegated_containers(saved, identifier)
         for mount in manifest['mounts']:
             if mount['type'] == 'bind':
                 worker.safe_bind(mount['source'], identifier)
         if (folder / 'networks.json').exists():
-            worker.validate_delegated_networks(json.loads((folder / 'networks.json').read_text()))
-    node_runtime.check_resources(json.loads((configs / 'compose.runtime.json').read_text()))
-    worker.project_limits.check_directory(worker.ROOT / identifier, json.loads((configs / 'compose.runtime.json').read_text()))
-    worker.project_limits.check_containers(saved, worker.project_limits.load(worker.ROOT / identifier))
+            worker.validate_delegated_networks(read_json(folder / 'networks.json'))
+    node_runtime.check_resources(read_json(configs / 'compose.runtime.json'))
+    worker.project_limits.check_directory(worker.ROOT / identifier, read_json(configs / 'compose.runtime.json'))
+    worker.project_limits.check_containers(saved, worker.project_limits.load(worker.ROOT / identifier), read_json(configs / 'compose.runtime.json'))
     before_storage = worker.storage_config(identifier)
     native = manifest.get('native_storage')
-    saved_storage = json.loads((configs / 'storage.json').read_text()) if (configs / 'storage.json').exists() else {}
+    saved_storage = read_json(configs / 'storage.json') if (configs / 'storage.json').exists() else {}
     if saved_storage:
         from .disks import volume_ids
         current_volumes = volume_ids(worker.storage_config(identifier))
@@ -514,7 +560,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
             users = set(worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + entry['volume']]).split())
             if users - {row['Id'] for row in existing}:
                 raise ValueError('Snapshot volume is now shared with another project')
-    saved_networks = json.loads((folder / 'networks.json').read_text()) if (folder / 'networks.json').exists() else []
+    saved_networks = read_json(folder / 'networks.json') if (folder / 'networks.json').exists() else []
     existing_networks = set(worker.capture(['docker', 'network', 'ls', '--format', '{{.Name}}']).splitlines())
     for network in saved_networks:
         if network['Name'] not in existing_networks:
@@ -525,7 +571,9 @@ def snapshot_apply(identifier, node, name, check_only=False):
                 worker.docker_engine('POST', '/networks/create', body)
     if check_only:
         return
-    worker.run(['docker', 'image', 'load', '-i', str(folder / 'images.tar')], timeout=86400, capture_output=True)
+    result = worker.run(['docker', 'image', 'load', '-i', str(folder / 'images.tar')], timeout=86400, capture_output=True)
+    from .image_access import loaded
+    loaded(result, saved)
     if existing:
         worker.run(['docker', 'rm', *[row['Id'] for row in existing]], timeout=1800, capture_output=True)
     project = worker.ROOT / identifier
@@ -581,7 +629,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
     for entry in manifest['mounts']:
         target = Path(entry['source'])
         node_runtime.data_directory(target)
-        with node_runtime.anchored(target if node_runtime.load().rootless else target.resolve()) as fd:
+        with node_runtime.anchored(target) as fd:
             for name in os.listdir(fd):
                 if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
                     shutil.rmtree(name, dir_fd=fd)
@@ -594,7 +642,11 @@ def snapshot_apply(identifier, node, name, check_only=False):
             shutil.copy2(source, target)
         else:
             target.unlink(missing_ok=True)
-    metadata.update(status='stopped')
+    worker.write_json(project / hardening.FILE, {'mode': policy})
+    canonical = read_json(project / 'compose.runtime.json')
+    canonical = hardening.preserved(canonical, node_runtime.load(), policy)
+    worker.write_json(project / 'compose.runtime.json', canonical)
+    metadata.update(status='stopped', security_policy=policy)
     metadata.pop('network_resume', None)
     worker.write_json(worker.METADATA / (identifier + '.json'), metadata)
     worker.rebind_runtime(project, metadata['address'])
@@ -604,7 +656,7 @@ def snapshot_apply(identifier, node, name, check_only=False):
         body = preserved_body(container, container['SnapshotImage'])
         if saved_storage:
             service_name = (container['Config'].get('Labels') or {}).get('com.docker.compose.service')
-            runtime_config = json.loads((project / 'compose.runtime.json').read_text())
+            runtime_config = read_json(project / 'compose.runtime.json')
             configured = {mount['target']: mount for mount in runtime_config['services'][service_name].get('volumes', [])}
             # Data migration can be pending while stopped: use the saved runtime disk mapping.
             binds = body['HostConfig'].get('Binds') or []
@@ -617,20 +669,20 @@ def snapshot_apply(identifier, node, name, check_only=False):
             body['HostConfig']['Binds'] = binds
         for bindings in (body['HostConfig'].get('PortBindings') or {}).values():
             for binding in bindings or []:
-                if binding.get('HostIp') == current.get('address') or binding.get('HostIp') == json.loads((configs / 'metadata.json').read_text()).get('address'):
+                if binding.get('HostIp') == current.get('address') or binding.get('HostIp') == read_json(configs / 'metadata.json').get('address'):
                     binding['HostIp'] = metadata['address']
         if 'interfaces' in metadata and not node_runtime.load().rootless:
             from .endpoints import port_bindings
             service = body['Labels']['com.docker.compose.service']
-            runtime = json.loads((project / 'compose.runtime.json').read_text())
+            runtime = read_json(project / 'compose.runtime.json')
             body['HostConfig']['PortBindings'] = port_bindings(runtime['services'][service].get('ports', []))
         result = worker.docker_engine('POST', '/containers/create?name=' + quote(container['Name'].lstrip('/'), safe=''), body)
         created.append(result['Id'])
     for container in saved:
         if container.get('SnapshotTag'):
-            worker.run(['docker', 'image', 'rm', container['SnapshotTag']], check=False, capture_output=True)
+            worker.run(['docker', 'image', 'rm', '--force', container['SnapshotTag']], check=False, capture_output=True)
     worker.write_json(project / 'snapshot-restored.json', {'name': name, 'containers': created, 'address': metadata['address'],
-        'addresses': sorted({p['host_ip'] for service in json.loads((project / 'compose.runtime.json').read_text())['services'].values() for p in service.get('ports', [])})})
+        'addresses': sorted({p['host_ip'] for service in read_json(project / 'compose.runtime.json')['services'].values() for p in service.get('ports', [])})})
     state = worker.snapshot_tree_state(identifier)
     state['current'] = name
     worker.snapshot_tree_write(identifier, state)
@@ -643,6 +695,10 @@ def snapshot_apply(identifier, node, name, check_only=False):
         replaced_disk.unlink()
 
 
+from .operation_capacity import bounded
+
+
+@bounded
 def project_snapshot(identifier, node, verb, name, description=''):
     worker.snapshot_name(name)
     with worker.locked(identifier):
@@ -652,9 +708,13 @@ def project_snapshot(identifier, node, verb, name, description=''):
         if verb == 'restore':
             worker.recover_network_transaction(identifier, node)
         journal = worker.ROOT / identifier / 'snapshot-transaction.json'
-        if journal.exists() and json.loads(journal.read_text()).get('action') == 'restore' and json.loads(journal.read_text())['name'] != name:
+        if journal.exists() and read_json(journal).get('action') == 'restore' and read_json(journal)['name'] != name:
             raise ValueError('Retry the interrupted rollback using its original snapshot')
         if verb == 'create':
+            from .space import snapshot
+            snapshot(identifier)
+            from .retention import snapshots as retention_snapshots
+            retention_snapshots(identifier)
             worker.write_json(journal, {'action': 'create', 'name': name, 'active': [row['id'] for row in worker.container_records(identifier) if row['state'] == 'running']})
             try:
                 with worker.snapshot_quiesce(identifier) as resume:
@@ -665,7 +725,7 @@ def project_snapshot(identifier, node, verb, name, description=''):
             folder = worker.snapshot_root(identifier) / name
             if folder.is_symlink() or not (folder / 'manifest.json').exists():
                 raise ValueError('Snapshot does not exist')
-            manifest = json.loads((folder / 'manifest.json').read_text())
+            manifest = read_json(folder / 'manifest.json')
             if manifest.get('native_storage'):
                 worker.pve_storage(identifier, 'snapshot-delete', **manifest['native_storage'])
             state = worker.snapshot_tree_state(identifier)
@@ -683,6 +743,8 @@ def project_snapshot(identifier, node, verb, name, description=''):
         elif verb == 'restore':
             # LXC validates the target, stops the guest, then rolls back without another snapshot.
             worker.snapshot_apply(identifier, node, name, check_only=True)
+            from .space import restore as peak_restore
+            peak_restore(identifier, worker.snapshot_root(identifier) / name, existing=True)
             records = worker.container_records(identifier)
             for row in records:
                 if row['state'] == 'paused':

@@ -1,4 +1,5 @@
 """Delegated deployment policy."""
+from .secure_io import read_json
 import json
 import os
 import re
@@ -6,36 +7,36 @@ from pathlib import Path
 import runtime as node_runtime
 import service_security
 from .paths import control_path
+from .hardening import CAPS, capabilities as capability_names
 
 DELEGATED_SERVICE_KEYS = frozenset('image command entrypoint environment env_file ports expose volumes networks labels restart '
                   'depends_on healthcheck user working_dir hostname domainname stop_signal stop_grace_period '
                   'init tty stdin_open read_only tmpfs cap_drop cpus cpu_shares cpu_period cpu_quota '
                   'mem_limit mem_reservation memswap_limit mem_swappiness pids_limit ulimits dns dns_search '
                   'dns_opt shm_size deploy logging pull_policy platform attach container_name name '
-                  'blkio_config oom_score_adj oom_kill_disable storage_opt security_opt'.split())
+                  'blkio_config oom_score_adj oom_kill_disable storage_opt security_opt cap_add'.split())
 
 LOG_DEFAULTS = {'max-size': '10m', 'max-file': '3'}
 
 
 def apply_log_defaults(config):
     """Bound local logs without changing explicitly selected drivers or limits."""
+    from .retention import policy, logs
+    chosen = policy()
+    defaults = {'max-size': '10m' if chosen['log_file_bytes'] == 10 * 1024 ** 2 else str(chosen['log_file_bytes']), 'max-file': str(chosen['log_files'])}
     for service in config.get('services', {}).values():
         logging = service.setdefault('logging', {})
         if logging.get('driver', 'json-file') in ('json-file', 'local'):
             logging.setdefault('driver', 'json-file')
             options = logging.setdefault('options', {})
-            for key, value in LOG_DEFAULTS.items():
+            for key, value in defaults.items():
                 options.setdefault(key, value)
+            logs(options)
 
 
 def validate_log_limits(options):
-    size = str(options.get('max-size', LOG_DEFAULTS['max-size']))
-    match = re.fullmatch(r'([0-9]+)([kmg]?)', size, re.I)
-    if not match or not 0 < int(match[1]) * 1024 ** ('', 'k', 'm', 'g').index(match[2].lower()) <= 100 * 1024 * 1024:
-        raise ValueError('Delegated logs require max-size between 1 byte and 100 MiB')
-    count = str(options.get('max-file', LOG_DEFAULTS['max-file']))
-    if not re.fullmatch(r'[0-9]+', count) or not 1 <= int(count) <= 10:
-        raise ValueError('Delegated logs require max-file between 1 and 10')
+    from .retention import logs
+    logs(options)
 
 
 def validate_oom(disabled, score):
@@ -97,11 +98,8 @@ def validate_bind_layout(paths, identifier):
 
 def validate_delegated_source(source, identifier=None, directory=None):
     # Check file-loading directives before Compose can read anything as host root.
-    import yaml
-    try:
-        value = yaml.safe_load(source)
-    except (yaml.YAMLError, RecursionError):
-        raise ValueError('Invalid Compose configuration') from None
+    from .parsing import parse
+    value = parse(source)
     if not isinstance(value, dict) or set(value) - {'name', 'version', 'services', 'volumes', 'networks'} - {k for k in value if isinstance(k, str) and k.startswith('x-')}:
         raise ValueError('Delegated Compose cannot include external files, secrets or configs')
     services = value.get('services')
@@ -115,6 +113,8 @@ def validate_delegated_source(source, identifier=None, directory=None):
         for key in ('extends', 'build', 'label_file', 'secrets', 'configs', 'credential_spec', 'develop', 'provider', 'use_api_socket'):
             if key in service:
                 raise ValueError('Delegated Compose does not support ' + key)
+        if capability_names(service.get('cap_add') or []) - CAPS:
+            raise ValueError('Capabilities require node administrator access')
         files = service.get('env_file', [])
         files = [files] if isinstance(files, str) else files
         if not isinstance(files, list) or any(item != '.env' for item in files):
@@ -147,6 +147,13 @@ def validate_delegated_config(config, identifier):
     for service in config.get('services', {}).values():
         if not isinstance(service, dict) or set(service) - DELEGATED_SERVICE_KEYS:
             raise ValueError('Delegated configuration contains unsafe or unsupported service options')
+        if service.get('image'):
+            from .image_access import reference
+            reference(service['image'], identifier)
+        if capability_names(service.get('cap_add') or []) - CAPS:
+            raise ValueError('Delegated capabilities exceed the hardened allowlist')
+        if service.get('cap_add') and 'ALL' not in (service.get('cap_drop') or []):
+            raise ValueError('Added capabilities require a hardened baseline')
         service_security.delegated(service_security.options(service))
         validate_oom(service.get('oom_kill_disable', False), service.get('oom_score_adj', 0))
         if service.get('container_name') and not service['container_name'].startswith('bd-' + identifier + '-'):
@@ -193,9 +200,12 @@ def validate_delegated_containers(containers, identifier):
                           if mount.get('Type') == 'bind'], identifier)
     for container in containers:
         host = container.get('HostConfig') or {}
+        from .hardening import CAPS, capabilities as capability_names
+        if capability_names(host.get('CapAdd') or []) - CAPS or (host.get('CapAdd') and 'ALL' not in capability_names(host.get('CapDrop') or [])):
+            raise ValueError('Container capabilities require hardened policy')
         service_security.delegated(host.get('SecurityOpt') or [])
         validate_oom(host.get('OomKillDisable', False), host.get('OomScoreAdj', 0))
-        for key in ('Privileged', 'CapAdd', 'Devices', 'DeviceRequests', 'DeviceCgroupRules',
+        for key in ('Privileged', 'Devices', 'DeviceRequests', 'DeviceCgroupRules',
                     'VolumesFrom', 'CgroupParent', 'Cgroup', 'Sysctls', 'ExtraHosts'):
             if host.get(key):
                 raise ValueError('This deployment requires node administrator access: ' + key)
@@ -250,7 +260,7 @@ def validate_delegated_networks(networks):
 def delegated_access(identifier, node):
     worker.detail(identifier, node)
     directory = worker.ROOT / worker.project_id(identifier)
-    worker.validate_delegated_config(json.loads((directory / 'compose.runtime.json').read_text()), identifier)
+    worker.validate_delegated_config(read_json(directory / 'compose.runtime.json'), identifier)
     records = worker.container_records(identifier)
     if records:
         containers = json.loads(worker.capture(['docker', 'inspect', *[c['id'] for c in records]]))

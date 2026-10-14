@@ -25,7 +25,7 @@ class NetworkTests(unittest.TestCase):
                 worker.write_json(staged / (IDENTIFIER + '.json'), dict(INFO, vmid=vmid, node='pve'))
                 with patch.object(worker, 'METADATA', metadata), patch.object(worker, 'ROOT', projects), \
                      patch.object(worker, 'current_node', return_value='pve'), \
-                     patch('dctlib.network.os.fstat', return_value=SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o600)):
+                     patch('dctlib.network.os.fstat', return_value=SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o600, st_size=10000)):
                     if vmid != 100:
                         with self.assertRaisesRegex(ValueError, 'ownership differs'):
                             dhcp_info(IDENTIFIER)

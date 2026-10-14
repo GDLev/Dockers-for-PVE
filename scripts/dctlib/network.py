@@ -1,4 +1,5 @@
 """Published endpoints, DHCP and network recovery."""
+from .secure_io import read_json, read_text
 import ipaddress
 import json
 import os
@@ -116,7 +117,7 @@ def dhcp_paths(info):
 def lease(info):
     path, _ = worker.dhcp_paths(info)
     try:
-        data = json.loads(path.read_text())
+        data = read_json(path)
         if data.get('expires', 0) > time.time() and data.get('interface') == info['interface']:
             return data
     except (OSError, ValueError):
@@ -144,20 +145,25 @@ def start_dhcp(info):
 
 def dhcp_info(identifier):
     """Read an incoming migration's private config until ownership is committed."""
-    info = json.loads((worker.METADATA / (identifier + '.json')).read_text())
+    info = read_json(worker.METADATA / (identifier + '.json'))
     token = info.get('migration')
     if info['node'] != worker.current_node() and token:
         token = worker.project_id(token)
         path = worker.ROOT.parent / 'transfers' / token / 'metadata' / (identifier + '.json')
         # Transfer directories and their metadata are root-owned, private files.
-        with node_runtime.anchored(path.parent) as fd:
+        from .secure_io import anchored, structure
+        with anchored(path.parent, directory=True) as fd:
             import stat
             descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
             with os.fdopen(descriptor) as handle:
                 owner = os.fstat(handle.fileno())
                 if not stat.S_ISREG(owner.st_mode) or owner.st_uid != 0 or owner.st_mode & 0o022:
                     raise ValueError('Invalid incoming DHCP configuration')
-                incoming = json.load(handle)
+                from .secure_io import MAX_JSON
+                raw = handle.read(MAX_JSON + 1)
+                if len(raw) > MAX_JSON:
+                    raise ValueError('Incoming DHCP configuration exceeds its size limit')
+                incoming = structure(json.loads(raw))
         if incoming.get('id') != identifier or incoming.get('vmid') != info['vmid'] or incoming.get('node') != worker.current_node():
             raise ValueError('Incoming DHCP ownership differs from migration')
         info = incoming
@@ -255,11 +261,11 @@ def rebind_runtime(directory, address):
     if (directory / 'storage.json').exists():
         worker.storage_mount(directory.name)
     metadata = worker.METADATA / (directory.name + '.json')
-    info = json.loads(metadata.read_text()) if metadata.exists() else {}
+    info = read_json(metadata) if metadata.exists() else {}
     if (not address or address == '0.0.0.0') and 'interfaces' not in info:
         raise ValueError('A dedicated address must be acquired before deployment')
     path = directory / 'compose.runtime.json'
-    config = json.loads(path.read_text())
+    config = read_json(path)
     if (directory / 'storage.json').exists():
         worker.apply_storage(config, directory.name)
     for service in config['services'].values():
@@ -283,7 +289,7 @@ def save_network_resume(path, instances):
 
 
 def read_network_resume(path):
-    state = json.loads(path.read_text())
+    state = read_json(path)
     return state['instances'] if isinstance(state, dict) else state
 
 
@@ -350,7 +356,7 @@ def sync_dhcp(info):
     directory = worker.ROOT / info['id']
     marker = directory / 'network-resume.json'
     if marker.exists():
-        state = json.loads(marker.read_text())
+        state = read_json(marker)
         if isinstance(state, dict) and state['boot_id'] != worker.network_boot_id():
             marker.unlink()
             info.pop('network_resume', None)
@@ -434,7 +440,7 @@ def finish_network_start(info):
 
 def load_pending_network(directory):
     path = directory / 'pending-network.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return read_json(path) if path.exists() else {}
 
 
 def save_pending_network(directory, values):
@@ -459,16 +465,15 @@ def recover_network_transaction(identifier, node):
         return False
     if node != worker.current_node():
         raise ValueError('Project belongs to another node')
-    saved = json.loads(journal.read_text())
-    current = json.loads((worker.METADATA / (identifier + '.json')).read_text())
+    saved = read_json(journal)
+    current = read_json(worker.METADATA / (identifier + '.json'))
     if saved['metadata']['id'] != identifier or saved['metadata']['node'] != node:
         raise ValueError('Invalid network recovery journal')
     if current['node'] != node or current['id'] != identifier:
         raise ValueError('Project belongs to another node')
-    # Address restoration runs before Docker at boot. An inactive daemon has no running containers.
-    daemon = node_runtime.service('is-active', runner=worker.run)
-    if daemon.returncode == 0:
-        worker.require_stopped(worker.container_records(identifier))
+    from .recovery import require_docker
+    require_docker()
+    worker.require_stopped(worker.container_records(identifier))
     worker.remove_network(current)
     if saved.get('endpoints'):
         from .endpoint_network import re_dhcp_file
@@ -507,7 +512,7 @@ def network_candidate(identifier, node, info, values):
     if any(requested[key] != before[key] for key in NETWORK_KEYS if key not in ('mtu', 'firewall')):
         for manifest in worker.snapshot_root(identifier).glob('*/manifest.json'):
             captured = manifest.parent / 'configuration' / 'metadata.json'
-            if not captured.exists() or not all(key in json.loads(captured.read_text()) for key in NETWORK_KEYS if key != 'firewall'):
+            if not captured.exists() or not all(key in read_json(captured) for key in NETWORK_KEYS if key != 'firewall'):
                 raise ValueError('Remove snapshots without a restorable network configuration before changing the endpoint')
     _, subnets = worker.bridge_addresses(data['bridge'])
     if data['ipv4mode'] == 'static':
@@ -541,7 +546,7 @@ def apply_network(identifier, node, info, values):
     if all(requested[key] == before[key] for key in NETWORK_KEYS if key != 'firewall'):
         metadata = worker.METADATA / (identifier + '.json')
         request = directory / 'request.json'
-        saved_metadata, saved_request = metadata.read_text(), request.read_text()
+        saved_metadata, saved_request = read_text(metadata), read_text(request)
         try:
             candidate = json.loads(saved_metadata)
             candidate['firewall'] = requested['firewall']
@@ -561,7 +566,7 @@ def apply_network(identifier, node, info, values):
         return
     # The private journal is written before releasing the old link or DHCP client.
     saved = {'metadata': {key: value for key, value in info.items() if key not in ('deployment', 'digest')},
-             'files': {name: (directory / name).read_text() if (directory / name).exists() else None
+             'files': {name: read_text(directory / name) if (directory / name).exists() else None
                        for name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.leases', 'dhclient.conf')}}
     journal = directory / 'network-transaction.json'
     worker.write_json(journal, saved)
@@ -604,7 +609,7 @@ def project_network(identifier, node, values, digest=None):
         from .endpoint_network import update
         return update(identifier, node, values, digest)
     metadata = worker.METADATA / (identifier + '.json')
-    if metadata.exists() and 'interfaces' in json.loads(metadata.read_text()):
+    if metadata.exists() and 'interfaces' in read_json(metadata):
         from .endpoint_network import update
         return update(identifier, node, values, digest)
     if not isinstance(values, dict) or set(values) - set((*NETWORK_KEYS, 'revert')):

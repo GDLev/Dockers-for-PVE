@@ -1,4 +1,5 @@
 """Learn IPv6 endpoints without allowing RA or DHCP to change host routing."""
+from .secure_io import read_json
 import ipaddress
 import errno
 import json
@@ -91,7 +92,7 @@ def discover(info, address=True):
 def lease(info, wait=False):
     from . import projects as w
     path = cache(info)
-    saved = json.loads(path.read_text()) if path.exists() else {}
+    saved = read_json(path) if path.exists() else {}
     boot = w.network_boot_id()
     if saved.get('boot') != boot or saved.get('hwaddr') != info['hwaddr'] or saved.get('mode') != info['ipv6mode']:
         saved = {}
@@ -107,7 +108,7 @@ def lease(info, wait=False):
             if time.monotonic() >= deadline:
                 break
             time.sleep(.2)
-            saved = json.loads(path.read_text()) if path.exists() else {}
+            saved = read_json(path) if path.exists() else {}
             if saved.get('boot') != boot or saved.get('hwaddr') != info['hwaddr'] or saved.get('mode') != info['ipv6mode']:
                 saved = {}
     if saved.get('expires', 0) > time.time():
@@ -166,7 +167,7 @@ def event(environment):
         if not 0 <= prefix <= 128:
             raise ValueError('Invalid DHCPv6 prefix length')
         path = cache(endpoint)
-        previous = json.loads(path.read_text()) if path.exists() else {}
+        previous = read_json(path) if path.exists() else {}
         router = {key: previous[key] for key in ('gw6', 'router_expires', 'router_checked') if key in previous} if (
             previous.get('boot') == w.network_boot_id() and previous.get('hwaddr') == endpoint['hwaddr']) else {}
         w.write_json(path, dict(router, **{'cidr6': str(address) + '/' + str(prefix), 'mode': 'dhcp',

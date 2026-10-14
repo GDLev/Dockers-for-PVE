@@ -9,14 +9,14 @@ BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$BUILD_DIR"' EXIT
 chmod 0755 "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/DEBIAN" "$BUILD_DIR/opt/betterdocker" "$OUTPUT_DIR"
-cp -a "$SOURCE_DIR/frontend" "$SOURCE_DIR/backend" "$SOURCE_DIR/scripts" "$SOURCE_DIR/systemd" "$SOURCE_DIR/start.sh" "$SOURCE_DIR/install.sh" "$BUILD_DIR/opt/betterdocker/"
+cp -a "$SOURCE_DIR/assets" "$SOURCE_DIR/frontend" "$SOURCE_DIR/backend" "$SOURCE_DIR/scripts" "$SOURCE_DIR/systemd" "$SOURCE_DIR/start.sh" "$SOURCE_DIR/install.sh" "$BUILD_DIR/opt/betterdocker/"
 find "$BUILD_DIR/opt/betterdocker" -type d -name __pycache__ -prune -exec rm -rf {} +
 cat > "$BUILD_DIR/DEBIAN/control" <<'CONTROL'
 Package: proxmox-betterdockers
 Version: @VERSION@
 Architecture: all
 Maintainer: BetterDockers contributors
-Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, e2fsprogs, util-linux, rsync, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2, uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
+Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, apparmor, e2fsprogs, util-linux, rsync, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2, uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
 Recommends: docker-ce-rootless-extras
 Description: Native Proxmox VE interface for host Docker Compose projects
 CONTROL

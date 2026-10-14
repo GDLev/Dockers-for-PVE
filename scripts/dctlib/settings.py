@@ -1,4 +1,5 @@
 """Service settings and pending changes."""
+from .secure_io import read_json, read_text
 import ipaddress
 import json
 import os
@@ -9,7 +10,7 @@ import service_security
 
 def load_settings(directory):
     path = directory / 'settings.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return read_json(path) if path.exists() else {}
 
 
 def validate_settings(value):
@@ -104,7 +105,7 @@ def service_values(service):
 
 def load_pending(directory):
     path = directory / 'pending.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return read_json(path) if path.exists() else {}
 
 
 def save_pending(directory, pending):
@@ -119,7 +120,7 @@ def save_pending(directory, pending):
 def pending_settings(identifier, node, service):
     worker.detail(identifier, node)
     directory = worker.ROOT / identifier
-    config = json.loads((directory / 'compose.runtime.json').read_text())
+    config = read_json(directory / 'compose.runtime.json')
     if service not in config['services']:
         raise ValueError('Unknown Compose service')
     values = worker.load_settings(directory).get(service, worker.service_values(config['services'][service]))
@@ -135,7 +136,7 @@ def revert_settings(identifier, node, service, keys, digest=None):
         worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         directory = worker.ROOT / identifier
-        config = json.loads((directory / 'compose.runtime.json').read_text())
+        config = read_json(directory / 'compose.runtime.json')
         if service not in config['services']:
             raise ValueError('Unknown Compose service')
         values = worker.load_settings(directory).get(service, worker.service_values(config['services'][service]))
@@ -155,7 +156,7 @@ def revert_settings(identifier, node, service, keys, digest=None):
 
 
 def management(identifier, node, shared_stats=None):
-    public = json.loads((worker.METADATA / (worker.project_id(identifier) + '.json')).read_text())
+    public = read_json(worker.METADATA / (worker.project_id(identifier) + '.json'))
     if public.get('ha_recovery') and public['node'] == node:
         return dict(public, status='stopped', containers=[], services=[], stats=[], metrics={}, storage={}, operation=worker.operation_state(identifier))
     info = worker.detail(identifier, node)
@@ -164,13 +165,16 @@ def management(identifier, node, shared_stats=None):
     info['has_snapshots'] = snapshots.exists() and any(snapshots.iterdir())
     info['network_restored'] = (worker.ROOT / identifier / 'snapshot-restored.json').exists()
     directory = worker.ROOT / identifier
-    config = json.loads((directory / 'compose.runtime.json').read_text())
+    config = read_json(directory / 'compose.runtime.json')
     settings = worker.load_settings(directory)
     info['security'] = service_security.availability(node_runtime.load())
+    from .hardening import mode
+    info['security_policy'] = mode(directory)
+    info['security']['mandatory'] = info['security_policy'] == 'hardened'
     from .images import state as image_state
     info['image_update'] = image_state(directory)
     image_path = directory / 'images.json'
-    image_overrides = json.loads(image_path.read_text()) if image_path.exists() else {}
+    image_overrides = read_json(image_path) if image_path.exists() else {}
     info['services'] = []
     for name, service in config['services'].items():
         values = worker.service_values(service)
@@ -291,21 +295,28 @@ def authorize_config_keys(keys):
 
 def service_settings(identifier, node, service, values, digest=None):
     worker.validate_settings(values)
-    if values.get('disk') and not worker.rootfs_quota_support()['supported']:
-        raise ValueError('Container disk limit requires overlay2 on XFS with project quotas; volumes use a separate data disk')
+    if values.get('disk'):
+        quota = worker.rootfs_quota_support()
+        if not quota['supported']:
+            raise ValueError(quota.get('reason') or 'Container disk limit is not supported by this runtime')
     with worker.locked(identifier):
         worker.detail(identifier, node)
         worker.assert_configuration_digest(identifier, node, digest)
         rows = worker.pending_settings(identifier, node, service)
         effective = {row['key']: row.get('pending', row['value']) for row in rows}
         proposed = worker.validate_settings(dict(effective, **values))
-        candidate = json.loads((worker.ROOT / identifier / 'compose.runtime.json').read_text())
+        from .hardening import settings as check_policy
+        check_policy(worker.ROOT / identifier, values)
+        candidate = read_json(worker.ROOT / identifier / 'compose.runtime.json')
         worker.apply_settings(candidate, {service: proposed})
         worker.project_limits.check_directory(worker.ROOT / identifier, candidate)
         # Include every queued service change when reserving the project budget.
-        worker.apply_settings(candidate, worker.load_pending(worker.ROOT / identifier))
+        candidate = worker.project_limits.pending_config(candidate, worker.ROOT / identifier)
         worker.apply_settings(candidate, {service: proposed})
         worker.project_limits.check_directory(worker.ROOT / identifier, candidate)
+        from . import hardening
+        worker.project_limits.preflight(identifier, candidate, service=service)
+        hardening.apply(candidate, node_runtime.load(), hardening.mode(worker.ROOT / identifier))
         node_runtime.check_resources(candidate)
         if not worker.trusted_management():
             worker.validate_delegated_config(candidate, identifier)
@@ -319,13 +330,18 @@ def _service_settings(identifier, node, service, values):
     """Caller holds the worker lock. Only active settings enter the runtime file."""
     directory = worker.ROOT / identifier
     runtime = directory / 'compose.runtime.json'
-    original = runtime.read_text()
+    from .hardening import settings as check_policy
+    check_policy(directory, values)
+    original = read_text(runtime)
     config = json.loads(original)
     if service not in config['services']:
         raise ValueError('Unknown Compose service')
     candidate = json.loads(original)
     worker.apply_settings(candidate, {service: values})
+    from . import hardening
+    hardening.apply(candidate, node_runtime.load(), hardening.mode(directory))
     worker.project_limits.check_directory(directory, candidate)
+    worker.project_limits.preflight(identifier, candidate, service=service)
     settings = worker.load_settings(directory)
     current = dict(worker.service_values(config['services'][service]), **settings.get(service, {}))
     pending = worker.load_pending(directory)
@@ -362,6 +378,7 @@ def _service_settings(identifier, node, service, values):
         if immediate != current:
             worker.apply_settings(config, {service: immediate})
             arguments = worker.live_settings_arguments(before, config['services'][service])
+            worker.project_limits.preflight(identifier, config, service=service)
             # Docker errors leave the requested changes pending and current state intact.
             worker.update_live_containers(containers, arguments)
             worker.write_json(runtime, config)
@@ -374,6 +391,7 @@ def _service_settings(identifier, node, service, values):
         pending[service] = changed
         worker.save_pending(directory, pending)
         worker.apply_settings(config, {service: values})
+        hardening.apply(config, node_runtime.load(), hardening.mode(directory))
         settings[service] = values
         pending.pop(service, None)
         if containers:
@@ -394,11 +412,14 @@ def _service_settings(identifier, node, service, values):
 
 def apply_pending_settings(identifier, node, service=None):
     directory = worker.ROOT / identifier
+    worker.project_limits.preflight(identifier)
     for name, changes in list(worker.load_pending(directory).items()):
         if service is not None and name != service:
             continue
+        from .hardening import settings as check_policy
+        check_policy(directory, changes)
         worker.require_stopped([c for c in worker.container_records(identifier) if c['service'] == name])
-        config = json.loads((directory / 'compose.runtime.json').read_text())
+        config = read_json(directory / 'compose.runtime.json')
         if name not in config['services']:
             raise ValueError('Unknown Compose service in pending settings')
         current = dict(worker.service_values(config['services'][name]), **worker.load_settings(directory).get(name, {}))

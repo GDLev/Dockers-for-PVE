@@ -89,11 +89,11 @@ sub prepare {
 }
 sub stop_vm {
     my ($self, $task, $vmid) = @_;
-    $self->helper('quiesce', $self->identifier($vmid), $self->{node}, 'stop');
+    $self->helper('quiesce', $self->identifier($vmid), $self->{node}, 'stop', $task->{dct_state});
 }
 sub suspend_vm {
     my ($self, $task, $vmid) = @_;
-    $self->helper('quiesce', $self->identifier($vmid), $self->{node}, 'suspend');
+    $self->helper('quiesce', $self->identifier($vmid), $self->{node}, 'suspend', $task->{dct_state});
     $task->{dct_suspended} = 1;
 }
 sub start_vm {

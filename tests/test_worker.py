@@ -20,6 +20,23 @@ def module(name):
 
 sys.path.insert(0, str(ROOT / 'scripts'))
 worker = importlib.import_module('dctlib.projects')
+# The developer's macOS framework Python is group-managed. Linux production
+# executable permissions are exercised by the live suite; retain all other
+# ownership/path checks in local fixtures.
+if sys.platform == 'darwin':
+    import contextlib
+    import os
+    from dctlib import process
+    original_anchor = process.anchored
+    @contextlib.contextmanager
+    def developer_interpreter(path, **kwargs):
+        if Path(path) == Path(sys.executable).resolve():
+            fd = os.open(path, os.O_RDONLY)
+            try: yield fd
+            finally: os.close(fd)
+        else:
+            with original_anchor(path, **kwargs) as fd: yield fd
+    process.anchored = developer_interpreter
 patcher = module('patch')
 BASE = {'name': 'web', 'mode': 'compose', 'compose': 'services:\n  web:\n    image: nginx',
         'address': '192.0.2.50', 'bridge': 'vmbr0'}

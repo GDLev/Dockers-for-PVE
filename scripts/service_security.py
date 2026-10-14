@@ -93,5 +93,5 @@ def check(config, selected):
 def delegated(opts):
     # Only protections that narrow privileges are available to guest administrators.
     if any(o not in ('no-new-privileges', 'no-new-privileges:true', 'no-new-privileges=true',
-                     'apparmor:docker-default', 'apparmor=docker-default') for o in opts):
+                     'apparmor:docker-default', 'apparmor=docker-default', 'apparmor:betterdocker-default', 'apparmor=betterdocker-default') for o in opts):
         raise ValueError('Custom or disabled security profiles require node administrator access')

@@ -1,4 +1,5 @@
 """Start preserved instances in Compose dependency order without recreating them."""
+from .secure_io import read_json
 import json
 import sys
 import time
@@ -32,7 +33,10 @@ def order(services, selected=None):
 
 def start(identifier, selected=None, timeout=180):
     from . import projects as w
-    config = json.loads((w.ROOT / identifier / 'compose.runtime.json').read_text())
+    from .hardening import check_start
+    check_start(identifier)
+    w.project_limits.preflight(identifier)
+    config = read_json(w.ROOT / identifier / 'compose.runtime.json')
     services = config['services']
     ordered = order(services, [selected] if selected else None)
     records = w.container_records(identifier)

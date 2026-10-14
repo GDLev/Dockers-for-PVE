@@ -36,23 +36,62 @@ main() {
         "${BETTERDOCKER_SOURCE_URL:-$release_url/$archive_name}" --max-filesize 134217728 \
         --output "$project_dir/project.tar.gz" </dev/null
     python3 - "$project_dir/project.tar.gz" "$expected_sha" "$project_dir" <<'PY'
-import hashlib, pathlib, sys, tarfile
+import ctypes, hashlib, pathlib, sys, tarfile, os, pwd, resource
 archive, expected, directory = sys.argv[1:]
-with open(archive, 'rb') as handle:
-    if hashlib.file_digest(handle, 'sha256').hexdigest() != expected.lower():
-        raise SystemExit('Release checksum mismatch. Installation stopped.')
-with tarfile.open(archive) as handle:
-    members = handle.getmembers()
-    prefixes = {pathlib.PurePosixPath(member.name).parts[0] for member in members}
-    if len(prefixes) != 1 or any(not (member.isfile() or member.isdir()) or pathlib.PurePosixPath(member.name).is_absolute()
-            or '..' in pathlib.PurePosixPath(member.name).parts for member in members):
-        raise SystemExit('Unsafe release archive. Installation stopped.')
-    total = sum(member.size for member in members)
-    if total > 256 * 1024 * 1024 or len(members) > 10000:
-        raise SystemExit('Release archive is too large.')
-    for member in members:
-        member.name = str(pathlib.PurePosixPath(*pathlib.PurePosixPath(member.name).parts[1:]))
-    handle.extractall(directory, members=members, filter='data')
+source = open(archive, 'rb')
+if hashlib.file_digest(source, 'sha256').hexdigest() != expected.lower():
+    raise SystemExit('Release checksum mismatch. Installation stopped.')
+source.seek(0)
+account = pwd.getpwnam('nobody')
+output = pathlib.Path(directory) / 'verified-source'
+output.mkdir(mode=0o700)
+os.chown(output, account.pw_uid, account.pw_gid)
+pid = os.fork()
+if pid:
+    _, status = os.waitpid(pid, 0)
+    if status:
+        raise SystemExit('Release archive inspection or extraction failed.')
+    for base, dirs, files in os.walk(output, followlinks=False):
+        os.chown(base, 0, 0)
+        for name in dirs + files:
+            os.chown(os.path.join(base, name), 0, 0, follow_symlinks=False)
+    for item in output.iterdir():
+        item.rename(pathlib.Path(directory) / item.name)
+    output.rmdir()
+    raise SystemExit(0)
+output_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+os.setgroups([]); os.setgid(account.pw_gid); os.setuid(account.pw_uid)
+if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) or ctypes.CDLL(None).prctl(38, 1, 0, 0, 0):
+    raise SystemExit('Cannot isolate release archive reader.')
+resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)
+resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+with tarfile.open(fileobj=source) as handle:
+    members = []; names = set(); prefix = None; total = 0
+    for member in handle:
+        path = pathlib.PurePosixPath(member.name)
+        if not path.parts or not (member.isfile() or member.isdir()) or path.is_absolute() or '..' in path.parts or '\x00' in member.name:
+            raise SystemExit('Unsafe release archive. Installation stopped.')
+        if prefix is None:
+            prefix = path.parts[0]
+        if path.parts[0] != prefix or len(path.parts) == 1 and not member.isdir():
+            raise SystemExit('Release archive must contain one project directory.')
+        if str(path) in names or len(member.name.encode()) > 4096:
+            raise SystemExit('Duplicate or oversized release path.')
+        total += member.size
+        if member.size < 0 or total > 256 * 1024 * 1024 or len(members) >= 10000:
+            raise SystemExit('Release archive is too large.')
+        names.add(str(path))
+        member.name = str(pathlib.PurePosixPath(*path.parts[1:]))
+        member.uid = member.gid = 0
+        member.mode = 0o755 if member.isdir() or member.mode & 0o111 else 0o644
+        member.pax_headers = {}
+        members.append(member)
+    if not members:
+        raise SystemExit('Release archive is empty.')
+    # Members now contain only sanitized regular files and directories.
+    # Keep the root-only parent inaccessible to other nobody processes.
+    # The data filter resolves that private parent and cannot use this FD.
+    handle.extractall('/proc/self/fd/' + str(output_fd), members=members, filter='fully_trusted')
 PY
     [[ -f "$project_dir/start.sh" && -f "$project_dir/scripts/installer.py" ]] || {
         echo 'Downloaded archive does not contain the BetterDocker installer.' >&2

@@ -1,4 +1,5 @@
 """Additional managed disks share the primary disk's ownership and lifecycle."""
+from .secure_io import read_json, read_text
 import copy
 import json
 import os
@@ -123,7 +124,7 @@ def _configure(identifier, node, key, values, digest=None):
             settings.setdefault('unused', []).append(old['volid'])
         else:
             values = validate(values)
-            runtime = json.loads((w.ROOT / identifier / 'compose.runtime.json').read_text())
+            runtime = read_json(w.ROOT / identifier / 'compose.runtime.json')
             if values.get('service') not in runtime['services']:
                 raise ValueError('Select an existing service')
             if any(disk['service'] == values['service'] and disk['target'] == values['target'] for name, disk in records(settings).items() if name != key):
@@ -144,6 +145,8 @@ def _configure(identifier, node, key, values, digest=None):
                     needed = int(w.capture(['du', '-sx', '-B1', str(previous_data)]).split()[0])
                     if needed + 64 * 1048576 > values['size_mib'] * 1048576 * .9:
                         raise ValueError('Disk is too small for the current mount data')
+                from .space import data_disk
+                data_disk(identifier, values['storage'], values['size_mib'] * 1048576)
                 disk = w.pve_storage(identifier, 'allocate', storage=values['storage'], size_mib=values['size_mib'])
                 w.run(['mkfs.ext4', '-q', '-m', '0', disk['path']])
                 disk.pop('path', None)
@@ -176,11 +179,11 @@ def _configure(identifier, node, key, values, digest=None):
             w.write_json(w.ROOT / identifier / 'storage.json', settings)
             mount(identifier, key, disk)
             w.write_json(w.ROOT / identifier / 'storage.json', before)
-        runtime = json.loads((w.ROOT / identifier / 'compose.runtime.json').read_text())
+        runtime = read_json(w.ROOT / identifier / 'compose.runtime.json')
         for service in runtime['services'].values():
             service['volumes'] = [m for m in service.get('volumes', []) if m.get('source') != str(point)]
         apply(runtime, identifier, settings)
-        journal = json.loads((w.ROOT / identifier / 'disk-transaction.json').read_text())
+        journal = read_json(w.ROOT / identifier / 'disk-transaction.json')
         journal['phase'] = 'committed'
         replace_bindings(info, candidate=runtime, storage=settings, updates={'storage.json': json.dumps(settings), 'disk-transaction.json': json.dumps(journal)})
         if values.get('detach'):
@@ -195,7 +198,9 @@ def recover(identifier):
     marker = directory / 'disk-transaction.json'
     if not marker.exists():
         return
-    state = json.loads(marker.read_text())
+    state = read_json(marker)
+    from .recovery import require_docker
+    require_docker()
     key = state['key']
     source(identifier, key)
     if state['phase'] == 'committed':
@@ -208,7 +213,7 @@ def recover(identifier):
     pending = directory / 'allocated-volume.json'
     owned = set(volume_ids(current))
     if pending.exists():
-        owned.add(json.loads(pending.read_text())['volid'])
+        owned.add(read_json(pending)['volid'])
     before = state['before']
     before.setdefault('unused', []).extend(sorted(owned - set(volume_ids(before))))
     unmount(identifier, key)
@@ -236,7 +241,7 @@ def configure(identifier, node, key, values, digest=None):
         w.require_stopped(w.container_records(identifier))
         directory = w.ROOT / identifier
         w.write_json(directory / 'disk-transaction.json', {'key': key, 'phase': 'preparing',
-            'before': w.storage_config(identifier), 'runtime': (directory / 'compose.runtime.json').read_text()})
+            'before': w.storage_config(identifier), 'runtime': read_text(directory / 'compose.runtime.json')})
         try:
             _configure(identifier, node, key, values, digest)
         except Exception:

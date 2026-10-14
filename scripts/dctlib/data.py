@@ -1,4 +1,5 @@
 """Explicit deletion of project-owned data and unused native PVE disks."""
+from .secure_io import read_json
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ def remember_volumes(identifier, containers):
         names = {mount['Name'] for row in containers for mount in row.get('Mounts', []) if mount.get('Type') == 'volume'}
         ledger = worker.ROOT / identifier / 'owned-volumes.json'
         if ledger.exists():
-            names.update(json.loads(ledger.read_text())['volumes'])
+            names.update(read_json(ledger)['volumes'])
         verified = []
         for name in sorted(names):
             volume = worker.run(['docker', 'volume', 'inspect', name], check=False, capture_output=True)
@@ -33,7 +34,7 @@ def storage_owner(vmid, node):
     vmid = str(vmid)
     if not vmid.isdecimal() or not 100 <= int(vmid) <= 999999999:
         raise ValueError('Invalid guest ID')
-    owner = json.loads((worker.METADATA / 'ids' / (vmid + '.json')).read_text())
+    owner = read_json(worker.METADATA / 'ids' / (vmid + '.json'))
     identifier = worker.project_id(owner['id'])
     if owner['node'] != node:
         settings = worker.storage_config(identifier)
@@ -66,7 +67,7 @@ def check_volume_claim(name, identifier):
     for ledger in worker.ROOT.glob('*/owned-volumes.json'):
         if ledger.parent.name == identifier:
             continue
-        if name in json.loads(ledger.read_text()).get('volumes', []):
+        if name in read_json(ledger).get('volumes', []):
             raise ValueError('Docker volume is retained by another DCT')
 
 
@@ -76,7 +77,7 @@ def owned_data_plan(identifier, info, native_snapshots=None):
     if folder.is_symlink() or folder.resolve().parent != worker.ROOT.resolve():
         raise ValueError('Invalid project data directory')
     volumes = worker.capture(['docker', 'volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=bd-' + identifier]).split()
-    config = json.loads((folder / 'compose.runtime.json').read_text())
+    config = read_json(folder / 'compose.runtime.json')
     external = {value.get('name', name) for name, value in config.get('volumes', {}).items() if value.get('external')}
     container_ids = {row['id'] for row in worker.container_records(identifier)}
     if container_ids:
@@ -87,7 +88,7 @@ def owned_data_plan(identifier, info, native_snapshots=None):
                        if mount.get('Type') == 'volume')
     ledger = folder / 'owned-volumes.json'
     if ledger.exists():
-        saved = json.loads(ledger.read_text())['volumes']
+        saved = read_json(ledger)['volumes']
         if any(not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}', name) for name in saved):
             raise ValueError('Invalid retained volume ownership')
         existing = set(worker.capture(['docker', 'volume', 'ls', '-q']).split())
@@ -192,7 +193,7 @@ def delete_storage_volume(vmid, node, volid):
         if storage_owner(vmid, node) != identifier:
             raise ValueError('DCT disk ownership changed')
         path = worker.METADATA / (identifier + '.json')
-        public = json.loads(path.read_text()) if path.exists() else None
+        public = read_json(path) if path.exists() else None
         local_guest = public is not None and public['node'] == node
         info = worker.detail(identifier, node) if local_guest else None
         check_data_dependencies(identifier, info)

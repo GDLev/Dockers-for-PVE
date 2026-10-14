@@ -129,7 +129,7 @@ class DeploymentSecurityTests(unittest.TestCase):
 
     def test_client_credentials_are_separate_and_identity_reaches_helpers(self):
         with patch.dict(os.environ, {'BETTERDOCKER_TRUSTED': '0', 'BETTERDOCKER_TASK_USER': 'owner@pve!token'}), \
-             patch.object(worker.subprocess, 'run') as run, patch.object(worker, 'ROOT', self.root / 'projects'):
+             patch('runtime.execute') as run, patch.object(worker, 'ROOT', self.root / 'projects'):
             worker.run(['docker', 'info'])
             environment = run.call_args.kwargs['env']
             self.assertEqual(environment['DOCKER_CONFIG'], '/var/lib/betterdocker/delegated-client')

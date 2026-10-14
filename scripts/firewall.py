@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Apply native PVE guest policy to the endpoint and owned Docker bridges."""
+from dctlib.secure_io import read_json
 import argparse
 import contextlib
 import fcntl
@@ -76,7 +77,7 @@ def published_ports(info):
     if runtime.load().rootless:
         from dctlib import projects as worker
         import host
-        config = json.loads((worker.ROOT / info['id'] / 'compose.runtime.json').read_text())
+        config = read_json(worker.ROOT / info['id'] / 'compose.runtime.json')
         result = []
         for container in json.loads(command(['docker', 'inspect', *ids])):
             service = container['Config']['Labels']['com.docker.compose.service']
@@ -409,7 +410,7 @@ def reconcile():
     with lock():
         if not worker.METADATA.is_dir():
             raise ValueError('DCT cluster configuration is unavailable; retaining firewall rules')
-        metadata = [json.loads(path.read_text()) for path in worker.METADATA.glob('*.json')]
+        metadata = [read_json(path) for path in worker.METADATA.glob('*.json')]
         infos = [i for i in metadata if i['node'] == worker.current_node() and i.get('vmid')]
         from dctlib.endpoint_controls import apply as apply_controls
         apply_controls(infos)

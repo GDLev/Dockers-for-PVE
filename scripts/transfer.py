@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 """Stopped DCT transfers using PVE SSH trust and a cluster-locked ownership handoff."""
+# Check the installed code tree before importing non-frozen modules.
+import os as _boot_os
+import sys as _boot_sys
+if __file__.startswith('/usr/local/lib/betterdocker/'):
+    _boot_root = '/usr/local/lib/betterdocker'
+    for _boot_dir, _boot_dirs, _boot_files in _boot_os.walk(_boot_root, followlinks=False):
+        for _boot_name in [_boot_dir, *(_boot_os.path.join(_boot_dir, n) for n in _boot_dirs + _boot_files)]:
+            _boot_info = _boot_os.stat(_boot_name, follow_symlinks=False)
+            if _boot_info.st_uid != 0 or _boot_info.st_mode & 0o022 or _boot_os.path.islink(_boot_name):
+                _boot_sys.stderr.write('BetterDocker: unsafe installed helper ownership or permissions\n')
+                raise SystemExit(1)
 import argparse
 import contextlib
 import json
@@ -12,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import selectors
+from dctlib import space
 
 from dctlib import projects as worker
 import guest_state as state
@@ -20,6 +33,10 @@ import migration_history as history
 TRANSFERS = worker.ROOT.parent / 'transfers'
 GLOBAL_METADATA = Path('/etc/pve/betterdocker')
 HELPER = '/usr/local/lib/betterdocker/transfer.py'
+
+
+from dctlib.operation_capacity import bounded
+from dctlib.retention import temporary, transfer_paths
 
 
 def directory(token):
@@ -65,6 +82,9 @@ def private_metadata(folder, info):
         worker.METADATA = original
 
 
+@bounded
+@space.loaned_transfer
+@temporary(transfer_paths)
 def receive(token):
     folder = directory(token)
     folder.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -74,12 +94,18 @@ def receive(token):
     partial = folder / 'state.partial'
     with partial.open('xb') as output:
         os.chmod(partial, 0o600)
-        shutil.copyfileobj(sys.stdin.buffer, output, 1024*1024)
+        from dctlib.retention import own_partial
+        own_partial(partial, output.fileno())
+        from dctlib.retention import copy_stream, remaining_transfer
+        copy_stream(sys.stdin.buffer, output, remaining_transfer())
         output.flush()
         os.fsync(output.fileno())
     partial.replace(archive)
 
 
+@bounded
+@space.loaned_transfer
+@temporary(transfer_paths)
 def prepare(token, identifier, source, storage):
     folder = directory(token)
     current = state.read(GLOBAL_METADATA / (worker.project_id(identifier)+'.json'))
@@ -134,6 +160,8 @@ def clean_local(identifier, info):
                  if mount['Type'] == 'volume'}
     if any(c['state'] in ('running', 'restarting', 'paused') for c in containers):
         raise ValueError('Cannot clean an active transfer copy')
+    from dctlib.recovery import require_docker
+    require_docker()
     cleanup = worker.ROOT / identifier / 'transfer-cleanup.json'
     if cleanup.exists():
         previous = state.read(cleanup).get('volumes', [])
@@ -247,6 +275,8 @@ def recover(token):
     with worker.operation(identifier, 'migration-recovery'):
         current = state.read(GLOBAL_METADATA / (identifier+'.json'))
         target = state.read(folder / 'target.json')['node']
+        from dctlib.recovery import require_docker
+        require_docker()
         if current['node'] == target:
             if info.get('replication'):
                 import ha
@@ -297,13 +327,58 @@ def recover_all():
             print(f'DCT migration recovery pending: {error}', file=sys.stderr)
 
 
+def hold_space(token, spec, storage=''):
+    worker.project_id(token)
+    spec = json.loads(spec)
+    with space.reserve(space.destination_targets(token, spec, storage), key=token):
+        print('READY', flush=True)
+        for line in sys.stdin:
+            if not line.strip(): break
+            space.claim(space.destination_targets(token, json.loads(line), storage))
+            print('READY', flush=True)
+
+
+class DestinationCapacity:
+    def __init__(self, child): self.child = child
+
+    def ready(self):
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.child.stdout, selectors.EVENT_READ)
+            if not selector.select(30):
+                raise ValueError('Destination peak-space check timed out')
+            if self.child.stdout.readline().strip() != 'READY':
+                raise ValueError('Destination peak-space check failed; source was not transferred')
+
+    def update(self, spec):
+        self.child.stdin.write(json.dumps(spec) + '\n'); self.child.stdin.flush()
+        self.ready()
+
+
+@contextlib.contextmanager
+def destination_capacity(target, token, spec, storage):
+    command = ssh_command(target) + [shlex.join([HELPER, 'space-hold', token, json.dumps(spec), storage])]
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    lease = DestinationCapacity(child)
+    try:
+        lease.ready()
+        yield lease
+    finally:
+        if child.poll() is None:
+            try:
+                child.stdin.write('\n'); child.stdin.flush(); child.stdin.close()
+                child.wait(timeout=10)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                child.terminate(); child.wait(timeout=10)
+
+
+@bounded
 def migrate(identifier, node, target, storage, digest=None, restart=0, timeout=180):
     restart, timeout = int(restart), int(timeout)
     if restart not in (0, 1) or not 1 <= timeout <= 86400:
         raise ValueError('Invalid migration restart or timeout')
     if target == node:
         raise ValueError('Choose another cluster node')
-    with worker.operation(identifier, 'migrate') as lock:
+    with worker.operation(identifier, 'migrate') as lock, contextlib.ExitStack() as peak:
         with worker.locked(identifier):
             info = worker.detail(identifier, node)
             worker.assert_configuration_digest(identifier, node, digest)
@@ -316,7 +391,11 @@ def migrate(identifier, node, target, storage, digest=None, restart=0, timeout=1
                 raise ValueError('Running DCT migration requires restart=1')
             if info.get('replication') and target not in info['replication'].get('targets', {}):
                 raise ValueError('Replicated DCT migration requires a successful replica on the destination')
+            worker.project_limits.preflight(identifier)
             token = uuid.uuid4().hex
+            spec = space.export_size(identifier, history=True)
+            space.claim(space.source_targets(identifier, directory(token), history=True), identifier)
+            destination_space = peak.enter_context(destination_capacity(target, token, spec, storage))
             folder = directory(token); folder.mkdir(parents=True, mode=0o700)
             info.pop('deployment', None); info.pop('digest', None)
             if (worker.ROOT / identifier / 'ha.json').exists():
@@ -335,6 +414,9 @@ def migrate(identifier, node, target, storage, digest=None, restart=0, timeout=1
             state.capture_state(identifier, node, folder / 'state', lock_fd=lock.fileno())
             history.capture(identifier, folder / 'state')
             state.pack_state(folder / 'state', folder / 'state.tar')
+            spec['state_bytes'] = max(spec['state_bytes'], space.retention.tree_bytes(folder / 'state'), (folder / 'state.tar').stat().st_size)
+            spec['image_bytes'] = max(spec['image_bytes'], (folder / 'state/images.tar').stat().st_size)
+            destination_space.update(spec)
             with worker.locked(identifier):
                 worker.remove_network(info)
             with (folder / 'state.tar').open('rb') as archive:
@@ -377,6 +459,7 @@ def migrate(identifier, node, target, storage, digest=None, restart=0, timeout=1
 
 def resume_instances(identifier, instances):
     info = worker.detail(identifier, worker.current_node())
+    worker.project_limits.preflight(identifier)
     worker.prepare_network_start(info)
     worker.guest_hook(info, 'pre-start')
     worker.expect_guest_hook(info, 'post-start')
@@ -400,10 +483,11 @@ def main():
     if os.geteuid():
         raise SystemExit('Root required')
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('receive','prepare','abort','finish','migrate','recover','runtime','check-runtime','resume'))
+    parser.add_argument('action', choices=('space-hold','receive','prepare','abort','finish','migrate','recover','runtime','check-runtime','resume'))
     parser.add_argument('values', nargs='*')
     args = parser.parse_args()
     if args.action == 'runtime': print(json.dumps(worker.node_runtime.load().identity()))
+    elif args.action == 'space-hold': hold_space(*args.values)
     elif args.action == 'check-runtime': check_runtime(*args.values)
     elif args.action == 'receive': receive(*args.values)
     elif args.action == 'prepare': prepare(*args.values)

@@ -12,7 +12,7 @@ ID = 'a' * 32
 
 class SnapshotTests(unittest.TestCase):
     def test_cleanup_commands_can_return_nonzero_without_masking_result(self):
-        with patch.object(worker.subprocess, 'run') as run:
+        with patch('runtime.execute', return_value=subprocess.CompletedProcess([], 1, '', 'No such image: snapshot')) as run:
             worker.run(['docker', 'image', 'rm', 'snapshot'], check=False, capture_output=True)
             self.assertFalse(run.call_args.kwargs['check'])
 
@@ -24,6 +24,8 @@ class SnapshotTests(unittest.TestCase):
             (project / 'notes.txt').write_text('Original notes')
             (project / '.env').write_text('SECRET=original')
             (project / 'request.json').write_text('{}')
+            (project / '.env').chmod(0o600)
+            (project / 'request.json').chmod(0o600)
             (project / 'compose.source.yaml').write_text('services: {}')
             worker.write_json(project / 'compose.runtime.json', {'services': {'app': {'image': 'busybox'}}})
             worker.write_json(project / 'pending-network.json', {'net0': {'mtu': 1400}})
@@ -36,6 +38,8 @@ class SnapshotTests(unittest.TestCase):
                     return 'sha256:snapshot'
                 return ''
             def run(args, **kwargs):
+                if args[:3] == ['docker', 'image', 'load']:
+                    return subprocess.CompletedProcess(args, 0, 'Loaded image: ' + saved[0]['SnapshotTag'] + '\n', '')
                 if args[:2] == ['docker', 'commit']:
                     return subprocess.CompletedProcess(args, 0, stdout='Flag --pause has been deprecated\nsha256:snapshot\n')
                 if args[:3] == ['docker', 'image', 'save']:
@@ -62,6 +66,7 @@ class SnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, patch.object(worker, 'ROOT', Path(temporary) / 'projects'):
             folder = worker.snapshot_root(ID) / 'before'
             folder.mkdir(parents=True)
+            (folder / 'configuration').mkdir()
             (folder / 'empty').mkdir()
             (folder / 'data').write_text('original')
             (folder / 'link').symlink_to('data')

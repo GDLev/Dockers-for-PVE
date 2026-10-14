@@ -24,6 +24,7 @@ Ext.define('PVE.betterdocker.Config', {
             if (/^Mount Point \(mp[0-9]+\)$/.test(key)) { return can('disk') && !current?.ha?.managed && !current?.template && !current?.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state)); }
             if (['Recovery snapshot', 'Writable layers', 'Preserved files', 'Images (logical size)', 'Logs', 'Snapshots'].includes(key) || /^Mount Point \([0-9]+\)$/.test(key || '')) { return false; }
             if (key === 'Image') { return can('images') && !current?.ha?.managed && !current?.template; }
+            if (key === 'Security policy') { return can('hardening') && !current?.ha?.managed && !current?.template && !current?.containers?.some(item => ['running', 'restarting', 'paused'].includes(item.state)); }
             if (key === 'Security') { return can('options') && !current?.ha?.managed && !current?.template; }
             if (key === 'Hookscript') { return can('hookscript'); }
             if (current?.ha?.managed && !['Protection', 'Start at boot', 'Start/Shutdown order'].includes(key)) { return false; }
@@ -124,7 +125,7 @@ Ext.define('PVE.betterdocker.Config', {
                     { key: 'Snapshots', value: Number.isFinite(current.storage?.usage?.snapshots) ? Proxmox.Utils.format_size(current.storage.usage.snapshots) : '' },
                 ]).concat((current.storage?.disks || []).map(disk => ({ key: 'Mount Point (' + disk.name + ')', value: disk.volid + ',mp=' + disk.target + ',backup=' + Number(disk.backup !== false) + (disk.read_only ? ',ro=1' : '') }))).concat(active.mounts.map((mount, index) => ({ key: 'Mount Point (' + index + ')', value: (mount.source || '') + ',mp=' + mount.target + (mount.read_only ? ',ro=1' : '') }))));
                 rows('dnsGrid', ['DNS servers', 'Search domains'].map(key => pendingRow(key, values, active.pending)));
-                rows('optionGrid', [{ key: 'Start at boot', value: Proxmox.Utils.format_boolean(current.onboot || 0) }, { key: 'Start/Shutdown order', value: current.startup || 'order=any' }, { key: 'Protection', value: Proxmox.Utils.format_boolean(current.protection) }, { key: 'Hookscript', value: current.hookscript || Proxmox.Utils.noneText }, pendingRow('Restart policy', values, active.pending), pendingRow('Security', values, active.pending), { key: 'Image', value: active.image }, ...(current.image_update?.recovery ? [{ key: 'Recovery snapshot', value: current.image_update.recovery }] : [])]);
+                rows('optionGrid', [{ key: 'Start at boot', value: Proxmox.Utils.format_boolean(current.onboot || 0) }, { key: 'Start/Shutdown order', value: current.startup || 'order=any' }, { key: 'Protection', value: Proxmox.Utils.format_boolean(current.protection) }, { key: 'Hookscript', value: current.hookscript || Proxmox.Utils.noneText }, pendingRow('Restart policy', values, active.pending), pendingRow('Security', values, active.pending), { key: 'Security policy', value: translate(current.security_policy === 'hardened' ? 'Hardened' : 'Standard') }, { key: 'Image', value: active.image }, ...(current.image_update?.recovery ? [{ key: 'Recovery snapshot', value: current.image_update.recovery }] : [])]);
                 ['resourceGrid', 'dnsGrid', 'optionGrid'].forEach(id => {
                     const grid = me.down('#' + id), button = me.down('#' + id + 'Revert');
                     const row = grid?.getSelectionModel().getSelection()[0];
@@ -248,6 +249,10 @@ Ext.define('PVE.betterdocker.Config', {
             if (!active || !rowEditable(selectedKey, group) || locked()) { return; }
             if (selectedKey === 'Settings source') { return; }
             if (selectedKey === 'Project data disk') { editDataDisk(); return; }
+            if (selectedKey === 'Security policy') {
+                return openEditor(me, 'security-policy', () => Ext.create('PVE.betterdocker.PolicyEdit', {
+                    ownerPanel: me, url: url + '/security-policy', digest: current.digest, policy: current.security_policy || 'standard' }));
+            }
             if (selectedKey === 'Security') {
                 return openEditor(me, 'security:' + active.name, () => Ext.create('PVE.betterdocker.SecurityEdit', {
                     ownerPanel: me, url: url + '/settings', service: active, security: current.security, digest: current.digest }));

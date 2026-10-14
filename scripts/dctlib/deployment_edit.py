@@ -1,4 +1,5 @@
 """Stopped deployment edits preserve individual replicas and rollback originals."""
+from .secure_io import read_json, read_text
 import copy
 import json
 from urllib.parse import quote
@@ -64,13 +65,15 @@ def apply(info, data, config, resolved, staging):
     from .service_recreate import execute, defaults_state, owned
     identifier = info['id']
     directory = w.ROOT / identifier
-    old = json.loads((directory / 'compose.runtime.json').read_text())
+    w.project_limits.check_directory(directory, resolved)
+    w.project_limits.preflight(identifier)
+    old = read_json(directory / 'compose.runtime.json')
     records = w.container_records(identifier)
     w.require_stopped(records)
     rows = json.loads(w.capture(['docker', 'inspect', '--size', *[r['id'] for r in records]])) if records else []
     networks = network_names(config, identifier)
     entries = []
-    image_overrides = json.loads((directory / 'images.json').read_text()) if (directory / 'images.json').exists() else {}
+    image_overrides = read_json(directory / 'images.json') if (directory / 'images.json').exists() else {}
     for name, service in resolved['services'].items():
         current = sorted([row for row in rows if row['Config']['Labels'].get('com.docker.compose.service') == name],
                          key=lambda row: int(row['Config']['Labels'].get('com.docker.compose.container-number', '1')))
@@ -131,7 +134,7 @@ def apply(info, data, config, resolved, staging):
     from .service_start import order
     priority = {name: index for index, name in enumerate(order(config['services']))}
     entries.sort(key=lambda entry: priority.get((entry.get('body') or {}).get('Labels', {}).get('com.docker.compose.service') or (entry.get('source') or {}).get('Config', {}).get('Labels', {}).get('com.docker.compose.service'), len(priority)))
-    updates = {name: (staging / name).read_text() for name in ('compose.source.yaml', '.env')}
+    updates = {name: read_text(staging / name) for name in ('compose.source.yaml', '.env')}
     updates.update({'request.json': json.dumps(data), 'snapshot-restored.json': None, 'images.json': None, 'image-update.json': None})
     from .deployment import escape_literals
     execute(info, '*', entries, escape_literals(config), w.load_settings(directory), w.load_pending(directory), defaults_state(directory), updates, metadata,

@@ -1,4 +1,5 @@
 """Host links, leases and transactions for published DCT interfaces."""
+from .secure_io import read_json, read_text
 import ipaddress
 import json
 import os
@@ -95,7 +96,7 @@ def route_table(info, allocate=True):
     from . import projects as w
     key = info['id'] + ':' + info['net']
     registry = w.ROOT.parent / 'route-tables.json'
-    saved = json.loads(registry.read_text()) if registry.exists() else {}
+    saved = read_json(registry) if registry.exists() else {}
     if key not in saved:
         if not allocate:
             return None
@@ -240,7 +241,7 @@ def candidate(identifier, info, values):
     value = model.validate(values)
     preflight(dict(info, interfaces=value), identifier)
     directory = w.ROOT / identifier
-    runtime = json.loads((directory / 'compose.runtime.json').read_text())
+    runtime = read_json(directory / 'compose.runtime.json')
     provisional = dict(info, interfaces=value)
     # Static assignments are checked now; DHCP bindings are checked after acquisition.
     if all(entry['ipv4mode'] != 'dhcp' and entry.get('ipv6mode') not in ('auto', 'dhcp') for entry in value.values()):
@@ -254,7 +255,7 @@ def apply(identifier, node, info, values):
     w.require_stopped(w.container_records(identifier))
     directory = w.ROOT / identifier
     journal = directory / 'network-transaction.json'
-    files = {path.name: path.read_text() for path in directory.iterdir() if path.name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.conf', 'dhclient.leases') or re_dhcp_file(path.name)}
+    files = {path.name: read_text(path) for path in directory.iterdir() if path.name in ('request.json', 'compose.runtime.json', 'dhcp-address.json', 'dhclient.conf', 'dhclient.leases') or re_dhcp_file(path.name)}
     saved = {k: v for k, v in info.items() if k not in ('deployment', 'digest')}
     w.write_json(journal, {'metadata': saved, 'files': files, 'endpoints': True})
     try:
@@ -350,7 +351,7 @@ def sync(info, wait=False):
             w.write_json(w.METADATA / (info['id'] + '.json'), info)
         return False
     if marker.exists():
-        saved = json.loads(marker.read_text())
+        saved = read_json(marker)
         if isinstance(saved, dict) and saved.get('boot_id') != w.network_boot_id():
             marker.unlink()
             info.pop('network_resume', None)

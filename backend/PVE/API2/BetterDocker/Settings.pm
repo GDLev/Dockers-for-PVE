@@ -10,6 +10,26 @@ sub register_api {
     my ($helper, $node, $id, $digest, $root) = PVE::API2::BetterDocker::method_defaults();
 
     PVE::API2::BetterDocker::register_docker_method({
+        name => 'security_policy', path => '{id}/security-policy', method => 'GET', protected => 1, proxyto => 'node',
+        description => 'Read the mandatory workload policy and conversion incompatibilities.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id } }, returns => { type => 'object' },
+        code => sub { my ($p) = @_; return decode_json(PVE::API2::BetterDocker::output(['security-policy', $p->{id}, $p->{node}])); },
+    });
+    PVE::API2::BetterDocker::register_docker_method({
+        name => 'set_security_policy', path => '{id}/security-policy', method => 'PUT', protected => 1, proxyto => 'node',
+        description => 'Convert a stopped workload without discarding its writable files or volumes.',
+        parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
+            mode => { type => 'string', enum => ['standard', 'hardened'] } } }, returns => { type => 'string' },
+        code => sub {
+            my ($p) = @_; my $rpc = PVE::RPCEnvironment::get();
+            $rpc->check($rpc->get_user(), "/nodes/$p->{node}", ['Sys.Modify']);
+            PVE::API2::BetterDocker::check_digest($p);
+            return $rpc->fork_worker('betterdockersecurity', PVE::API2::BetterDocker::task_id($p->{id}, $p->{node}), $rpc->get_user(), sub {
+                PVE::Tools::run_command([$helper, 'set-security-policy', $p->{id}, $p->{node}, $p->{mode}, $p->{digest} // '']);
+            });
+        },
+    });
+    PVE::API2::BetterDocker::register_docker_method({
         name => 'image_state', path => '{id}/images', method => 'GET', protected => 1, proxyto => 'node',
         description => 'Read the prepared image update and its recovery snapshot.',
         parameters => { additionalProperties => 0, properties => { node => $node, id => $id } },
@@ -71,7 +91,10 @@ sub register_api {
         parameters => { additionalProperties => 0, properties => { node => $node, id => $id, digest => $digest,
             cpus => { type => 'number', minimum => 0, maximum => 8192 },
             memory => { type => 'integer', minimum => 0, maximum => 1048576 },
-            pids => { type => 'integer', minimum => 0, maximum => 4194304 } } },
+            pids => { type => 'integer', minimum => 0, maximum => 4194304 },
+            services => { type => 'integer', minimum => 0, maximum => 100000, optional => 1 },
+            replicas => { type => 'integer', minimum => 0, maximum => 100000, optional => 1 },
+            exempt => { type => 'boolean', optional => 1, description => 'Explicit administrator exemption from aggregate budgets.' } } },
         returns => { type => 'object' },
         code => sub {
             my ($p) = @_;
@@ -79,7 +102,10 @@ sub register_api {
             $rpc->check($rpc->get_user(), '/nodes/' . $p->{node}, ['Sys.Modify']);
             my ($fh, $path) = tempfile('betterdocker-limits-XXXXXX', DIR => '/run', UNLINK => 0);
             chmod 0600, $path;
-            print $fh encode_json({ map { $_ => 0 + $p->{$_} } qw(cpus memory pids) }); close $fh;
+            my $values = { map { $_ => 0 + $p->{$_} } qw(cpus memory pids) };
+            for my $key (qw(services replicas)) { $values->{$key} = 0 + $p->{$key} if defined($p->{$key}); }
+            $values->{exempt} = $p->{exempt} ? JSON::true() : JSON::false() if defined($p->{exempt});
+            print $fh encode_json($values); close $fh;
             my $result = eval { decode_json(PVE::API2::BetterDocker::output(['project-limits', $p->{id}, $p->{node}, $path, $p->{digest} // ''])); };
             my $err = $@; unlink $path; die $err if $err;
             return $result;

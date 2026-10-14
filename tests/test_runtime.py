@@ -65,7 +65,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_rootless_child_has_no_supplementary_groups_or_inherited_docker_credentials(self):
         with patch.object(runtime, 'load', return_value=ROOTLESS), patch.object(runtime.os, 'geteuid', return_value=0), \
-             patch.object(runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'OK', '')) as run, \
+             patch.object(runtime, 'execute', return_value=subprocess.CompletedProcess([], 0, 'OK', '')) as run, \
              patch.dict(os.environ, {'DOCKER_HOST': 'unix:///var/run/docker.sock', 'DOCKER_CONFIG': '/root/.docker', 'SECRET': 'must-not-pass'}):
             runtime.run(['docker', 'info'], text=True, capture_output=True)
         values = run.call_args.kwargs
@@ -89,7 +89,7 @@ class RuntimeTests(unittest.TestCase):
             link = Path(folder) / 'runtime.json'; link.symlink_to(target)
             with patch.object(runtime, 'CONFIG', link), self.assertRaises(OSError):
                 runtime.load()
-            with patch.object(runtime, 'CONFIG', target), self.assertRaisesRegex(ValueError, 'root-owned'):
+            with patch.object(runtime, 'CONFIG', target), self.assertRaisesRegex(ValueError, 'writable|root-owned'):
                 runtime.load()
 
     def test_target_mode_preflight_does_not_convert_or_ignore_capacity(self):
@@ -155,8 +155,8 @@ class RuntimeTests(unittest.TestCase):
             config = {'services': {'app': {'image': 'busybox', 'ports': [{'published': '80', 'target': 8080}]}}}
             path.write_text(json.dumps(config))
             with patch.object(runtime, 'load', return_value=ROOTLESS), patch.object(runtime, 'read_access'), \
-                 patch.object(runtime, 'check_resources'), patch.object(runtime.os, 'geteuid', return_value=0), \
-                 patch.object(runtime.subprocess, 'run') as run:
+                 patch.object(runtime, 'check_resources'), patch.object(runtime, 'drop_options', return_value={'user': ROOTLESS.uid, 'group': ROOTLESS.gid, 'extra_groups': []}), \
+                 patch.object(runtime, 'execute') as run:
                 runtime.run(['docker', 'compose', '-f', str(path), '--project-directory', folder, 'up', '--no-start'])
             actual = json.loads(path.with_name('.rootless-compose.json').read_text())
             self.assertNotIn('ports', actual['services']['app'])

@@ -53,7 +53,10 @@ my %commands = (
     limits => ['Read or set administrator-owned aggregate DCT limits.', ['vmid'], {
         vmid => $vmid, cpus => option('number', 'Aggregate CPU ceiling; 0 means unlimited.', minimum => 0, maximum => 8192),
         memory => option('integer', 'Aggregate memory ceiling in MiB; 0 means unlimited.', minimum => 0, maximum => 1048576),
-        pids => option('integer', 'Aggregate PID ceiling; 0 means unlimited.', minimum => 0, maximum => 4194304) }],
+        pids => option('integer', 'Aggregate PID ceiling; 0 means unlimited.', minimum => 0, maximum => 4194304),
+        services => option('integer', 'Maximum Compose service count.', minimum => 0, maximum => 100000),
+        replicas => option('integer', 'Maximum total replica count.', minimum => 0, maximum => 100000),
+        exempt => option('boolean', 'Explicit administrator exemption from aggregate budgets.') }],
     list => ['List DCTs on this node.', [], { cluster => option('boolean', 'List guests on all cluster nodes.') }],
     create => ['Create a DCT from a Compose file, deployment JSON file or Docker image.', ['vmid', 'source'], {
         vmid => $vmid, source => { type => 'string', description => 'Compose file, deployment JSON file or Docker image.' },
@@ -67,7 +70,7 @@ my %commands = (
     status => ['Show DCT status.', ['vmid'], { vmid => $vmid, verbose => option('boolean', 'Verbose output format.') }],
     pending => ['Show current and pending configuration.', ['vmid'], { vmid => $vmid, service => $service }],
     network => ['Show the published IPv4 endpoint configuration.', ['vmid'], { vmid => $vmid }],
-    set => ['Set DCT options.', ['vmid'], { vmid => $vmid, %config, %resources, service => $service, %network_options, %mount_options, delete => option('string', 'Remove startup, hookscript or comma-separated network interfaces.') }],
+    set => ['Set DCT options.', ['vmid'], { vmid => $vmid, %config, %resources, service => $service, %network_options, %mount_options, 'security-policy' => option('string', 'Mandatory workload policy.', enum => ['standard', 'hardened']), delete => option('string', 'Remove startup, hookscript or comma-separated network interfaces.') }],
     start => ['Start the DCT.', ['vmid'], { vmid => $vmid }],
     stop => ['Stop the DCT immediately.', ['vmid'], { vmid => $vmid }],
     shutdown => ['Shut down the DCT gracefully.', ['vmid'], { vmid => $vmid, timeout => $timeout }],

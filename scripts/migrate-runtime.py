@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Explicit offline node runtime conversion with retained source data and rollback."""
+from dctlib.secure_io import read_json
 import argparse
 import contextlib
 import fcntl
@@ -43,7 +44,7 @@ def inventory(target):
         destination = Path(runtime_install.HOME) / 'docker'
         if target == 'rootful':
             config = Path('/etc/docker/daemon.json')
-            destination = Path(json.loads(config.read_text()).get('data-root', '/var/lib/docker')) if config.exists() else Path('/var/lib/docker')
+            destination = Path(read_json(config).get('data-root', '/var/lib/docker')) if config.exists() else Path('/var/lib/docker')
         if destination.is_symlink():
             raise ValueError('Destination runtime data directory cannot be a symbolic link')
         containers = destination / 'containers'
@@ -73,7 +74,7 @@ def inventory(target):
             if not containers:
                 raise ValueError('deploy all instances first')
             guest_state.owned_mounts(identifier, containers)
-            config = json.loads((worker.ROOT / identifier / 'compose.runtime.json').read_text())
+            config = read_json(worker.ROOT / identifier / 'compose.runtime.json')
             guest_state.check_portable_networks(config)
             for service in config['services'].values():
                 if target == 'rootless' and service.get('storage_opt', {}).get('size'):
@@ -95,7 +96,7 @@ def inventory(target):
         metadata = worker.METADATA / (project + '.json')
         control = worker.ROOT / project / 'request.json'
         if labels.get('com.docker.compose.project') == 'bd-' + project and metadata.is_file() and control.is_file():
-            info = json.loads(metadata.read_text())
+            info = read_json(metadata)
             if info['node'] != worker.current_node() and container['State']['Status'] not in ('running', 'restarting', 'paused'):
                 retained.append(identifier)
     if existing - owned - set(retained):
@@ -147,7 +148,7 @@ def select_target(mode):
 def convert(target, resume=None):
     if resume:
         folder = ROOT / worker.project_id(resume)
-        value = json.loads((folder / 'journal.json').read_text())
+        value = read_json(folder / 'journal.json')
         if value['target'] != target or value['phase'] in ('rollback', 'rolled-back'):
             raise ValueError('Migration journal does not describe a pending conversion to this mode')
         if value['phase'] == 'complete':
@@ -181,7 +182,7 @@ def convert(target, resume=None):
                     guest_state.capture_state(identifier, worker.current_node(), destination / 'state', lock_fd=guest['lock_fd'])
                     guest_state.pack_state(destination / 'state', destination / 'state.tar')
                 guest_state.check_state(destination / 'state')
-                info = json.loads((worker.METADATA / (identifier + '.json')).read_text())
+                info = read_json(worker.METADATA / (identifier + '.json'))
                 save(destination / 'metadata.json', info)
                 if info.get('ipv4mode', 'static') != 'static':
                     raise ValueError('Offline runtime conversion currently requires static DCT endpoints')
@@ -194,7 +195,7 @@ def convert(target, resume=None):
                 destination = folder / identifier
                 project = worker.ROOT / identifier
                 if not (destination / 'original').exists():
-                    worker.remove_network(json.loads((destination / 'metadata.json').read_text()))
+                    worker.remove_network(read_json(destination / 'metadata.json'))
                     if worker.storage_config(identifier):
                         unit = worker.capture(['systemd-escape', '--path', '--suffix=mount', str(project / 'storage-data')]).strip()
                         unit_path = Path('/etc/systemd/system') / unit
@@ -219,12 +220,12 @@ def convert(target, resume=None):
                 identifier = guest['id']
                 destination = folder / identifier
                 if identifier not in value['restored']:
-                    original = json.loads((destination / 'metadata.json').read_text())
+                    original = read_json(destination / 'metadata.json')
                     path = worker.METADATA / (identifier + '.json')
                     project = worker.ROOT / identifier
                     completed = path.exists() and (project / 'snapshot-restored.json').exists() and not (worker.ROOT.parent / 'imports' / (identifier + '.json')).exists()
                     if completed:
-                        restored = json.loads(path.read_text())
+                        restored = read_json(path)
                         if restored.get('vmid') != original['vmid'] or restored.get('runtime_mode') != target or restored.get('status') != 'stopped':
                             raise ValueError('Interrupted conversion found an unexpected destination guest')
                     else:
@@ -249,7 +250,7 @@ def convert(target, resume=None):
 
 def rollback(token):
     folder = ROOT / worker.project_id(token)
-    value = json.loads((folder / 'journal.json').read_text())
+    value = read_json(folder / 'journal.json')
     if value['phase'] == 'rolled-back':
         resume_maintenance(value['active'])
         return
@@ -272,7 +273,7 @@ def rollback(token):
             if runtime.load().mode == value['target']:
                 guest_state.cleanup_import(identifier, keep_reservation=True)
             if runtime.load().mode == value['target'] and (worker.ROOT / identifier).exists():
-                current = json.loads((worker.METADATA / (identifier + '.json')).read_text())
+                current = read_json(worker.METADATA / (identifier + '.json'))
                 worker.require_stopped(worker.container_records(identifier))
                 transfer.clean_local(identifier, current)
                 (worker.METADATA / (identifier + '.json')).unlink(missing_ok=True)
@@ -289,7 +290,7 @@ def rollback(token):
                     raise ValueError('Rollback destination is occupied')
                 (destination / 'original').rename(project)
             if (destination / 'metadata.json').exists():
-                info = json.loads((destination / 'metadata.json').read_text())
+                info = read_json(destination / 'metadata.json')
                 worker.write_json(worker.METADATA / (identifier + '.json'), info)
                 if (destination / 'mount-unit').exists():
                     unit = worker.capture(['systemd-escape', '--path', '--suffix=mount', str(project / 'storage-data')]).strip()

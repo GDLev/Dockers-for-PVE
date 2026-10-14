@@ -1,4 +1,5 @@
 """Compose validation, deployment and recreation."""
+from .secure_io import read_json, read_text
 import ipaddress
 import json
 import os
@@ -11,6 +12,9 @@ import tempfile
 import time
 import uuid
 import runtime as node_runtime
+
+
+from .operation_capacity import bounded
 
 
 def validate(data):
@@ -143,7 +147,7 @@ def compose_base(directory, identifier, filename='compose.runtime.json'):
                '--project-directory', str(directory), '--env-file', str(directory / '.env'),
                '-f', str(directory / filename)]
     if (directory / 'ha.json').exists():
-        runtime = json.loads((directory / 'compose.runtime.json').read_text())
+        runtime = read_json(directory / 'compose.runtime.json')
         override = directory / '.ha-compose.json'
         worker.write_json(override, {'services': {name: {'restart': 'no'} for name in runtime['services']}})
         os.chmod(override, 0o600)
@@ -173,6 +177,7 @@ def compose_values(value):
     return value
 
 
+@bounded
 def prepare(data, identifier, directory, project_directory=None, use_images=True, settings=None):
     project_directory = project_directory or directory
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -191,11 +196,29 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
     command[command.index('--project-directory') + 1] = str(project_directory)
     # Canonical config may contain passwords; never send it to the task log.
     try:
-        config = compose_values(json.loads(worker.capture(command)))
+        if worker.trusted_management():
+            config = compose_values(json.loads(worker.capture(command)))
+        else:
+            from .parsing import parse
+            config = compose_values(parse(source, data.get('environment', ''), project_directory, True, identifier))
     except subprocess.CalledProcessError as error:
         locations = sorted(set(re.findall(r'line [0-9]+', error.stderr or '')))
         location = ' (' + ', '.join(locations) + ')' if locations else ''
         raise ValueError('Invalid Compose configuration' + location + '. Check YAML, .env and referenced files.') from None
+    if worker.trusted_management():
+        features = set()
+        for service in config.get('services', {}).values():
+            if service.get('privileged'): features.add('privileged container')
+            if any(str(service.get(k, '')).split(':')[0] in ('host', 'service', 'container') for k in ('pid', 'ipc', 'uts', 'network_mode')): features.add('shared namespace')
+            from .hardening import CAPS, capabilities
+            if capabilities(service.get('cap_add') or []) - CAPS: features.add('elevated capabilities')
+            if service.get('runtime'): features.add('custom runtime')
+            if any(o.startswith(('seccomp:', 'seccomp=', 'apparmor:unconfined', 'apparmor=unconfined')) for o in service.get('security_opt') or []): features.add('custom security profile')
+            for mount in service.get('volumes') or []:
+                if mount.get('type') == 'bind' and not Path(mount['source']).is_relative_to(worker.ROOT / identifier): features.add('host bind mount')
+        if features:
+            import sys
+            print('Node administrator features: ' + ', '.join(sorted(features)), file=sys.stderr)
     for service in config.get('services', {}).values():
         remember_environment(service.get('environment'))
     config = worker.bind_ports(config, data['address'], identifier, data['interfaces']) if 'interfaces' in data else worker.bind_ports(config, data['address'], identifier)
@@ -203,19 +226,28 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
         from .endpoints import bind_runtime
         config = bind_runtime(config, dict(data, id=identifier))
     worker.apply_log_defaults(config)
+    creating = not (project_directory / 'request.json').exists()
+    worker.project_limits.apply_defaults(config, project_directory, creating=creating)
     if node_runtime.load().rootless:
         for service in config['services'].values():
             for mount in service.get('volumes', []):
                 if mount.get('type') == 'bind':
                     worker.safe_bind(mount.get('source', ''), identifier)
-    if not worker.trusted_management():
-        worker.validate_delegated_config(config, identifier)
+    from . import hardening
+    policy = hardening.mode(project_directory, creating=not (project_directory / 'request.json').exists())
+    if policy == 'hardened':
+        hardening.defaults(config)
     worker.apply_settings(config, worker.load_settings(project_directory) if settings is None else settings)
     from .images import overrides
     if use_images:
         overrides(config, project_directory)
     worker.apply_storage(config, identifier)
-    worker.project_limits.check_directory(project_directory, config)
+    from . import hardening
+    policy = hardening.mode(project_directory, creating=not (project_directory / 'request.json').exists())
+    hardening.apply(config, node_runtime.load(), policy)
+    if not worker.trusted_management() or policy == 'hardened':
+        worker.validate_delegated_config(config, identifier)
+    worker.project_limits.check_directory(project_directory, config, creating=creating)
     # config's result is already interpolated. Escape literal dollars before a second Compose read.
     node_runtime.check_resources(config)
     worker.write_json(directory / 'compose.runtime.json', escape_literals(config))
@@ -223,6 +255,7 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
     return config
 
 
+@bounded
 def create(data, node, identifier=None, hookscript=None, start=True):
     if node != worker.current_node():
         raise ValueError('The request was sent to the wrong node')
@@ -247,6 +280,12 @@ def create(data, node, identifier=None, hookscript=None, start=True):
         worker.network_preflight(data)
         directory = worker.ROOT / identifier
         try:
+            from . import hardening
+            policy = hardening.mode(directory, creating=True)
+            if policy == 'hardened':
+                hardening.available(node_runtime.load())
+            worker.project_limits.initialize(directory)
+            worker.write_json(directory / hardening.FILE, {'mode': policy})
             config = worker.prepare(dict(data, address=data.get('address') or '0.0.0.0'), identifier, directory)
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
@@ -262,6 +301,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
         if 'interfaces' in data:
             info['interfaces'] = data['interfaces']
         info['runtime_mode'] = node_runtime.load().mode
+        info['security_policy'] = policy
         from .authorization import remember_owner
         remember_owner(identifier)
         if hookscript:
@@ -290,6 +330,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
     print(f"Created {data['name']} at {info['address']}")
 
 
+@bounded
 def update(identifier, node, data, digest=None):
     with worker.locked(identifier):
         existing = worker.detail(identifier, node)
@@ -317,9 +358,9 @@ def update(identifier, node, data, digest=None):
         with tempfile.TemporaryDirectory(prefix='betterdocker-update-', dir=worker.ROOT) as folder:
             staging = Path(folder)
             config = worker.prepare(dict(data, address=existing.get('address') or '0.0.0.0'), identifier, staging, project_directory=directory, use_images=False)
-            worker.check_protected_layout(existing, json.loads((directory / 'compose.runtime.json').read_text()),
-                                   json.loads((staging / 'compose.runtime.json').read_text()))
-            resolving = json.loads((staging / 'compose.runtime.json').read_text())
+            worker.check_protected_layout(existing, read_json(directory / 'compose.runtime.json'),
+                                   read_json(staging / 'compose.runtime.json'))
+            resolving = read_json(staging / 'compose.runtime.json')
             for service in resolving['services'].values():
                 for entry in service.get('env_file') or []:
                     if isinstance(entry, dict) and Path(entry.get('path', '')).name == '.env':
@@ -334,25 +375,38 @@ def update(identifier, node, data, digest=None):
 
 
 def restore(node):
+    from .recovery import DockerUnavailable
     with worker.locked():
+        deferred = set()
         for info in worker.summaries():
             if info['node'] == node and info.get('id'):
-                worker.recover_storage_transaction(info['id'])
+                try:
+                    worker.recover_storage_transaction(info['id'])
+                except DockerUnavailable as error:
+                    deferred.add(info['id'])
+                    print(f"DCT {info['id']} recovery deferred: {error}", file=sys.stderr)
         for path in worker.ROOT.glob('*/storage.json'):
             metadata = worker.METADATA / (path.parent.name + '.json')
-            if metadata.exists() and json.loads(metadata.read_text())['node'] == node:
+            if path.parent.name not in deferred and metadata.exists() and read_json(metadata)['node'] == node:
                 worker.storage_mount(path.parent.name)
         for info in worker.summaries():
             if info['node'] == node:
+                if info.get('id') in deferred:
+                    continue
                 # A fenced node can boot with stale cluster metadata. The HA
                 # agent owns bringing its endpoint back, just as it owns Start.
                 if info.get('ha_recovery') or (info.get('id') and (worker.ROOT / info['id'] / 'ha.json').exists()):
                     continue
-                if info.get('id') and worker.recover_network_transaction(info['id'], node):
-                    info = json.loads((worker.METADATA / (info['id'] + '.json')).read_text())
+                try:
+                    if info.get('id') and worker.recover_network_transaction(info['id'], node):
+                        info = read_json(worker.METADATA / (info['id'] + '.json'))
+                except DockerUnavailable as error:
+                    print(f"DCT {info['id']} recovery deferred: {error}", file=sys.stderr)
+                    continue
                 worker.ensure_address(info, wait=False)
 
 
+@bounded
 def preview(data, identifier=None):
     identifier = worker.project_id(identifier) if identifier else uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix='betterdocker-preview-') as folder:
@@ -380,13 +434,13 @@ def reset_settings(identifier, node, service, digest=None):
                 pending.pop(service, None)
                 worker.save_pending(directory, pending)
             return
-        original = (directory / 'compose.runtime.json').read_text()
+        original = read_text(directory / 'compose.runtime.json')
         settings.pop(service)
         worker.require_stopped([c for c in worker.container_records(identifier) if c['service'] == service])
         with tempfile.TemporaryDirectory(prefix='betterdocker-reset-', dir=worker.ROOT) as folder:
             staging = Path(folder)
             worker.prepare(dict(info['deployment'], address=info.get('address') or '0.0.0.0'), identifier, staging, directory, settings=settings)
-            candidate = json.loads((staging / 'compose.runtime.json').read_text())
+            candidate = read_json(staging / 'compose.runtime.json')
             worker.check_protected_layout(info, json.loads(original), candidate)
         # Only the selected service returns to Compose defaults.
         config = json.loads(original)

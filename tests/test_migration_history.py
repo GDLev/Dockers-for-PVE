@@ -11,6 +11,16 @@ ID = 'ac' * 16
 
 
 class HistoryTests(unittest.TestCase):
+    def test_anonymous_history_volume_requires_an_actual_guest_claim(self):
+        name = 'ab' * 32
+        manifest = {'mounts': [{'type': 'volume', 'volume': name}]}
+        rows = [{'Config': {'Labels': {'betterdocker.id': ID}}, 'Mounts': [{'Type': 'volume', 'Name': name}]}]
+        mapped = history.volume_names(ID, manifest, rows)[name]
+        self.assertTrue(mapped.startswith('bd-' + ID + '_history_'))
+        self.assertEqual(history.volume_names(ID, manifest, rows)[name], mapped)
+        for rows in ([], [{'Config': {'Labels': {'betterdocker.id': 'ac' * 15 + 'aa'}}, 'Mounts': [{'Type': 'volume', 'Name': name}]}]):
+            with self.assertRaisesRegex(ValueError, 'Unowned'): history.volume_names(ID, manifest, rows)
+
     def test_rehomes_container_and_compose_network_together(self):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary); (folder / 'configuration').mkdir()

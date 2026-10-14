@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 """Portable DCT state used by backups, independent clones and node transfers."""
+# Check the installed code tree before importing non-frozen modules.
+import os as _boot_os
+import sys as _boot_sys
+if __file__.startswith('/usr/local/lib/betterdocker/'):
+    _boot_root = '/usr/local/lib/betterdocker'
+    for _boot_dir, _boot_dirs, _boot_files in _boot_os.walk(_boot_root, followlinks=False):
+        for _boot_name in [_boot_dir, *(_boot_os.path.join(_boot_dir, n) for n in _boot_dirs + _boot_files)]:
+            _boot_info = _boot_os.stat(_boot_name, follow_symlinks=False)
+            if _boot_info.st_uid != 0 or _boot_info.st_mode & 0o022 or _boot_os.path.islink(_boot_name):
+                _boot_sys.stderr.write('BetterDocker: unsafe installed helper ownership or permissions\n')
+                raise SystemExit(1)
+from dctlib.secure_io import read_json
 import argparse
 import contextlib
 import copy
@@ -22,8 +34,12 @@ from dctlib import projects as worker
 from dctlib.policy import owned_local_volume
 from dctlib.paths import CONFIG_FILES, control_path
 
+from dctlib.operation_capacity import bounded
+from dctlib.retention import temporary, archive_paths, capture_paths, unpack_paths
+
+
 def read(path):
-    return json.loads(Path(path).read_text())
+    return read_json(Path(path))
 
 
 def write(path, value):
@@ -102,8 +118,13 @@ def cleanup_capture(identifier, resume=True):
     if not path.exists():
         return
     state = read(path)
+    from dctlib.recovery import require_docker
+    require_docker()
     owned = {r['id']: r for r in worker.container_records(identifier)}
     if resume:
+        if any(cid in owned and owned[cid]['state'] == 'paused' for cid in state.get('paused', [])) or any(cid in owned and owned[cid]['state'] in ('created', 'exited') for cid in state.get('restart', [])):
+            from dctlib.hardening import check_profile
+            check_profile(identifier)
         for cid in state.get('paused', []):
             if cid in owned and owned[cid]['state'] == 'paused':
                 worker.run(['docker', 'unpause', cid], capture_output=True)
@@ -117,11 +138,14 @@ def cleanup_capture(identifier, resume=True):
     path.unlink()
 
 
-def quiesce(identifier, node, mode, lock_fd=None):
+@bounded
+def quiesce(identifier, node, mode, folder=None, lock_fd=None):
     if mode not in ('stop', 'suspend'):
         raise ValueError('Invalid backup quiescence mode')
     with operation(identifier, 'backup', lock_fd), worker.locked(identifier):
         worker.detail(identifier, node)
+        from dctlib import space
+        space.claim(space.source_targets(identifier, folder or worker.ROOT.parent / 'backup-staging'), identifier)
         containers = worker.snapshot_containers(identifier, allow_running=True)
         path = journal_path(identifier)
         state = read(path) if path.exists() else {'paused': [], 'restart': [], 'tags': []}
@@ -165,6 +189,8 @@ def check_portable_networks(runtime):
                     raise ValueError('Portable DCT state does not support fixed internal Docker addresses')
 
 
+@bounded
+@temporary(capture_paths)
 def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_journal=False, digest=None, backup_mode=False, copy_operation=None, copy_storage=''):
     folder = Path(folder)
     with operation(identifier, 'backup', lock_fd), worker.locked(identifier):
@@ -179,6 +205,8 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
         worker.recover_guest_hook(info)
         if folder.exists() or folder.resolve().is_relative_to((worker.ROOT / identifier).resolve()):
             raise ValueError('Export directory must be new and separate from the DCT')
+        from dctlib import space
+        space.claim(space.source_targets(identifier, folder), identifier)
         folder.mkdir(parents=True, mode=0o700)
         containers = worker.snapshot_containers(identifier, allow_running=True, quiesced=paused)
         runtime = read(worker.ROOT / identifier / 'compose.runtime.json')
@@ -195,6 +223,9 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
         from dctlib.capacity import require_space
         required = sum(max(0, row.get('SizeRootFs', 0)) for row in containers)
         required += sum(int(worker.capture(['du', '-sx', '-B1', mount['source']]).split()[0]) for mount in mounts)
+        from dctlib.retention import check_transfer, preservation
+        check_transfer([folder], required)
+        preservation(identifier, containers)
         require_space(folder, required)
         network_names = sorted({n for c in containers for n in c.get('NetworkSettings', {}).get('Networks', {})})
         networks = json.loads(worker.capture(['docker', 'network', 'inspect', *network_names])) if network_names else []
@@ -221,6 +252,7 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
                 source = worker.ROOT / identifier / filename
                 if source.exists():
                     shutil.copy2(source, config / filename)
+                    os.chmod(config / filename, 0o600)
             write(config / 'metadata.json', {key: value for key, value in info.items() if key not in ('deployment', 'digest', 'metrics')})
             firewall = Path('/etc/pve/firewall') / (str(info['vmid']) + '.fw')
             if firewall.exists():
@@ -251,6 +283,7 @@ def capture_state(identifier, node, folder, lock_fd=None, paused=False, keep_jou
             write(path, state)
             from dctlib.images import saved_images
             worker.run(['docker', 'image', 'save', '-o', str(folder / 'images.tar'), *state['tags'], *saved_images(worker.ROOT / identifier)], timeout=86400)
+            preservation(identifier)
             os.chmod(folder / 'images.tar', 0o600)
             write(folder / 'containers.json', containers)
             if worker.node_runtime.load().rootless:
@@ -298,6 +331,9 @@ def check_state(folder):
         path = folder / 'configuration' / name
         if path.exists() and (path.is_symlink() or not path.is_file()):
             raise ValueError('Invalid DCT backup configuration file')
+        if path.exists():
+            from dctlib.secure_io import read_text
+            read_text(path)
     containers = read(folder / 'containers.json')
     if not isinstance(containers, list) or not containers:
         raise ValueError('DCT backup has no containers')
@@ -326,15 +362,24 @@ def check_state(folder):
     return manifest
 
 
+@bounded
+@temporary(archive_paths)
 def pack_state(folder, archive):
     check_state(folder)
+    from dctlib import space
+    space.claim([space.filesystem(archive, space.retention.tree_bytes(folder) + 1024 * 1024)], read(Path(folder) / 'manifest.json')['id'])
     archive = Path(archive)
     if archive.exists():
         raise ValueError('Backup archive already exists')
+    from dctlib.retention import check_transfer, tree_bytes
+    size = tree_bytes(folder)
+    check_transfer([folder], size + 1024 * 1024)
     worker.run(['tar', '--numeric-owner', '--xattrs', '--acls', '--sparse', '-cf', str(archive), '-C', str(folder), '.'], timeout=86400)
     os.chmod(archive, 0o600)
 
 
+@bounded
+@temporary(unpack_paths)
 def unpack_state(archive, folder, history=False):
     folder = Path(folder)
     if folder.exists():
@@ -343,14 +388,15 @@ def unpack_state(archive, folder, history=False):
     try:
         from dctlib.capacity import require_space
         capacity = require_space(folder)
-        with tarfile.open(archive, 'r:*') as handle:
-            members = []
-            total = 0
-            for member in handle:
-                total += member.size
-                if total > capacity or len(members) >= 100000:
-                    raise ValueError('DCT archive exceeds available capacity or the 100000-entry limit')
-                members.append(member)
+        from dctlib.retention import policy, check_transfer
+        check_transfer([archive])
+        capacity = min(capacity, policy()['transfer_bytes'] - archive.stat().st_size)
+        from dctlib.secure_io import anchored
+        from dctlib.archives import members as inspect_members
+        with anchored(archive) as archive_fd, anchored(folder, directory=True) as folder_fd:
+            members = inspect_members(archive_fd, capacity)
+            from dctlib import space
+            space.claim([space.filesystem(folder, sum(member.size for member in members if member.isfile()))])
             names = {}
             for member in members:
                 name = PurePosixPath(member.name)
@@ -370,6 +416,10 @@ def unpack_state(archive, folder, history=False):
                 if name != '.' and not history_member and not (name.startswith('data/') or name.startswith('configuration/') or name in
                         ('data', 'configuration', 'manifest.json', 'containers.json', 'networks.json', 'images.tar', 'checksums.json')):
                     raise ValueError('Unknown DCT archive member')
+                from dctlib.secure_io import MAX_JSON
+                binary = name == 'images.tar' or history and bool(re.fullmatch(r'history/[A-Za-z][A-Za-z0-9_-]{0,39}/(?:images.tar|disk.raw)', name))
+                if member.isfile() and not application_path(name) and not binary and member.size > MAX_JSON:
+                    raise ValueError('DCT archive configuration exceeds its size limit')
                 if member.issym():
                     # Application symlinks are preserved, but never followed while extracting.
                     if not application_path(name):
@@ -379,7 +429,8 @@ def unpack_state(archive, folder, history=False):
                     linked = names.get(str(target))
                     if target.is_absolute() or '..' in target.parts or not linked or not linked.isfile() or not application_path(name) or not application_path(str(target)):
                         raise ValueError('Unsafe DCT archive hard link')
-        worker.run(['tar', '--numeric-owner', '--xattrs', '--acls', '-xf', str(archive), '-C', str(folder)], timeout=86400)
+            os.lseek(archive_fd, 0, os.SEEK_SET)
+            worker.run(['tar', '--numeric-owner', '--xattrs', '--acls', '-xf', '/proc/self/fd/' + str(archive_fd), '-C', '/proc/self/fd/' + str(folder_fd)], timeout=86400, pass_fds=(archive_fd, folder_fd))
         return check_state(folder)
     except BaseException:
         shutil.rmtree(folder)
@@ -493,15 +544,39 @@ def restore_request(request, saved_info, overrides, identifier, source_id, vmid)
     return request
 
 
+@bounded
 def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None, template=False, trusted_hook=False, live_firewall=None, linked=False):
     folder = Path(folder)
     manifest = check_state(folder)
+    from dctlib import hardening
+    source_policy = hardening.mode(folder / 'configuration')
+    policy = 'hardened' if source_policy == 'hardened' or not worker.trusted_management() else 'standard'
+    disk_path = folder / 'configuration' / 'storage.json'
+    filesystem_storage = read(disk_path) if disk_path.exists() else {}
+    source_runtime = hardening.preserved(read(folder / 'configuration' / 'compose.runtime.json'), worker.node_runtime.load(), policy, storage=filesystem_storage)
+    from dctlib.retention import saved_images as retention_images, snapshots as retention_snapshots, container_logs
+    saved_containers = read(folder / 'containers.json')
+    retention_images(saved_containers)
+    history = folder / 'history'
+    if history.exists():
+        retention_snapshots(identifier, incoming=[p for p in history.iterdir() if p.is_dir()])
+    for container in saved_containers:
+        body = {'HostConfig': copy.deepcopy(container['HostConfig'])}
+        container_logs(body)
+    limits, resource_defaults = worker.project_limits.import_policy(
+        folder / 'configuration', source_runtime, read(folder / 'containers.json'),
+        new_guest=live_firewall is None or identifier != manifest['id'])
+    if policy == 'hardened':
+        for container in read(folder / 'containers.json'):
+            body = copy.deepcopy(container['Config'])
+            body['HostConfig'] = copy.deepcopy(container['HostConfig'])
+            hardening.host(body, worker.node_runtime.load(), policy, storage=filesystem_storage)
     import service_security
-    service_security.check(read(folder / 'configuration' / 'compose.runtime.json'), worker.node_runtime.load())
+    service_security.check(source_runtime, worker.node_runtime.load())
     check_portable_networks(read(folder / 'configuration' / 'compose.runtime.json'))
     worker.project_id(identifier)
-    if not worker.trusted_management():
-        worker.validate_delegated_config(read(folder / 'configuration' / 'compose.runtime.json'), manifest['id'])
+    if not worker.trusted_management() or policy == 'hardened':
+        worker.validate_delegated_config(source_runtime, manifest['id'])
         worker.validate_delegated_containers(read(folder / 'containers.json'), manifest['id'])
         worker.validate_delegated_networks(read(folder / 'networks.json'))
         for mount in manifest['mounts']:
@@ -514,6 +589,8 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
         metadata_path = worker.METADATA / (identifier + '.json')
         if project.exists() or metadata_path.exists():
             raise ValueError('Restore requires a new DCT; existing deployment was not changed')
+        from dctlib import space
+        space.restore(identifier, folder, storage)
         vmid = next((number for number, owner in worker.reserved_ids().items() if owner['id'] == identifier and owner['node'] == node), None)
         if not vmid:
             raise ValueError('Reserve the destination DCT ID before restoring')
@@ -536,6 +613,8 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                     interface='bd' + identifier[:12], status='restoring', created=int(time.time()), template=bool(template))
         if 'interfaces' in request:
             info['interfaces'] = request['interfaces']
+        hardening.available(worker.node_runtime.load()) if policy == 'hardened' else None
+        info['security_policy'] = policy
         info['runtime_mode'] = worker.node_runtime.load().mode
         from dctlib.authorization import remember_owner
         project.mkdir(parents=True, mode=0o700)
@@ -554,14 +633,19 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                 path = folder / 'configuration' / filename
                 if path.exists():
                     shutil.copy2(path, project / filename)
+            worker.write_json(project / 'limits.json', limits)
+            if resource_defaults is not None:
+                worker.write_json(project / worker.project_limits.DEFAULT_FILE, resource_defaults)
+            worker.write_json(project / hardening.FILE, {'mode': policy})
             worker.ensure_address(info)
             manifest, runtime, volume_names, network_names, remap_source = adapted_state(folder, identifier, info['address'])
             if 'interfaces' in info:
                 from dctlib.endpoints import bind_runtime
                 runtime = bind_runtime(runtime, info)
+            runtime = hardening.preserved(runtime, worker.node_runtime.load(), policy, storage=filesystem_storage)
             containers = read(folder / 'containers.json')
             worker.project_limits.check_directory(project, runtime)
-            worker.project_limits.check_containers(containers, worker.project_limits.load(project))
+            worker.project_limits.check_containers(containers, worker.project_limits.load(project), runtime)
             info['expected'] = len(containers)
             worker.write_json(metadata_path, info)
             (project / 'pending-network.json').unlink(missing_ok=True)
@@ -630,7 +714,11 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                 worker.docker_engine('POST', '/networks/create', body)
             state['images'] = [{'tag': c['SnapshotTag'], 'id': c['SnapshotImage']} for c in containers]
             write(journal, state)
-            worker.run(['docker', 'image', 'load', '-i', str(folder / 'images.tar')], timeout=86400, capture_output=True)
+            result = worker.run(['docker', 'image', 'load', '-i', str(folder / 'images.tar')], timeout=86400, capture_output=True)
+            from dctlib.image_access import loaded
+            loaded(result, containers)
+            from dctlib.retention import imported_images
+            imported_images(containers)
             for container in containers:
                 body = copy.deepcopy(container['Config'])
                 body['Image'] = container['SnapshotImage']
@@ -673,6 +761,7 @@ def restore_state(folder, identifier, node, overrides, storage='', lock_fd=None,
                 # A restored/clone guest remains stopped independently of daemon restarts.
                 host['RestartPolicy'] = {'Name':'no', 'MaximumRetryCount':0}
                 body['HostConfig'] = host
+                container_logs(body)
                 body['NetworkingConfig'] = {'EndpointsConfig':{network_names[n]:{'Aliases':[a for a in e.get('Aliases') or [] if a != container['Id'][:12]]}
                     for n,e in container.get('NetworkSettings',{}).get('Networks',{}).items()}}
                 service = body['Labels'].get('com.docker.compose.service')
@@ -710,6 +799,10 @@ def cleanup_import(identifier, keep_reservation=False):
     if not journal.exists():
         return
     state = read(journal)
+    if state.get('id') != identifier:
+        raise ValueError('Invalid DCT import journal')
+    from dctlib.recovery import require_docker
+    require_docker()
     linked = worker.ROOT / identifier / 'linked-clone.json'
     if linked.exists():
         pending = read(linked)
@@ -735,6 +828,8 @@ def cleanup_import(identifier, keep_reservation=False):
     for name in state['networks']:
         inspected = worker.run(['docker','network','inspect',name],capture_output=True,check=False)
         if inspected.returncode:
+            if 'no such network' not in (inspected.stderr or '').lower():
+                raise ValueError('Cannot inspect import network; recovery state retained')
             continue
         network = json.loads(inspected.stdout)[0]
         if (network.get('Labels') or {}).get('com.docker.compose.project') != 'bd-'+identifier or network.get('Containers'):
@@ -743,6 +838,8 @@ def cleanup_import(identifier, keep_reservation=False):
     for name in state['volumes']:
         inspected = worker.run(['docker','volume','inspect',name],capture_output=True,check=False)
         if inspected.returncode:
+            if 'no such volume' not in (inspected.stderr or '').lower():
+                raise ValueError('Cannot inspect import volume; recovery state retained')
             continue
         volume = json.loads(inspected.stdout)[0]
         if (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-'+identifier:
@@ -753,6 +850,8 @@ def cleanup_import(identifier, keep_reservation=False):
         if not re.fullmatch('betterdocker-export/' + source + ':[0-9a-f]{32}', image['tag']):
             raise ValueError('Invalid import image ownership')
         inspected = worker.run(['docker','image','inspect','--format','{{.Id}}',image['tag']],capture_output=True,check=False)
+        if inspected.returncode and 'no such image' not in (inspected.stderr or '').lower():
+            raise ValueError('Cannot inspect import image; recovery state retained')
         if not inspected.returncode and inspected.stdout.strip() == image['id']:
             worker.run(['docker','image','rm','--force',image['tag']],capture_output=True,check=False)
     path = worker.METADATA / (identifier+'.json')
@@ -776,9 +875,12 @@ def cleanup_import(identifier, keep_reservation=False):
     journal.unlink()
 
 
+@bounded
 def clone(identifier, node, destination, options):
     linked = not options.get('full', True)
     with operation(identifier, 'clone') as lock, tempfile.TemporaryDirectory(prefix='betterdocker-clone-') as temporary:
+        with worker.locked(identifier):
+            worker.project_limits.preflight(identifier)
         if linked:
             info = worker.detail(identifier, node)
             from dctlib.disks import records

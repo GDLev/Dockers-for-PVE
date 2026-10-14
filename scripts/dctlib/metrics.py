@@ -1,5 +1,6 @@
 """Container measurements and chart history."""
 from datetime import datetime
+from .secure_io import read_json
 import json
 import os
 from pathlib import Path
@@ -79,7 +80,7 @@ def disk_usage(identifier, containers):
     path = worker.ROOT / identifier / 'disk-usage.json'
     ids = sorted(item['id'] for item in containers)
     try:
-        cached = json.loads(path.read_text()) if path.exists() else {}
+        cached = read_json(path) if path.exists() else {}
         if cached.get('ids') == ids and time.time() - cached.get('time', 0) < 60:
             return cached['usage']
     except (OSError, ValueError, KeyError):
@@ -105,7 +106,7 @@ def disk_usage(identifier, containers):
 def record_metrics(info):
     directory = worker.ROOT / info['id']
     path = directory / 'metrics.json'
-    history = json.loads(path.read_text()) if path.exists() else []
+    history = read_json(path) if path.exists() else []
     snapshot = info['metrics']
     previous = history[-1] if history else None
     if previous and snapshot['time'] - previous['time'] < 60:

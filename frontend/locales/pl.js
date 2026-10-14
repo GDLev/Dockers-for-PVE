@@ -160,7 +160,12 @@
             "No": "Nie",
             "Always": "Zawsze",
             "Overrule active shutdown tasks": "Przerwij aktywne zadania wyłączania",
-            "Update integration check": "Kontrola integracji po aktualizacji"
+            "Update integration check": "Kontrola integracji po aktualizacji",
+            "Security policy": "Polityka bezpieczeństwa",
+            "Hardened": "Wzmocniona",
+            "Standard": "Standardowa",
+            "Apply or revert pending changes before changing security policy": "Zastosuj lub wycofaj zmiany oczekujące przed zmianą polityki zabezpieczeń",
+            "Stop the DCT before changing security policy": "Zatrzymaj DCT przed zmianą polityki zabezpieczeń"
         }
     };
 })();

@@ -1,18 +1,22 @@
 """Preview immutable image changes and update stopped guests with snapshot recovery."""
+from .secure_io import read_json
 import json
 import re
 import time
 import uuid
 
 
+from .operation_capacity import bounded
+
+
 def state(directory):
     path = directory / 'image-update.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return read_json(path) if path.exists() else {}
 
 
 def overrides(config, directory):
     path = directory / 'images.json'
-    for name, saved in (json.loads(path.read_text()) if path.exists() else {}).items():
+    for name, saved in (read_json(path) if path.exists() else {}).items():
         image = saved['id'] if isinstance(saved, dict) else saved
         if not isinstance(image, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
             raise ValueError('Invalid saved image override')
@@ -25,7 +29,7 @@ def saved_images(directory):
     config = {'services': {}}
     overrides(config, directory)
     path = directory / 'images.json'
-    return [value['id'] if isinstance(value, dict) else value for value in (json.loads(path.read_text()) if path.exists() else {}).values()]
+    return [value['id'] if isinstance(value, dict) else value for value in (read_json(path) if path.exists() else {}).values()]
 
 
 def inspect(image, platform=None):
@@ -41,13 +45,14 @@ def deployed_image(container):
     return base if re.fullmatch(r'sha256:[0-9a-f]{64}', base) else container['Image']
 
 
+@bounded
 def preview(identifier, node, changes, digest):
     from . import projects as w
     with w.locked(identifier):
         w.detail(identifier, node)
         w.assert_configuration_digest(identifier, node, digest)
         directory = w.ROOT / identifier
-        config = json.loads((directory / 'compose.runtime.json').read_text())
+        config = read_json(directory / 'compose.runtime.json')
         if not isinstance(changes, dict) or not changes or set(changes) - config['services'].keys():
             raise ValueError('Select existing services to update')
         if state(directory).get('phase') == 'applying':
@@ -57,6 +62,8 @@ def preview(identifier, node, changes, digest):
         for name, image in changes.items():
             if not isinstance(image, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,254}', image):
                 raise ValueError('Invalid image reference')
+            from .image_access import reference
+            reference(image, identifier)
             service = config['services'][name]
             # Filesystem preservation changes the container image ID, while its
             # deployed base image remains the one recorded by Compose.
@@ -87,6 +94,7 @@ def preview(identifier, node, changes, digest):
         return plan
 
 
+@bounded
 def apply(identifier, node, token, recovery, digest):
     from . import projects as w
     with w.locked(identifier):
@@ -109,6 +117,11 @@ def apply(identifier, node, token, recovery, digest):
         changes = [row for row in plan['changes'] if row['changed']]
         if not changes:
             raise ValueError('Selected images are already current')
+        from . import hardening
+        config = read_json(directory / 'compose.runtime.json')
+        hardening.apply(config, w.node_runtime.load(), hardening.mode(directory))
+        if not w.trusted_management() or hardening.mode(directory) == 'hardened':
+            w.validate_delegated_config(config, identifier)
         for row in changes:
             if inspect(row['candidate'])['Id'] != row['candidate']:
                 raise ValueError('Previewed image is no longer available')
@@ -116,9 +129,8 @@ def apply(identifier, node, token, recovery, digest):
         w.project_snapshot(identifier, node, 'create', recovery, 'Image update recovery')
         plan.update(phase='applying', recovery=recovery)
         w.write_json(directory / 'image-update.json', plan)
-        config = json.loads((directory / 'compose.runtime.json').read_text())
         path = directory / 'images.json'
-        saved = json.loads(path.read_text()) if path.exists() else {}
+        saved = read_json(path) if path.exists() else {}
         for row in changes:
             saved[row['service']] = {'id': row['candidate'], 'reference': row['image']}
         w.write_json(path, saved)

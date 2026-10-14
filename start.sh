@@ -130,7 +130,7 @@ if [[ "$ACTION" == install ]]; then
     stage dependencies
     echo 'Updating the package index and installing BetterDocker dependencies.'
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ca-certificates curl iputils-arping isc-dhcp-client ndisc6 pve-xtermjs nftables iptables rsync
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml apparmor ca-certificates curl iputils-arping isc-dhcp-client ndisc6 pve-xtermjs nftables iptables rsync
     if [[ "$RUNTIME_MODE" == rootless ]]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y uidmap dbus-user-session
     fi
@@ -206,6 +206,7 @@ for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     TARGETS+=("/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")")
 done
 TARGETS+=(/usr/local/lib/betterdocker/service_security.py)
+TARGETS+=(/usr/local/lib/betterdocker/parse_config.py /usr/local/lib/betterdocker/archive_scan.py /usr/local/lib/betterdocker/security_install.py /etc/apparmor.d/betterdocker /etc/betterdocker/recovery.key)
 TARGETS+=(/usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py /usr/local/lib/betterdocker/rrd.pl)
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
@@ -262,6 +263,9 @@ done
 for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     install -m 0644 "$source" "/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")"
 done
+install -m 0755 "$PROJECT_DIR/scripts/archive_scan.py" /usr/local/lib/betterdocker/archive_scan.py
+install -m 0755 "$PROJECT_DIR/scripts/parse_config.py" /usr/local/lib/betterdocker/parse_config.py
+install -m 0755 "$PROJECT_DIR/scripts/security_install.py" /usr/local/lib/betterdocker/security_install.py
 install -m 0644 "$PROJECT_DIR/scripts/service_security.py" /usr/local/lib/betterdocker/service_security.py
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
 install -d -m 0755 /usr/share/perl5/PVE/CLI
@@ -323,6 +327,7 @@ fi
 stage runtime
 bash /usr/local/lib/betterdocker/docker-install.sh "$RUNTIME_MODE"
 python3 /usr/local/lib/betterdocker/runtime_install.py initialize --runtime="$RUNTIME_MODE"
+python3 /usr/local/lib/betterdocker/security_install.py "$RUNTIME_MODE" "$PROJECT_DIR/assets/betterdocker.apparmor"
 # Refresh existing mount definitions too; repair must fix their boot ordering.
 python3 - <<'PY'
 import sys
@@ -342,6 +347,7 @@ systemctl enable --now betterdocker-firewall.service
 systemctl start betterdocker-firewall-restore.service
 systemctl restart betterdocker-firewall.service
 systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer betterdocker-lifecycle.service
+systemctl restart betterdocker-addresses.service
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'

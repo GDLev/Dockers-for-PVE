@@ -2,6 +2,8 @@
 import json
 import subprocess
 import time
+import os
+from .operation_capacity import bounded, descriptor, ENV
 
 
 def bandwidth(operation, storages):
@@ -13,12 +15,15 @@ def bandwidth(operation, storages):
     return int(limit or 0) * 1024
 
 
+@bounded
 def send(command, archive, rate=0, timeout=86400):
+    slot = descriptor()
+    child_options = {'pass_fds': (slot,), 'env': dict(os.environ, **{ENV: str(slot)})}
     if not rate:
-        return subprocess.run(command, stdin=archive, check=True, timeout=timeout)
+        return subprocess.run(command, stdin=archive, check=True, timeout=timeout, **child_options)
     started = time.monotonic()
     sent = 0
-    with subprocess.Popen(command, stdin=subprocess.PIPE) as child:
+    with subprocess.Popen(command, stdin=subprocess.PIPE, **child_options) as child:
         try:
             while True:
                 block = archive.read(min(65536, rate))
@@ -27,10 +32,14 @@ def send(command, archive, rate=0, timeout=86400):
                 child.stdin.write(block)
                 child.stdin.flush()
                 sent += len(block)
-                while sent / rate > time.monotonic() - started:
-                    if time.monotonic() - started >= timeout:
+                while True:
+                    elapsed = time.monotonic() - started
+                    delay = sent / rate - elapsed
+                    if delay <= 0:
+                        break
+                    if elapsed >= timeout:
                         raise subprocess.TimeoutExpired(command, timeout)
-                    time.sleep(min(.2, sent / rate - (time.monotonic() - started)))
+                    time.sleep(min(.2, delay))
             child.stdin.close()
             code = child.wait(timeout=max(1, timeout - (time.monotonic() - started)))
             if code:

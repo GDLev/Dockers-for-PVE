@@ -1,4 +1,5 @@
 """Recreate stopped bindings without discarding a container's writable layer."""
+from .secure_io import read_json
 import copy
 import json
 import re
@@ -11,7 +12,7 @@ def reconcile(info):
     if not marker.exists():
         return
     w.require_stopped(w.container_records(info['id']))
-    if 'containers' in json.loads(marker.read_text()):
+    if 'containers' in read_json(marker):
         # Resume journals created by pre-transaction releases before upgrading.
         return legacy_reconcile(info)
     from .service_recreate import replace_bindings, prune_images
@@ -27,7 +28,7 @@ def legacy_reconcile(info):
     if not marker.exists():
         return
     w.require_stopped(w.container_records(info['id']))
-    saved = json.loads(marker.read_text())
+    saved = read_json(marker)
     if 'containers' not in saved:
         rows = w.snapshot_containers(info['id'])
         saved['containers'] = []
@@ -36,7 +37,7 @@ def legacy_reconcile(info):
             # Journal the tag before committing, so an interrupted commit can be retried.
             saved['containers'].append({'source': row, 'tag': tag})
         w.write_json(marker, saved)
-    runtime = json.loads((directory / 'compose.runtime.json').read_text())
+    runtime = read_json(directory / 'compose.runtime.json')
     for entry in saved['containers']:
         row = entry['source']
         if not entry.get('image'):
@@ -67,7 +68,7 @@ def legacy_reconcile(info):
         w.write_json(marker, saved)
     restored = directory / 'snapshot-restored.json'
     if restored.exists():
-        state = json.loads(restored.read_text()); state.update(containers=[r['created'] for r in saved['containers']], address=info['address'],
+        state = read_json(restored); state.update(containers=[r['created'] for r in saved['containers']], address=info['address'],
             addresses=sorted({p['host_ip'] for service in runtime['services'].values() for p in service.get('ports', [])}))
         w.write_json(restored, state)
     marker.unlink()

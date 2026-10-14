@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 """Operations behind the native PVE dct command handler."""
+# Check the installed code tree before importing non-frozen modules.
+import os as _boot_os
+import sys as _boot_sys
+if __file__.startswith('/usr/local/lib/betterdocker/'):
+    _boot_root = '/usr/local/lib/betterdocker'
+    for _boot_dir, _boot_dirs, _boot_files in _boot_os.walk(_boot_root, followlinks=False):
+        for _boot_name in [_boot_dir, *(_boot_os.path.join(_boot_dir, n) for n in _boot_dirs + _boot_files)]:
+            _boot_info = _boot_os.stat(_boot_name, follow_symlinks=False)
+            if _boot_info.st_uid != 0 or _boot_info.st_mode & 0o022 or _boot_os.path.islink(_boot_name):
+                _boot_sys.stderr.write('BetterDocker: unsafe installed helper ownership or permissions\n')
+                raise SystemExit(1)
 import json
 import os
 from pathlib import Path
@@ -144,6 +155,7 @@ def configuration(base, info, params):
     value = api('get', base + '/config')
     value.pop('digest', None)
     value['hostname'] = info['name']
+    value['security-policy'] = info.get('security_policy', 'standard')
     network = api('get', base + '/network')
     if not params.get('current'):
         network.update(network.get('pending', {}))
@@ -257,7 +269,7 @@ def dispatch(command, params):
         return
     params = dict(params)
     for key in ('vmid', 'newid', 'memory', 'swap', 'cpuunits', 'pids', 'timeout',
-                'onboot', 'protection', 'restart', 'start', 'cluster', 'current', 'verbose', 'full'):
+                'onboot', 'protection', 'restart', 'start', 'cluster', 'current', 'verbose', 'full', 'services', 'replicas', 'exempt'):
         if key in params:
             params[key] = int(params[key])
     if 'cpulimit' in params:
@@ -289,16 +301,19 @@ def dispatch(command, params):
         return
     if command == 'limits':
         path = guest(params['vmid'])
-        keys = {'cpus', 'memory', 'pids'} & params.keys()
+        keys = {'cpus', 'memory', 'pids', 'services', 'replicas', 'exempt'} & params.keys()
         if keys:
             old = api('get', path + '/limits')
             values = {key: params.get(key, old[key]) for key in ('cpus', 'memory', 'pids')}
             values['cpus'] = float(values['cpus'])
             values.update(memory=int(values['memory']), pids=int(values['pids']), digest=old['digest'])
+            values.update({key: params[key] for key in ('services', 'replicas') if key in params})
+            if 'exempt' in params:
+                values['exempt'] = bool(params['exempt'])
             result = api('set', path + '/limits', **values)
         else:
             result = api('get', path + '/limits')
-        print('\n'.join(f'{key}: {result[key]}' for key in ('cpus', 'memory', 'pids')))
+        print('\n'.join(f'{key}: {result[key]}' for key in ('cpus', 'memory', 'pids', 'services', 'replicas', 'exempt') if key in result))
         return
     if command == 'create':
         finish_task(create(params), params)
@@ -354,6 +369,10 @@ def dispatch(command, params):
         else:
             output(rows, params)
     elif command == 'set':
+        if 'security-policy' in params:
+            finish_task(api('set', base + '/security-policy', mode=params['security-policy'], digest=info['digest']), params)
+            params = dict(params); params.pop('security-policy')
+            info = api('get', base + '/management')
         set_options(base, info, params)
     elif command == 'recover':
         finish_task(api('create', base + '/recover'), params)

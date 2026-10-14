@@ -3,7 +3,7 @@ from pathlib import PurePath
 
 CONFIG_FILES = ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json',
                 'images.json', 'service-defaults.json', 'settings.json', 'pending.json',
-                'pending-network.json', 'notes.txt', 'limits.json')
+                'pending-network.json', 'notes.txt', 'limits.json', 'resource-defaults.json', 'security-policy.json')
 CONTROL_NAMES = frozenset(CONFIG_FILES) | frozenset({
     'settings-transaction.json', 'deployment-transaction.json', 'image-update.json',
     'storage.json', 'storage.ext4', 'ha.json', 'snapshots', 'export-transaction.json',

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Native host Docker projects. Public cluster metadata never contains deployment secrets."""
+from .secure_io import read_json, read_text
 import argparse
 import contextlib
 from datetime import datetime
@@ -181,7 +182,7 @@ from .deployment import (
 
 def reserved_ids():
     registry = METADATA / 'ids'
-    return {int(path.stem): json.loads(path.read_text()) for path in registry.glob('*.json')}
+    return {int(path.stem): read_json(path) for path in registry.glob('*.json')}
 
 
 def reserve_id(identifier, node, preferred=None):
@@ -192,7 +193,7 @@ def reserve_id(identifier, node, preferred=None):
         if entry['id'] == identifier:
             path = METADATA / (identifier + '.json')
             if path.exists():
-                info = json.loads(path.read_text())
+                info = read_json(path)
                 info['vmid'] = vmid
                 write_json(path, info)
             return vmid
@@ -211,7 +212,7 @@ def reserve_id(identifier, node, preferred=None):
     write_json(METADATA / 'ids' / f'{vmid}.json', {'id': identifier, 'node': node})
     path = METADATA / (identifier + '.json')
     if path.exists():
-        info = json.loads(path.read_text())
+        info = read_json(path)
         info['vmid'] = vmid
         write_json(path, info)
     return vmid
@@ -225,6 +226,10 @@ def release_id(identifier):
             (METADATA / 'ids' / f'{vmid}.json').unlink()
 
 
+from .operation_capacity import bounded_command
+
+
+@bounded_command
 def run(args, **kwargs):
     # Compose diagnostics can echo interpolated environment values. Keep stderr
     # out of native task logs until it has passed through credential redaction.
@@ -232,8 +237,13 @@ def run(args, **kwargs):
     if private_stderr:
         kwargs['stderr'] = subprocess.PIPE
     inherited = set(kwargs.get('pass_fds', ())) | set(getattr(_operation_fds, 'values', {}).values())
+    from .operation_capacity import descriptor, ENV
+    slot = descriptor()
+    if slot is not None:
+        inherited.add(slot)
     if inherited:
         kwargs['pass_fds'] = tuple(sorted(inherited))
+    filesystem_images = {}
     if args[:2] == ['docker', 'compose']:
         index = 2
         while index < len(args):
@@ -249,8 +259,21 @@ def run(args, **kwargs):
             for index, word in enumerate(args[:-1]):
                 if word in ('-f', '--file') and Path(args[index + 1]).name == 'compose.runtime.json':
                     project_limits.check_directory(Path(args[index + 1]).parent)
+                    from .hardening import apply, mode
+                    from .secure_io import read_json
+                    folder = Path(args[index + 1]).parent
+                    project_limits.preflight(folder.name)
+                    candidate = read_json(folder / 'compose.runtime.json')
+                    expected = apply(json.loads(json.dumps(candidate)), node_runtime.load(), mode(folder))
+                    if candidate != expected:
+                        raise ValueError('Canonical runtime does not enforce its security policy')
+                    from .filesystem_policy import compose_images
+                    filesystem_images = compose_images(expected, node_runtime.load(), mode(folder))
     kwargs.setdefault('timeout', 60)
-    kwargs.setdefault('env', {'PATH': os.environ.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin'), 'HOME': '/root'})
+    from .process import PATH
+    kwargs.setdefault('env', {'PATH': PATH, 'HOME': '/root'})
+    if slot is not None:
+        kwargs['env'] = dict(kwargs['env'], **{ENV: str(slot)})
     if args and args[0] == 'docker' and not trusted_management():
         client = ROOT.parent / 'delegated-client'
         client.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -260,7 +283,15 @@ def run(args, **kwargs):
             kwargs['env'][key] = os.environ[key]
     kwargs.setdefault('check', True)
     kwargs.setdefault('text', True)
+    if filesystem_images:
+        kwargs['filesystem_images'] = filesystem_images
     result = node_runtime.run(args, delegated=not trusted_management(), **kwargs)
+    if args and args[0] == 'docker' and result.returncode and kwargs.get('check') is False:
+        kind = args[1] if len(args) > 1 else ''
+        destructive = kind == 'rm' or args[1:3] in (['image', 'rm'], ['volume', 'rm'], ['network', 'rm'])
+        missing = 'container' if kind == 'rm' else kind
+        if destructive and 'no such ' + missing not in (result.stderr or '').lower():
+            raise ValueError('Cannot confirm Docker cleanup; recovery state was retained')
     if private_stderr and result.stderr:
         from .security_errors import redact
         print(redact(result.stderr), file=sys.stderr, end='')
@@ -279,7 +310,7 @@ def write_json(path, value, allow_migration_change=False):
         if owner and owner.get('node') != value.get('node'):
             raise ValueError('DCT ownership moved to another node')
         if path.exists() and not allow_migration_change:
-            existing = json.loads(path.read_text())
+            existing = read_json(path)
             if existing.get('migration'):
                 value = dict(value, migration=existing['migration'])
     # A refresh that started before migration must not overwrite the assigned ID.
@@ -287,28 +318,9 @@ def write_json(path, value, allow_migration_change=False):
         vmid = next((number for number, entry in reserved_ids().items() if entry['id'] == value['id']), None)
         if vmid:
             value = dict(value, vmid=vmid)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(value, indent=2) + '\n'
-    if path.exists() and path.read_text() == content:
-        return
-    # pmxcfs does not implement chmod: only public summaries are stored there.
-    fd, temporary = tempfile.mkstemp(prefix='.betterdocker-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w') as output:
-            output.write(content)
-            if not path.is_relative_to(METADATA):
-                output.flush()
-                os.fsync(output.fileno())
-        os.replace(temporary, path)
-        if not path.is_relative_to(METADATA):
-            directory_fd = os.open(path.parent, os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    from .secure_io import atomic_text, seal
+    value = seal(path, value)
+    atomic_text(path, json.dumps(value, indent=2) + '\n', public=path.is_relative_to(METADATA))
 
 
 _held_locks = threading.local()
@@ -361,7 +373,7 @@ def summaries():
     if METADATA.exists():
         for path in METADATA.glob('*.json'):
             try:
-                results.append(json.loads(path.read_text()))
+                results.append(read_json(path))
             except (ValueError, OSError):
                 continue
     return results
@@ -384,7 +396,7 @@ def container_records(identifier):
     recovery = ROOT / identifier / 'settings-transaction.json'
     backups = {}
     if recovery.exists():
-        journal = json.loads(recovery.read_text())
+        journal = read_json(recovery)
         from .service_recreate import validate_journal
         validate_journal(identifier, journal)
         backups = {entry['source']['Id']: entry['backup'] for entry in journal['entries'] if entry.get('source')}
@@ -415,7 +427,7 @@ def notes(identifier, node, description=None):
             raise ValueError('Notes cannot exceed 8192 characters')
         path.write_text(description)
         os.chmod(path, 0o600)
-    return {'description': path.read_text() if path.exists() else ''}
+    return {'description': read_text(path) if path.exists() else ''}
 
 
 def console_target(identifier, node, container, shell):
@@ -436,9 +448,11 @@ def current_node():
 def configuration_digest(directory, deployment, protection=False, tags='', lifecycle=None):
     # Runtime files include assigned IPs and Docker state, not source configuration.
     state = {'deployment': deployment, 'settings': load_settings(directory),
-             'storage': json.loads((directory / 'storage.json').read_text()) if (directory / 'storage.json').exists() else None}
+             'storage': read_json(directory / 'storage.json') if (directory / 'storage.json').exists() else None}
+    if (directory / 'security-policy.json').exists():
+        state['security_policy'] = read_json(directory / 'security-policy.json')
     if (directory / 'images.json').exists():
-        state['images'] = json.loads((directory / 'images.json').read_text())
+        state['images'] = read_json(directory / 'images.json')
     if (directory / 'limits.json').exists():
         state['project_limits'] = project_limits.load(directory)
     if lifecycle:
@@ -448,8 +462,8 @@ def configuration_digest(directory, deployment, protection=False, tags='', lifec
     if tags:
         state['tags'] = tags
     notes_path = directory / 'notes.txt'
-    if notes_path.exists() and notes_path.read_text():
-        state['description'] = notes_path.read_text()
+    if notes_path.exists() and read_text(notes_path):
+        state['description'] = read_text(notes_path)
     pending = load_pending(directory)
     if pending:
         state['pending'] = pending
@@ -461,11 +475,11 @@ def configuration_digest(directory, deployment, protection=False, tags='', lifec
 
 def assert_configuration_digest(identifier, node, expected):
     path = METADATA / (project_id(identifier) + '.json')
-    info = json.loads(path.read_text()) if path.exists() else {}
+    info = read_json(path) if path.exists() else {}
     if info.get('migration'):
         raise ValueError('DCT migration is in progress; recover it before changing configuration')
     journal = ROOT / identifier / 'snapshot-transaction.json'
-    if journal.exists() and json.loads(journal.read_text()).get('action') == 'restore':
+    if journal.exists() and read_json(journal).get('action') == 'restore':
         raise ValueError('Retry the interrupted snapshot rollback before changing configuration')
     if expected is None or expected == '':
         return  # Like PVE, older API clients may omit optimistic concurrency checks.
@@ -477,13 +491,13 @@ def assert_configuration_digest(identifier, node, expected):
 
 def detail(identifier, node):
     identifier = project_id(identifier)
-    info = json.loads((METADATA / (identifier + '.json')).read_text())
+    info = read_json(METADATA / (identifier + '.json'))
     if info['node'] != node or node != current_node():
         raise ValueError('Project belongs to another node')
     from .authorization import check_context
     check_context(identifier, info)
     directory = ROOT / identifier
-    deployment = json.loads((directory / 'request.json').read_text())
+    deployment = read_json(directory / 'request.json')
     from .security_errors import remember_environment
     remember_environment(deployment.get('environment', ''))
     return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup', 'template', 'hookscript') if info.get(key)}))
@@ -537,7 +551,7 @@ def project_config(identifier, node, changes, digest=None):
         authorize_config_keys(changes)
         info.pop('deployment', None)
         path = ROOT / identifier / 'notes.txt'
-        previous = path.read_text() if path.exists() else None
+        previous = read_text(path) if path.exists() else None
         try:
             if 'description' in changes:
                 fd, temporary = tempfile.mkstemp(prefix='.notes-', dir=path.parent)
@@ -621,12 +635,12 @@ def refresh(node):
             if not (METADATA / (info['id'] + '.json')).exists():
                 continue
             recover_network_transaction(info['id'], node)
-            info.update(json.loads((METADATA / (info['id'] + '.json')).read_text()))
+            info.update(read_json(METADATA / (info['id'] + '.json')))
             if info['node'] != node or info.get('ha_recovery'):
                 continue
             try:
                 journal = ROOT / info['id'] / 'snapshot-transaction.json'
-                if journal.exists() and json.loads(journal.read_text()).get('action') == 'create':
+                if journal.exists() and read_json(journal).get('action') == 'create':
                     recover_snapshot_transaction(info['id'])
                 sync_dhcp(info)
             except (ValueError, OSError, subprocess.SubprocessError) as error:
@@ -671,7 +685,7 @@ def refresh(node):
                     if snapshot.get('ha_recovery'):
                         continue
                     record_metrics(snapshot)
-                    public = json.loads((METADATA / (info['id'] + '.json')).read_text())
+                    public = read_json(METADATA / (info['id'] + '.json'))
                     public['metrics'] = {key: snapshot['metrics'][key] for key in ('cpu', 'cpus', 'mem', 'maxmem', 'uptime', 'time')}
                     write_json(METADATA / (info['id'] + '.json'), public)
         except (ValueError, OSError, subprocess.SubprocessError) as error:
@@ -690,6 +704,9 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
             raise ValueError('Unsupported operation')
         if info.get('template') and operation in ('start', 'restart', 'reboot'):
             raise ValueError('A DCT template cannot be started; clone it first')
+        if operation in ('start', 'restart', 'reboot'):
+            from .hardening import check_profile
+            check_profile(identifier)
         if operation == 'delete':
             if info.get('replication'):
                 raise ValueError('Remove replication jobs and their state disk before deleting the DCT')
@@ -766,7 +783,7 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
                 remove_owned_data(identifier, owned_volumes)
             if storage_config(identifier).get('volid'):
                 reservation = METADATA / 'ids' / (str(info['vmid']) + '.json')
-                owner = json.loads(reservation.read_text())
+                owner = read_json(reservation)
                 if owner['id'] != identifier:
                     raise ValueError('DCT guest ID ownership changed')
                 write_json(reservation, dict(owner, name=info['name']))
@@ -794,7 +811,7 @@ def check_shutdown_cancellation(identifier):
     path = ROOT.parent / 'operations' / (project_id(identifier) + '.cancel.json')
     if not path.exists():
         return
-    request = json.loads(path.read_text())
+    request = read_json(path)
     process_start = (PROC / str(os.getpid()) / 'stat').read_text().split(') ', 1)[1].split()[19]
     if request.get('pid') == os.getpid() and request.get('process_start') == process_start:
         raise ValueError('Shutdown interrupted by Stop.')
@@ -804,7 +821,7 @@ def operation_state(identifier):
     path = ROOT.parent / 'operations' / (project_id(identifier) + '.json')
     if not path.exists():
         return {}
-    state = json.loads(path.read_text())
+    state = read_json(path)
     if state.get('active'):
         pid = state.get('pid', 0)
         try:
@@ -831,7 +848,7 @@ def operation_state(identifier):
 def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
     project_id(identifier)
     metadata = METADATA / (identifier + '.json')
-    info = json.loads(metadata.read_text()) if metadata.exists() else {}
+    info = read_json(metadata) if metadata.exists() else {}
     if info.get('migration') and name not in ('migrate', 'migration-prepare', 'migration-abort', 'migration-recovery'):
         raise ValueError('DCT migration is in progress; recover it before another operation')
     if info.get('template') and name in ('update', 'settings', 'network', 'snapshot-restore'):
@@ -894,7 +911,7 @@ def operation(identifier, name, overrule=False, service=None, wait_timeout=0):
             # Read identity again after acquiring the operation lock, before recovery
             # can mutate resources selected by an earlier API authorization.
             from .authorization import check_context
-            current = json.loads(metadata.read_text()) if metadata.exists() else {}
+            current = read_json(metadata) if metadata.exists() else {}
             check_context(identifier, current)
             if current.get('migration') and name not in ('migrate', 'migration-prepare', 'migration-abort', 'migration-recovery'):
                 raise ValueError('DCT migration is in progress; recover it before another operation')
@@ -935,15 +952,18 @@ def project_limit_config(identifier, node, values=None, digest=None):
         require_stopped(container_records(identifier))
         if info.get('template') or info.get('ha', {}).get('managed'):
             raise ValueError('Project budgets require an unmanaged non-template DCT')
-        ceilings = project_limits.validate(values)
-        config = json.loads((directory / 'compose.runtime.json').read_text())
+        existing = project_limits.load(directory)
+        ceilings = project_limits.validate(dict(existing, **values))
+        if (directory / project_limits.DEFAULT_FILE).exists() and not ceilings.get('exempt') and any(ceilings.get(key, 0) <= 0 for key in project_limits.KEYS | project_limits.COUNTS):
+            raise ValueError('Default delegated budgets require positive ceilings; use an explicit administrator exemption')
+        config = read_json(directory / 'compose.runtime.json')
         project_limits.check(config, ceilings)
-        apply_settings(config, load_pending(directory))
+        config = project_limits.pending_config(config, directory)
         project_limits.check(config, ceilings)
         records = container_records(identifier)
         if records and any(ceilings.values()):
             inspected = json.loads(capture(['docker', 'inspect', *[item['id'] for item in records]]))
-            project_limits.check_containers(inspected, ceilings)
+            project_limits.check_containers(inspected, ceilings, config)
         write_json(directory / 'limits.json', ceilings)
         os.chmod(directory / 'limits.json', 0o600)
         return ceilings
@@ -968,12 +988,15 @@ def service_action(identifier, node, service, verb, timeout=60):
         recover_network_transaction(identifier, node)
         info = detail(identifier, node)
         directory = ROOT / identifier
-        config = json.loads((directory / 'compose.runtime.json').read_text())
+        config = read_json(directory / 'compose.runtime.json')
         if service not in config['services'] or verb not in ('start', 'stop', 'restart', 'shutdown', 'reboot', 'force-stop'):
             raise ValueError('Invalid service operation')
         if info.get('template') and verb in ('start', 'restart', 'reboot'):
             raise ValueError('A DCT template cannot be started; clone it first')
         if verb in ('start', 'restart', 'reboot'):
+            from .hardening import check_profile
+            check_profile(identifier)
+            project_limits.preflight(identifier)
             prepare_network_start(info)
             prepare_firewall(info)
         if verb == 'start':
@@ -1016,7 +1039,7 @@ def project_logs(identifier, node, service='', container='', tail=200):
             raise ValueError('Container does not belong to this project')
         from .log_output import bounded
         return bounded(['docker', 'logs', '--timestamps', '--tail', str(tail), container])
-    config = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
+    config = read_json(ROOT / identifier / 'compose.runtime.json')
     if service and service not in config['services']:
         raise ValueError('Unknown service')
     from .log_output import bounded
@@ -1061,8 +1084,8 @@ def restored_start(identifier, service=None):
     marker = ROOT / identifier / 'snapshot-restored.json'
     if not marker.exists():
         return False
-    restored = json.loads(marker.read_text())
-    runtime = json.loads((ROOT / identifier / 'compose.runtime.json').read_text())
+    restored = read_json(marker)
+    runtime = read_json(ROOT / identifier / 'compose.runtime.json')
     addresses = {port.get('host_ip') for service_config in runtime['services'].values() for port in service_config.get('ports', [])}
     if addresses and addresses != set(restored.get('addresses', [restored.get('address')])):
         raise ValueError('DCT address changed after rollback; restore a snapshot again to rebind preserved filesystems')
@@ -1079,7 +1102,7 @@ def restored_start(identifier, service=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['retained-data', 'recover', 'dhcp6-client', 'dhcp6-release', 'disk', 'image-state', 'image-preview', 'image-apply', 'storage-volume-state', 'delete-storage-volume', 'project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
+    parser.add_argument('operation', choices=['cleanup-temporary', 'security-policy', 'set-security-policy', 'retained-data', 'recover', 'dhcp6-client', 'dhcp6-release', 'disk', 'image-state', 'image-preview', 'image-apply', 'storage-volume-state', 'delete-storage-volume', 'project-limits', 'network', 'network-config', 'firewall-check', 'daemon-unmanage', 'lifecycle', 'daemon-prepare', 'daemon-resume', 'lifecycle-stop', 'validate', 'create', 'detail', 'config', 'access-state', 'protection', 'check-digest', 'action', 'logs', 'restore', 'refresh', 'update', 'dhcp-client', 'dhcp-release', 'management', 'settings', 'pending', 'revert-settings', 'console-check', 'console', 'delegated-check', 'new-id', 'notes', 'rrddata', 'reserve-id', 'release-id', 'preview', 'tags', 'service-action', 'reset-settings', 'diagnostics', 'storage-limit', 'storage-config', 'purge-retained-storage', 'snapshots', 'snapshot', 'snapshot-config', 'snapshot-edit'])
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
     values = args.arguments
@@ -1103,13 +1126,13 @@ def main():
         from . import images
         with operation(values[0], 'update'):
             if args.operation == 'image-preview':
-                images.preview(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3])
+                images.preview(values[0], values[1], read_json(Path(values[2])), values[3])
             else:
                 images.apply(*values)
     elif args.operation == 'project-limits':
         if len(values) > 2:
             with operation(values[0], 'settings'):
-                result = project_limit_config(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3] if len(values) > 3 else None)
+                result = project_limit_config(values[0], values[1], read_json(Path(values[2])), values[3] if len(values) > 3 else None)
         else:
             result = project_limit_config(*values)
         print(json.dumps(result))
@@ -1121,23 +1144,36 @@ def main():
     elif args.operation == 'new-id':
         print(uuid.uuid4().hex)
     elif args.operation in ('validate', 'create'):
-        data = validate(json.loads(Path(values[0]).read_text()))
+        data = validate(read_json(Path(values[0])))
         if args.operation == 'create':
             with operation(values[2], 'create'):
                 create(data, values[1], values[2], values[3] if len(values) > 3 else None,
                        start=len(values) < 5 or values[4] != '0')
+    elif args.operation == 'cleanup-temporary':
+        if os.geteuid() != 0:
+            raise ValueError('Temporary cleanup requires the host administrator')
+        from . import retention, space
+        result = retention.sweep()
+        result['space_records_removed'] = space.sweep()
+        print(json.dumps(result))
+    elif args.operation == 'security-policy':
+        from .hardening import state
+        print(json.dumps(state(*values)))
+    elif args.operation == 'set-security-policy':
+        from .hardening import convert
+        convert(*values)
     elif args.operation == 'network-config':
         print(json.dumps(network_config(*values)))
     elif args.operation == 'network':
         with operation(values[0], 'network'):
-            project_network(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3] if len(values) > 3 else None)
+            project_network(values[0], values[1], read_json(Path(values[2])), values[3] if len(values) > 3 else None)
     elif args.operation == 'update':
         with operation(values[0], 'update'):
-            update(values[0], values[1], validate(json.loads(Path(values[2]).read_text())), values[3] if len(values) > 3 else None)
+            update(values[0], values[1], validate(read_json(Path(values[2]))), values[3] if len(values) > 3 else None)
     elif args.operation in ('dhcp-client', 'dhcp-release'):
         dhcp_client(values[0], release=args.operation == 'dhcp-release')
     elif args.operation == 'notes':
-        print(json.dumps(notes(values[0], values[1], Path(values[2]).read_text() if len(values) > 2 else None)))
+        print(json.dumps(notes(values[0], values[1], read_text(Path(values[2])) if len(values) > 2 else None)))
     elif args.operation == 'rrddata':
         print(json.dumps(rrddata(*values)))
     elif args.operation == 'management':
@@ -1149,7 +1185,7 @@ def main():
             revert_settings(*values)
     elif args.operation == 'settings':
         with operation(values[0], 'settings'):
-            service_settings(values[0], values[1], values[2], json.loads(Path(values[3]).read_text()), values[4] if len(values) > 4 else None)
+            service_settings(values[0], values[1], values[2], read_json(Path(values[3])), values[4] if len(values) > 4 else None)
     elif args.operation == 'firewall-check':
         firewall_check(*values)
     elif args.operation == 'delegated-check':
@@ -1171,7 +1207,7 @@ def main():
     elif args.operation == 'lifecycle-stop':
         lifecycle_stop(*values)
     elif args.operation == 'config':
-        project_config(values[0], values[1], json.loads(Path(values[2]).read_text()), values[3] if len(values) > 3 else None)
+        project_config(values[0], values[1], read_json(Path(values[2])), values[3] if len(values) > 3 else None)
     elif args.operation == 'access-state':
         print(json.dumps(access_state(*values)))
     elif args.operation == 'protection':
@@ -1187,7 +1223,7 @@ def main():
     elif args.operation == 'logs':
         print(project_logs(*values), end='')
     elif args.operation == 'preview':
-        print(json.dumps(preview(json.loads(Path(values[0]).read_text()), values[1] if len(values) > 1 else None)))
+        print(json.dumps(preview(read_json(Path(values[0])), values[1] if len(values) > 1 else None)))
     elif args.operation == 'tags':
         print(json.dumps(project_tags(*values)))
     elif args.operation == 'service-action':

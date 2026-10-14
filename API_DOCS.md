@@ -23,6 +23,7 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | GET / PUT | `G/config` | Notes, tags, protection, startup and hook configuration. |
 | GET / PUT | `G/network` | Endpoint settings, pending changes and firewall flag. PUT `revert=1` with `digest` to discard pending network changes. |
 | GET / PUT | `G/pending` | Service effective/pending values. PUT `service`, comma-separated `revert` keys and `digest` to discard selected changes. |
+| GET / PUT | `G/security-policy` | Read policy and conversion incompatibilities. PUT `mode=standard` or `mode=hardened` with `digest`; requires node `Sys.Modify` and a stopped DCT. Conversion preserves writable files and volumes. |
 | PUT | `G/settings` | Service settings; send `service`, JSON-encoded `settings` and `digest`. |
 | POST | `G/images/preview` | Pull images and prepare a preview; send JSON-encoded `images` mapping service names to image references, plus `digest`. |
 | GET | `G/images` | Read the prepared image IDs, token and recovery state. |
@@ -121,9 +122,11 @@ Resource options apply per service instance. Omit `--service` for a single-servi
 
 ## Project resource budgets
 
-`GET /nodes/{node}/docker/{id}/limits` returns `cpus`, `memory` in MiB, `pids` and a configuration `digest`. Reading requires `VM.Audit`.
+`GET /nodes/{node}/docker/{id}/limits` returns `cpus`, `memory` in MiB, `pids` and a configuration `digest`. Budgets may also include `services`, `replicas` and `exempt`. Reading requires `VM.Audit`.
 
-`PUT` to the same path sets all three ceilings. Send `cpus`, `memory`, `pids` and the last `digest`. Zero removes that ceiling. Changing a budget requires the guest configuration privileges and `Sys.Modify` on the node. The DCT must be stopped, outside HA and not a template.
+`PUT` to the same path sets the resource ceilings. Send `cpus`, `memory`, `pids` and the last `digest`. Optional `services` and `replicas` limit the number of services and total replicas. Optional `exempt=1` explicitly exempts a DCT from aggregate budgets. Changing any of these values requires guest configuration privileges and `Sys.Modify` on the node. The DCT must be stopped, outside HA and not a template.
+
+For legacy budgets, zero removes a ceiling. New delegated DCTs require positive ceilings unless an administrator explicitly enables the exemption. An exemption does not remove existing container caps or the Hardened security policy.
 
 For example, with the same authentication headers used above:
 
@@ -136,6 +139,8 @@ cpus=2&memory=1024&pids=512&digest={digest}
 
 Every service must have a finite limit for each active ceiling. The extension sums those limits across all declared replicas and rejects configurations exceeding the budget. It checks pending edits, deployment changes, saved containers and snapshot rollback. Docker enforces the individual container caps; unused capacity is not shared dynamically between services. CPU and memory reservations are not hard limits.
 
+Start, edits, scaling, clone and migration also check actual container caps through Docker inspection. Replacement checks the proposed Engine bodies together with unchanged containers before preparing resources. Clone and restore validate saved caps before creating the destination guest. New delegated clones and restores cannot inherit an administrator exemption; their inherited ceilings are capped by the destination node's defaults. Migration retains the existing guest's approved budget. These are per-DCT budgets, not a shared node-wide reservation.
+
 Budgets are preserved in backups, clones and migration. Snapshot rollback retains the current administrator budget. Changes are synchronous and return the saved ceilings, without a task dialog.
 
 From the node CLI:
@@ -143,7 +148,79 @@ From the node CLI:
 ```sh
 dct limits 100
 dct limits 100 --cpus 2 --memory 1024 --pids 512
+dct limits 100 --exempt 1
 ```
+
+### Defaults for new delegated DCTs
+
+Creation without node `Sys.Modify` supplies missing per-container caps: 1 CPU, 512 MiB RAM and 128 PIDs. The DCT receives an aggregate budget of 4 CPUs, 4096 MiB RAM and 1024 PIDs, with at most 8 services and 16 total replicas. Explicit Compose caps are retained and checked against that budget. An explicit unlimited value is rejected rather than replaced silently.
+
+The node administrator can change future defaults in root-owned `/etc/betterdocker/resource-policy.json`, with permissions `0600`:
+
+```json
+{
+  "container": {"cpus": 1, "memory": 512, "pids": 128},
+  "project": {"cpus": 4, "memory": 4096, "pids": 1024, "services": 8, "replicas": 16}
+}
+```
+
+All defaults and ceilings must be positive; one container's defaults must fit within the project budget. Each new delegated DCT stores its budget in `limits.json` and its container defaults in `resource-defaults.json` in its project directory. Later changes to node defaults do not rewrite existing DCTs. Node administrators creating DCTs retain the existing explicit-budget behavior.
+
+## Node operation limit
+
+Each node admits at most two expensive DCT operations at once by default. This includes deployment/image previews, image pulls and commits, snapshots, export/import and migration. Nested work and inherited local helpers share one reservation; each migration node reserves its own place. A full node returns `DCT operation limit reached on this node; retry after another task finishes`. Stop and status reads do not require a reservation.
+
+The node administrator can set a different limit in root-owned `/etc/betterdocker/operation-policy.json`, with permissions `0600`:
+
+```json
+{"max_concurrent": 2}
+```
+
+The value must be an integer from 1 to 64. Lowering it counts operations already running and prevents new admission until capacity is available. It does not cancel existing work. Kernel locks retain the reservation while an inherited child is active and release it when its last descriptor closes. This limits extension workers; it does not impose CPU or I/O quotas on the Docker daemon or workloads.
+
+## Retention budgets
+
+Root-owned `/etc/betterdocker/retention-policy.json` sets local artifact budgets. Use permissions `0600`. Without this file, the defaults are:
+
+```json
+{
+  "snapshots": 16,
+  "snapshot_bytes": 34359738368,
+  "preserved_image_bytes": 8589934592,
+  "log_file_bytes": 10485760,
+  "log_files": 3,
+  "transfer_bytes": 34359738368,
+  "node_transfer_bytes": 68719476736
+}
+```
+
+Byte limits are positive integers. Snapshot count and file bytes apply per DCT; preserved images have a separate per-DCT budget. Image accounting conservatively charges complete unique image sizes, including shared layers, plus projected new filesystem images. Native PVE disk snapshots are outside the snapshot file-byte budget; exported raw disks still count as temporary transfer data.
+
+New or recreated containers using `json-file` or `local` logging require rotation within the configured file size/count. Privileged external logging drivers are outside this local rotation policy. Existing containers are not recreated automatically.
+
+Transfers reserve the full per-operation allowance atomically against the node budget. Staging, unpacked state, copied history and the packed archive share that allowance. Leftover registered files and existing node transfer directories remain charged after a worker exits. Incoming archives stop at the byte limit; export/import also checks estimates and actual staged sizes. These are admission and retained-artifact checks, not filesystem quotas for arbitrary application writes.
+
+An exceeded budget rejects the operation. It does not prune snapshots, delete application data or discard recovery files. Remove artifacts explicitly or increase the administrator policy. Free-space and peak-storage checks are separate from these retention budgets.
+
+Before registering temporary transfer data, cleanup removes abandoned, explicitly enrolled `state.partial` receive files whose file and directory identities still match. It retains a directory containing an archive, extracted state, metadata or any other recovery file. Unregistered files are retained. Empty accounting records are removed; completed archives remain charged until explicitly removed. Admission locks and space reservations stay occupied while an inherited worker still holds its descriptor, even after the main worker exits. Destination space loans also track their active receiving workers.
+
+A node administrator can run `/usr/local/lib/betterdocker/provision.py cleanup-temporary` to perform the same cleanup and remove inactive peak-space accounting records. It does not call Docker, recover guests, delete images or remove completed archives. Repeating it is safe.
+
+## Peak-space checks
+
+Before backup quiescence, snapshots, rollback, filesystem preservation and disk allocation, the extension plans temporary copies and reserves free capacity on the node. Paths on the same filesystem share one total. Directory storage joins that filesystem total; native storage uses PVE's reported available capacity, grouping aliases of the same thin or ZFS pool. Disk growth reserves the added size, rather than the disk's existing allocation.
+
+Root-owned `/etc/betterdocker/space-policy.json`, with permissions `0600`, configures the safety margin:
+
+```json
+{"reserve_bytes": 1073741824, "overhead_percent": 10}
+```
+
+The defaults leave 1 GiB plus 10% of the estimated new space. Reservations are atomic and remain associated with the active DCT operation or helper. Native backup helpers retain the reservation through the parent PVE operation. An unavailable measurement or insufficient capacity rejects the operation before the guarded stop, pause or replacement.
+
+Migration holds a destination reservation over SSH before stopping the source. It updates that plan using the generated archive's size before sending data. Receiving and preparing the transfer share the held destination reservation. If the destination check fails, transfer does not proceed.
+
+Estimates include overlapping staging/archive data and Docker filesystem copies. Native allocation is accounted conservatively against storage capacity. These reservations coordinate extension operations; other host processes can still consume space, and growing source data may require a larger estimate. Retention budgets and filesystem quotas remain separate.
 
 ## Removing data
 
@@ -197,3 +274,15 @@ POST `G/clone` accepts `full=0` for linked clones of templates whose managed dis
 Network requests accept `ipv6mode=auto` for SLAAC and `ipv6mode=dhcp` for DHCPv6. Runtime addresses appear in `endpoint_ipv6`. IPv4 can be disabled with `ipv4mode=none`. Interfaces without addresses cannot publish ports. Endpoint acquisition does not replace host routes or DNS. VLAN tags select one VLAN per endpoint; a transparent L2 trunk is outside this published-port network model.
 
 Clone and restore `deployment` overrides accept the same IPv6 fields and an `interfaces` object for multiple endpoints. New guests receive new MAC addresses unless you specify them. Migration keeps the existing addresses and MACs.
+
+New delegated DCTs use Hardened policy: no new privileges, default seccomp and a bounded capability allowlist. Rootful workloads also require the enforcing `betterdocker-default` AppArmor profile. Rootless workloads do not support container AppArmor profiles. Only a node administrator can change the mandatory policy.
+
+A node administrator can require bounded writes for Hardened rootless DCTs by creating `/etc/betterdocker/filesystem-policy.json`, owned by root with mode `0600`:
+
+```json
+{"require_read_only_rootless": true}
+```
+
+The default is `false`. When enabled, the container root filesystem must be read-only. Writable mounts must use a managed project or additional data disk with a positive `size_mib`, or tmpfs with an explicit positive size. Docker named and anonymous volumes are not disk-capped and cannot be writable under this policy. Image-declared volumes need explicit mounts, too. Configure these mounts before enabling the policy. Images must be prebuilt; Compose and Engine creation use the inspected image ID, so a tag change cannot introduce an unchecked volume. Compose does not perform a later automatic pull. Image updates remain available through the DCT update workflow.
+
+Enabling the requirement does not recreate existing guests. Existing writable containers must be stopped and converted through the security-policy endpoint before their next Start. Pending edits cannot disable the requirement. Clone, restore and rollback reject incompatible mount layouts before changing guest state. Rootful and Standard DCTs retain their current behavior. Rootless writable-layer quotas remain unsupported. A managed data disk limits its own contents, not the container image, logs or tmpfs; tmpfs uses memory.

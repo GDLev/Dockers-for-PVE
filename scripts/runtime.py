@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 """Node runtime selection and the unprivileged Docker process boundary."""
+# Check the installed code tree before importing non-frozen modules.
+import os as _boot_os
+import sys as _boot_sys
+if __file__.startswith('/usr/local/lib/betterdocker/'):
+    _boot_root = '/usr/local/lib/betterdocker'
+    for _boot_dir, _boot_dirs, _boot_files in _boot_os.walk(_boot_root, followlinks=False):
+        for _boot_name in [_boot_dir, *(_boot_os.path.join(_boot_dir, n) for n in _boot_dirs + _boot_files)]:
+            _boot_info = _boot_os.stat(_boot_name, follow_symlinks=False)
+            if _boot_info.st_uid != 0 or _boot_info.st_mode & 0o022 or _boot_os.path.islink(_boot_name):
+                _boot_sys.stderr.write('BetterDocker: unsafe installed helper ownership or permissions\n')
+                raise SystemExit(1)
+from dctlib.secure_io import read_json
 import argparse
 import contextlib
 from dataclasses import dataclass
@@ -12,6 +24,7 @@ import socket
 import stat
 import struct
 import subprocess
+from dctlib.process import run as execute
 import sys
 import tempfile
 
@@ -44,6 +57,10 @@ class Runtime:
         client = str(Path(self.home) / '.docker')
         if delegated:
             client = '/var/lib/betterdocker/delegated-client'
+        config = Path(client) / 'config.json'
+        if config.exists():
+            from dctlib.secure_io import read_json
+            read_json(config, owner=self.uid)
         env = {'PATH': PATH, 'HOME': self.home, 'DOCKER_HOST': 'unix://' + self.socket,
                'DOCKER_CONFIG': client}
         if self.rootless:
@@ -80,7 +97,9 @@ def load():
         if Path('/etc/systemd/system/betterdocker-rootless.service').exists():
             raise ValueError('Runtime configuration is missing on a rootless-enabled node')
         return Runtime()
-    fd = os.open(CONFIG, os.O_RDONLY | os.O_NOFOLLOW)
+    from dctlib.secure_io import anchored as control_file, MAX_JSON, structure
+    with control_file(CONFIG) as pinned:
+        fd = os.dup(pinned)
     try:
         info = os.fstat(fd)
         if info.st_uid != 0 or info.st_mode & 0o022 or not stat.S_ISREG(info.st_mode):
@@ -91,7 +110,10 @@ def load():
                 raise ValueError('Runtime configuration directory is not trusted')
         with os.fdopen(fd) as handle:
             fd = None
-            data = json.load(handle)
+            raw = handle.read(MAX_JSON + 1)
+            if len(raw) > MAX_JSON:
+                raise ValueError('Runtime configuration exceeds its size limit')
+            data = structure(json.loads(raw))
     finally:
         if fd is not None:
             os.close(fd)
@@ -169,7 +191,7 @@ def prepare_compose(args, runtime):
     project = Path(args[args.index('--project-directory') + 1])
     config = project / 'compose.runtime.json'
     if config.exists():
-        prepare_bind_paths(project, json.loads(config.read_text()), runtime)
+        prepare_bind_paths(project, read_json(config), runtime)
 
 
 def prepare_bind_paths(project, value, runtime):
@@ -220,16 +242,16 @@ def check_resources(config, selected=None):
             raise ValueError('Writable-layer quotas are not supported by the rootless runtime')
 
 
-def run(args, *, delegated=False, **kwargs):
+def run(args, *, delegated=False, filesystem_images=None, **kwargs):
     runtime = load()
     if not args or args[0] != 'docker':
-        return subprocess.run(args, **kwargs)
+        return execute(args, **kwargs)
     args = list(args)
     kwargs['env'] = runtime.environment(delegated)
     if len(args) > 1 and args[1] == 'compose' and not runtime.rootless:
         for index, word in enumerate(args[:-1]):
             if word in ('-f', '--file') and Path(args[index + 1]).name == 'compose.runtime.json':
-                check_resources(json.loads(Path(args[index + 1]).read_text()), runtime)
+                check_resources(read_json(Path(args[index + 1])), runtime)
     if runtime.rootless:
         if delegated:
             client = Path(kwargs['env']['DOCKER_CONFIG'])
@@ -241,8 +263,10 @@ def run(args, *, delegated=False, **kwargs):
                 for index, word in enumerate(args[:-1]):
                     if word in ('-f', '--file') and Path(args[index + 1]).name == 'compose.runtime.json':
                         original = Path(args[index + 1])
-                        value = json.loads(original.read_text())
-                        for service in value.get('services', {}).values():
+                        value = read_json(original)
+                        for name, service in value.get('services', {}).items():
+                            if filesystem_images and name in filesystem_images:
+                                service['image'] = filesystem_images[name]
                             if service.get('ports') and service.get('deploy', {}).get('replicas', 1) != 1:
                                 raise ValueError('Published ports require one service instance')
                             service.pop('ports', None)
@@ -259,9 +283,17 @@ def run(args, *, delegated=False, **kwargs):
                         args[index + 1] = str(actual)
         kwargs.update(drop_options(runtime))
     with contextlib.ExitStack() as stack:
+        if args[1:3] == ['image', 'load'] and '-i' in args:
+            from dctlib.secure_io import anchored as control_file
+            from dctlib.archives import validate_images
+            index = args.index('-i')
+            source = stack.enter_context(control_file(args[index + 1]))
+            validate_images(fd=source)
+            del args[index:index + 2]
+            kwargs['stdin'] = stack.enter_context(os.fdopen(os.dup(source), 'rb'))
         # Root-owned backup paths are deliberately not made runtime-writable.
-        if runtime.rootless and args[1:3] in (['image', 'save'], ['image', 'load']):
-            option = '-o' if args[2] == 'save' else '-i'
+        if runtime.rootless and args[1:3] == ['image', 'save']:
+            option = '-o'
             if option in args:
                 index = args.index(option)
                 filename = args[index + 1]
@@ -270,7 +302,7 @@ def run(args, *, delegated=False, **kwargs):
                 kwargs['stdout' if option == '-o' else 'stdin'] = descriptor
                 if option == '-o' and kwargs.pop('capture_output', False):
                     kwargs['stderr'] = subprocess.PIPE
-        return subprocess.run(args, **kwargs)
+        return execute(args, **kwargs)
 
 
 def exec_docker(args, delegated=False):
@@ -316,7 +348,7 @@ def request(method, path, body, pass_fds=()):
         if runtime.rootless:
             body['Options']['com.docker.network.bridge.gateway_mode_ipv4'] = 'nat-unprotected'
     if runtime.rootless and os.geteuid() == 0:
-        result = subprocess.run([sys.executable, str(Path(__file__)), 'engine', method, path],
+        result = execute([sys.executable, str(Path(__file__)), 'engine', method, path],
                                 input=json.dumps(body), text=True, capture_output=True, check=True,
                                 env=runtime.environment(), pass_fds=pass_fds, **drop_options(runtime))
         return json.loads(result.stdout)
@@ -329,7 +361,9 @@ def request(method, path, body, pass_fds=()):
     try:
         connection.request(method, path, body=json.dumps(body), headers={'Content-Type': 'application/json'})
         response = connection.getresponse()
-        payload = response.read()
+        payload = response.read(32 * 1024 * 1024 + 1)
+        if len(payload) > 32 * 1024 * 1024:
+            raise ValueError('Docker response exceeded its size limit')
         if response.status not in (200, 201, 204):
             raise ValueError('Docker operation failed (HTTP ' + str(response.status) + '); see Task History')
         return json.loads(payload) if payload else {}
@@ -368,6 +402,8 @@ def anchored(path):
     path = Path(path).absolute()
     if '..' in path.parts:
         raise ValueError('Data path contains parent traversal')
+    if sys.platform == 'darwin' and path.parts[1:2] == ('var',):
+        path = Path('/private/var').joinpath(*path.parts[2:])
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in path.parts[1:]:
@@ -380,14 +416,7 @@ def anchored(path):
 
 
 def copy_data(source, destination, runner=None, rate_kib=0, contents=False):
-    runner = runner or subprocess.run
-    if not load().rootless:
-        if rate_kib:
-            runner(['rsync', '-aHAXS', '--numeric-ids', '--bwlimit=' + str(int(rate_kib)), '--',
-                    str(source) + ('/' if Path(source).is_dir() else ''), str(destination) + ('/' if Path(source).is_dir() else '')], check=True, timeout=86400)
-            return
-        runner(['cp', '-a', '--reflink=auto', '--', str(source) + ('/.' if contents else ''), str(destination)], check=True, timeout=86400)
-        return
+    runner = runner or execute
     with anchored(source) as fd:
         directory = stat.S_ISDIR(os.fstat(fd).st_mode)
         if directory and not contents:
@@ -402,12 +431,11 @@ def copy_data(source, destination, runner=None, rate_kib=0, contents=False):
 
 def data_directory(path):
     selected = load()
-    if not selected.rootless:
-        Path(path).mkdir(parents=True, exist_ok=True)
-        return
     path = Path(path).absolute()
     if '..' in path.parts:
         raise ValueError('Data path contains parent traversal')
+    if sys.platform == 'darwin' and path.parts[1:2] == ('var',):
+        path = Path('/private/var').joinpath(*path.parts[2:])
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in path.parts[1:]:
@@ -418,7 +446,7 @@ def data_directory(path):
             except FileExistsError:
                 pass
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            if created:
+            if created and selected.rootless:
                 os.fchown(next_fd, selected.uid, selected.gid)
             os.close(fd)
             fd = next_fd
@@ -427,14 +455,24 @@ def data_directory(path):
 
 
 def restore_data(source, destination, file=False, runner=None, rate_kib=0):
-    runner = runner or subprocess.run
+    runner = runner or execute
     selected = load()
     if not selected.rootless:
-        if rate_kib:
-            runner(['rsync', '-aHAXS', '--numeric-ids', '--bwlimit=' + str(int(rate_kib)), '--', str(source) + ('' if file else '/'),
-                    str(destination)], check=True, timeout=86400)
-            return
-        runner(['cp', '-a', '--', str(source) + ('' if file else '/.'), str(destination)], check=True, timeout=86400)
+        with contextlib.ExitStack() as stack:
+            src = stack.enter_context(anchored(source))
+            if file:
+                data_directory(Path(destination).parent)
+                parent = stack.enter_context(anchored(Path(destination).parent))
+                dst = os.open(Path(destination).name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                stack.callback(os.close, dst)
+            else:
+                data_directory(destination)
+                dst = stack.enter_context(anchored(destination))
+            command = (['rsync', '-aHAXS', '--numeric-ids', '--bwlimit=' + str(int(rate_kib))] if rate_kib and not file else
+                       ['cp', '-a'] + (['--dereference'] if file else ['--remove-destination'])) + ['--',
+                       '/proc/self/fd/' + str(src) + ('' if file else '/.'),
+                       '/proc/self/fd/' + str(dst) + ('' if file else '/.')]
+            runner(command, pass_fds=(src, dst), check=True, timeout=86400)
         return
     import host
     # Workload data is copied in the mapped user namespace, never as host root.

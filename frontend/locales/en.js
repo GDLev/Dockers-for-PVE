@@ -159,7 +159,12 @@
             "No": "No",
             "Always": "Always",
             "Overrule active shutdown tasks": "Overrule active shutdown tasks",
-            "Update integration check": "Update integration check"
+            "Update integration check": "Update integration check",
+            "Security policy": "Security policy",
+            "Hardened": "Hardened",
+            "Standard": "Standard",
+            "Apply or revert pending changes before changing security policy": "Apply or revert pending changes before changing security policy",
+            "Stop the DCT before changing security policy": "Stop the DCT before changing security policy"
         }
     };
 })();

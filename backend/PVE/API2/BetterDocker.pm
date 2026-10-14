@@ -154,6 +154,7 @@ sub capabilities {
         rollback => $granted->('VM.Snapshot.Rollback'),
         power => $granted->('VM.PowerMgmt'),
         ha => ($root_user || $rpc->check($user, '/', ['Sys.Modify'], 1)) ? 1 : 0,
+        hardening => ($root_user || ($configure && $rpc->check($user, "/nodes/$node", ['Sys.Modify'], 1))) ? 1 : 0,
         permissions => ($root_user || (defined($vmid) && $rpc->check($user, "/vms/$vmid", ['Permissions.Modify'], 1))) ? 1 : 0 };
 }
 
@@ -449,7 +450,7 @@ my %method_scopes = (
     service_action => 'power', shutdown => 'power', detail => 'configure',
     create => 'configure', preview => 'configure', update => 'configure',
     reset_settings => 'configure', set_project_limits => 'configure',
-    action => 'power', snapshot => 'snapshot',
+    action => 'power', snapshot => 'snapshot', security_policy => 'audit', set_security_policy => 'configure',
 );
 
 sub method_scope {
@@ -490,7 +491,7 @@ sub register_docker_method {
         } else {
             $caps = capabilities($param->{id}, $param->{node});
         }
-        if ($param->{id} && $param->{node} && $name =~ /^(?:image_preview|image_apply|update|template|destroy|service_action|set_disk|settings|set_project_limits|reset_settings|snapshot)$/ &&
+        if ($param->{id} && $param->{node} && $name =~ /^(?:image_preview|image_apply|update|template|destroy|service_action|set_disk|settings|set_project_limits|reset_settings|set_security_policy|snapshot)$/ &&
             ($name ne 'snapshot' || ($param->{action} // '') eq 'restore') && ha_managed($param->{id}, $param->{node})) {
             die "Remove the DCT from HA before changing its deployment, services or persistent state\n";
         }

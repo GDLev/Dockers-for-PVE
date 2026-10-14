@@ -1,4 +1,5 @@
 """Node startup, Docker restart handling and guest hooks."""
+from .secure_io import read_json
 import json
 import os
 from pathlib import Path
@@ -49,7 +50,7 @@ def restore_restart_policy(identifier, service=None):
     marker = worker.ROOT.parent / 'restart-paused' / (identifier + '.json')
     if not marker.exists():
         return
-    config = json.loads((worker.ROOT / identifier / 'compose.runtime.json').read_text())
+    config = read_json(worker.ROOT / identifier / 'compose.runtime.json')
     for item in worker.container_records(identifier):
         if item['state'] == 'running' and (service is None or item['service'] == service):
             policy = config['services'][item['service']].get('restart', 'no')
@@ -71,7 +72,7 @@ def daemon_prepare(node):
                 host = json.loads(worker.capture(['docker', 'inspect', item['id']]))[0]['HostConfig']
                 rows.append({'project': info['id'], 'id': item['id'], 'state': item['state'],
                              'policy': host['RestartPolicy']})
-        previous = json.loads(path.read_text()) if path.exists() else {}
+        previous = read_json(path) if path.exists() else {}
         saved = {row['id']: row for row in previous.get('containers', [])}
         for row in rows:
             if row['policy']['Name'] == 'no' and row['id'] in saved:
@@ -87,15 +88,20 @@ def daemon_resume(node):
     if not path.exists():
         return
     with worker.locked():
-        state = json.loads(path.read_text())
+        state = read_json(path)
         if state['boot_id'] != (worker.PROC / 'sys/kernel/random/boot_id').read_text().strip():
             # PVE's startall owns boot ordering. Policies are restored by project Start.
             path.unlink()
             return
-        if node_runtime.load().rootless or any(info.get('firewall') for info in worker.summaries() if info['node'] == node):
-            worker.run([str(worker.HELPERS / 'firewall.py'), 'apply'])
         owned = {item['id'] for info in worker.summaries() if info['node'] == node
                  for item in worker.container_records(info['id'])}
+        from .hardening import check_profile
+        for row in state['containers']:
+            if row['id'] in owned and row['state'] in ('running', 'restarting', 'paused') and not (worker.ROOT / row['project'] / 'ha.json').exists():
+                check_profile(row['project'])
+                worker.project_limits.preflight(row['project'])
+        if node_runtime.load().rootless or any(info.get('firewall') for info in worker.summaries() if info['node'] == node):
+            worker.run([str(worker.HELPERS / 'firewall.py'), 'apply'])
         for row in state['containers']:
             if (worker.ROOT / row['project'] / 'ha.json').exists():
                 continue
@@ -125,7 +131,7 @@ def daemon_unmanage(node):
         for info in worker.summaries():
             if info['node'] != node:
                 continue
-            config = json.loads((worker.ROOT / info['id'] / 'compose.runtime.json').read_text())
+            config = read_json(worker.ROOT / info['id'] / 'compose.runtime.json')
             for item in worker.container_records(info['id']):
                 policy = config['services'][item['service']].get('restart', 'no')
                 worker.run(['docker', 'update', '--restart=' + policy, item['id']], capture_output=True)
@@ -199,7 +205,7 @@ def guest_hook(info, phase):
         return
     path = worker.hook_journal(info['id'])
     # A killed hook may already have changed external state. Do not run it twice.
-    if path.exists() and json.loads(path.read_text()).get('executing'):
+    if path.exists() and read_json(path).get('executing'):
         raise ValueError('A hook was interrupted. Inspect Task History, then set or remove the hookscript to acknowledge it.')
     worker.write_json(path, {'phase': phase, 'executing': True})
     try:
@@ -223,7 +229,7 @@ def recover_guest_hook(info):
     path = worker.hook_journal(info['id'])
     if not path.exists():
         return
-    state = json.loads(path.read_text())
+    state = read_json(path)
     if state.get('executing'):
         worker.sync_guest_runtime_state(info)
         raise ValueError('A hook was interrupted. Inspect Task History, then set or remove the hookscript to acknowledge it.')

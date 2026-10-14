@@ -1,4 +1,5 @@
 """Managed PVE disks and writable-layer quotas."""
+from .secure_io import read_json, read_text
 import contextlib
 import json
 import os
@@ -16,7 +17,7 @@ def rootfs_quota_support():
         return {'supported': False, 'reason': 'Writable-layer quotas are not supported by the rootless runtime'}
     cache = worker.ROOT.parent / 'rootfs-quota.json'
     if cache.exists() and time.time() - cache.stat().st_mtime < 60:
-        return json.loads(cache.read_text())
+        return read_json(cache)
     result = {'supported': False, 'reason': 'Requires overlay2 on XFS with project quotas'}
     try:
         info = json.loads(worker.capture(['docker', 'info', '--format', '{{json .}}']))
@@ -41,10 +42,22 @@ def disk_mib(value):
 
 def storage_config(identifier):
     path = worker.ROOT / worker.project_id(identifier) / 'storage.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return read_json(path) if path.exists() else {}
 
 
 def pve_storage(identifier, action, **values):
+    if action in ('allocate', 'linked-clone', 'resize'):
+        from . import space
+        sid = values.get('storage') or values.get('volid', '').split(':', 1)[0]
+        required = int(values['size_mib']) * 1048576
+        if action == 'resize':
+            from .disks import records
+            current = worker.storage_config(identifier)
+            disk = next((disk for disk in [current, *records(current).values()] if disk.get('volid') == values['volid']), None)
+            if disk is None:
+                raise ValueError('Cannot measure the current disk before resizing')
+            required = max(0, required - int(disk['size_mib']) * 1048576)
+        space.claim([space.storage(sid, required)], identifier)
     payload = dict(values, id=worker.project_id(identifier), action=action)
     if worker.METADATA != Path('/etc/pve/betterdocker'):
         payload['metadata'] = str(worker.METADATA)
@@ -104,10 +117,14 @@ def recover_storage_transaction(identifier):
         if (folder / 'allocated-volume.json').exists():
             raise ValueError('Interrupted allocation: inspect allocated-volume.json before retrying')
         return
-    state = json.loads(journal.read_text())
+    state = read_json(journal)
     daemon_active = node_runtime.service('is-active', runner=worker.run).returncode == 0
-    if daemon_active:
-        worker.require_stopped(worker.container_records(identifier))
+    if not daemon_active:
+        from .recovery import DockerUnavailable
+        raise DockerUnavailable('Docker is unavailable; storage recovery was not performed')
+    from .recovery import require_docker
+    require_docker()
+    worker.require_stopped(worker.container_records(identifier))
     if state['operation'] == 'grow':
         settings = state['before']
         actual = worker.pve_storage(identifier, 'inspect', volid=settings['volid'])
@@ -120,7 +137,7 @@ def recover_storage_transaction(identifier):
         worker.write_json(folder / 'storage.json', settings)
     elif state.get('committed'):
         worker.storage_unit(identifier, worker.storage_config(identifier))
-        info = json.loads((worker.METADATA / (identifier + '.json')).read_text())
+        info = read_json(worker.METADATA / (identifier + '.json'))
         if state.get('reconcile'):
             (folder / 'snapshot-restored.json').unlink(missing_ok=True)
             worker.write_json(folder / 'network-reconcile.json', {'storage': True})
@@ -146,7 +163,7 @@ def recover_storage_transaction(identifier):
         (folder / 'compose.runtime.json').write_text(state['runtime'])
         allocation = folder / 'allocated-volume.json'
         if allocation.exists():
-            volid = json.loads(allocation.read_text())['volid']
+            volid = read_json(allocation)['volid']
             worker.pve_storage(identifier, 'free', volid=volid)
     (folder / 'allocated-volume.json').unlink(missing_ok=True)
     journal.unlink()
@@ -181,7 +198,7 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
         if before and size_mib < before['size_mib']:
             raise ValueError('Disks cannot shrink during a move')
         runtime = folder / 'compose.runtime.json'
-        original = runtime.read_text()
+        original = read_text(runtime)
         config = json.loads(original)
         if before:
             worker.storage_mount(identifier)
@@ -220,6 +237,8 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
         needed = sum(int(worker.capture(['du', '-sx', '-B1', str(path)]).split()[0]) for path in set(sources.values()) if path.exists())
         if needed + 64 * 1048576 > size_mib * 1048576 * .9:
             raise ValueError('Data disk is too small for existing data')
+        from .space import data_disk
+        data_disk(identifier, storage, size_mib * 1048576)
         # Copy a mounted source into a private staging directory before switching mounts.
         staging = folder / 'storage-transfer'
         if staging.exists():
@@ -403,7 +422,7 @@ def project_storage_limit(identifier, node, size_mib, digest=None, storage=''):
             worker.write_json(folder / 'storage.json', previous)
             return
         runtime = folder / 'compose.runtime.json'
-        original = runtime.read_text()
+        original = read_text(runtime)
         config = json.loads(original)
         mapping, sources = {}, {}
         for service in config['services'].values():

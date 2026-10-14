@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 """Root-only host plumbing for the configured rootless Docker namespace."""
+# Check the installed code tree before importing non-frozen modules.
+import os as _boot_os
+import sys as _boot_sys
+if __file__.startswith('/usr/local/lib/betterdocker/'):
+    _boot_root = '/usr/local/lib/betterdocker'
+    for _boot_dir, _boot_dirs, _boot_files in _boot_os.walk(_boot_root, followlinks=False):
+        for _boot_name in [_boot_dir, *(_boot_os.path.join(_boot_dir, n) for n in _boot_dirs + _boot_files)]:
+            _boot_info = _boot_os.stat(_boot_name, follow_symlinks=False)
+            if _boot_info.st_uid != 0 or _boot_info.st_mode & 0o022 or _boot_os.path.islink(_boot_name):
+                _boot_sys.stderr.write('BetterDocker: unsafe installed helper ownership or permissions\n')
+                raise SystemExit(1)
+from dctlib.secure_io import read_json
 import argparse
 import contextlib
 import fcntl
@@ -121,7 +133,7 @@ def setup_locked():
     with namespace() as (pid, inode, prefix, descriptors):
         links = json.loads(command(['ip', '-j', 'link', 'show']))
         link = next((item for item in links if item['ifname'] == LINK), None)
-        saved = json.loads(STATE.read_text()) if STATE.exists() else {}
+        saved = read_json(STATE) if STATE.exists() else {}
         if link and link.get('ifalias') != OWNER:
             raise ValueError('Rootless host interface is occupied by another owner')
         inner = json.loads(command(prefix + ['ip', '-j', 'link', 'show'], pass_fds=descriptors))
