@@ -150,7 +150,7 @@ def main():
         report.data['actor'] = actor; report.save()
         assert not any(r['userid'] == actor['user'] for r in live.api('get', '/access/users'))
         assert not any(r['roleid'] == actor['role'] for r in live.api('get', '/access/roles'))
-        live.api('create', '/access/roles', roleid=actor['role'], privs='VM.Audit VM.Console VM.PowerMgmt VM.Allocate VM.Clone VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Disk VM.Config.Options VM.Snapshot VM.Snapshot.Rollback Datastore.Audit Datastore.AllocateSpace SDN.Use')
+        live.api('create', '/access/roles', roleid=actor['role'], privs='VM.Audit VM.Console VM.PowerMgmt VM.Backup VM.Allocate VM.Clone VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Disk VM.Config.Options VM.Snapshot VM.Snapshot.Rollback Datastore.Audit Datastore.AllocateSpace SDN.Use')
         actor['role_created'] = True; report.save()
         live.api('create', '/access/users', userid=actor['user'], expire=int(time.time()) + 3600)
         actor['created'] = True; report.save()
