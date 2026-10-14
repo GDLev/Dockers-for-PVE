@@ -3,6 +3,16 @@
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 MODE=${1:-rootful}
+require_compose() {
+    local installed
+    installed=$(docker compose version --short)
+    installed=${installed#v}
+    if [[ ! $installed =~ ^[0-9]+\.[0-9]+\.[0-9]+([+][[:alnum:].-]+)?$ ]] || [[ $(printf '%s\n' 5.6.0 "$installed" | sort -V | head -n1) != 5.6.0 ]]; then
+        echo 'Docker Compose 5.6.0 or newer is required. Upgrade the Compose plugin before installing BetterDockers; older parsers can retain stale .env values during deployment edits.' >&2
+        exit 1
+    fi
+}
+
 if [[ "$MODE" == rootless ]]; then
     if ! command -v dockerd-rootless.sh >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
         if [[ ${BETTERDOCKER_PACKAGE_CONFIGURE:-0} == 1 ]]; then
@@ -31,11 +41,13 @@ SOURCES
         fi
         apt-get install -y docker-ce docker-ce-cli containerd.io docker-ce-rootless-extras docker-compose-plugin
     fi
+    require_compose
     echo 'Using rootless Docker binaries; the installer configures the dedicated user service.'
     exit 0
 fi
 [[ "$MODE" == rootful ]] || { echo 'Choose rootful or rootless' >&2; exit 2; }
 if command -v docker >/dev/null && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    require_compose
     echo 'Using the existing Docker Engine and Compose.'
     exit 0
 fi
@@ -74,3 +86,4 @@ fi
 systemctl enable --now docker
 docker info >/dev/null
 docker compose version
+require_compose
