@@ -81,6 +81,10 @@ For development deployments use `bash start.sh --development-source`; it prints 
 
 Required release checks run with Linux root privileges in disposable CI workers. `scripts/ci-dependencies.sh` installs a pinned Compose CLI without starting a daemon. `tests/check_release_ci.py` runs the non-invasive security contracts, Compose parsing, installer authentication and both PVE 9.1/9.2 source fixtures. Any skipped required test fails the job. The ordinary unit and frontend checks also run. `tests/check_unit.py` redirects node-control state to temporary files and mocks unrelated admission helpers for older Engine fixtures; the required policy suites exercise those helpers separately. Clean-node rootful/rootless installation remains a separate acceptance test before publication.
 
+GitLab jobs use a Linux Docker executor tagged `betterdockers-linux`. Run them on a disposable worker without privileged containers or a Docker socket mounted into job containers. The CI setup installs dependencies inside each job, not on a PVE host.
+
+Tags beginning with `test-acceptance-` on `git.example.org` project 2 enable the test publication job. It signs package artifacts with a disposable key, creates a release labelled TEST and verifies anonymous downloads against the built hashes and signature. That key must never become production trust.
+
 GitHub jobs have read-only repository permissions. External actions use commit hashes; GitLab images use registry digests. Compose uses a version and SHA-256 pin, and Python packages use hashes. CI workers still obtain distribution packages from their authenticated package repositories. Protect release tags and signing access; a successful untrusted pull-request job is not authorization to publish.
 
 Review upstream security notices regularly. Update action commits, image digests, Compose and Python hashes in a dedicated PR. Obtain pins from the upstream repository, registry or release, review the change, rerun required checks and the supported PVE fixture matrix on that exact commit, then approve the new pins. Do not use automatic mutable-tag refreshes for releases.
