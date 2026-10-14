@@ -50,6 +50,8 @@ def run_suite():
                 result.testsRun += outcome.testsRun
                 result.failures.extend(outcome.failures); result.errors.extend(outcome.errors)
                 result.skipped.extend(outcome.skipped)
+    for case, reason in result.skipped:
+        print('Unit skip:', case.id(), reason)
     print('Unit total:', result.testsRun, 'tests;', len(result.failures), 'failures;', len(result.errors), 'errors;', len(result.skipped), 'skipped')
     return result
 
