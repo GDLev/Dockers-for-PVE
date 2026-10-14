@@ -7,8 +7,8 @@ apt-get install -y --no-install-recommends docker.io curl ca-certificates openss
 /usr/bin/python3 -m venv /opt/betterdocker-ci-python
 /opt/betterdocker-ci-python/bin/python -m pip install --require-hashes -r requirements-test.txt
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/docker/compose/releases/download/v2.39.4/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
-printf '%s  %s\n' 7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4 /usr/local/lib/docker/cli-plugins/docker-compose | sha256sum --check --strict
+curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
+printf '%s  %s\n' 40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a /usr/local/lib/docker/cli-plugins/docker-compose | sha256sum --check --strict
 chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
 docker compose version
 # Privilege-drop fixtures need a real unprivileged reader and a root-controlled,
