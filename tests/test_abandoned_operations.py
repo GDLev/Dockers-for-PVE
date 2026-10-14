@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from test_worker import worker as w
-from dctlib import operation_capacity as c, retention as r, space as s
+from dctlib import cli, operation_capacity as c, retention as r, space as s
 
 ID = 'a' * 32
 
@@ -156,7 +156,7 @@ with c.reserve():
 
     def test_cleanup_command_requires_root_before_sweeping(self):
         with patch.object(sys,'argv',['provision.py','cleanup-temporary']), patch.object(os,'geteuid',return_value=1000), patch.object(r,'sweep') as clean:
-            with self.assertRaisesRegex(ValueError,'administrator'): w.main()
+            with self.assertRaisesRegex(ValueError,'administrator'): cli.main()
             clean.assert_not_called()
 
     def test_sequential_helpers_share_one_native_guest_reservation(self):

@@ -13,7 +13,7 @@ if __file__.startswith('/usr/local/lib/betterdocker/'):
                 raise SystemExit(1)
 import subprocess
 import sys
-from dctlib.projects import main
+from dctlib.cli import main
 from dctlib.security_errors import public_error
 from dctlib.authorization import require_host_root
 

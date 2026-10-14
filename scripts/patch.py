@@ -12,7 +12,6 @@ NODE_BLOCK = '''# BEGIN BETTERDOCKER
 use PVE::API2::BetterDocker;
 __PACKAGE__->register_method({ subclass => 'PVE::API2::BetterDocker', path => 'docker' });
 PVE::API2::BetterDocker::hook_native_node_operations();
-# lifecycle integration 2
 # END BETTERDOCKER
 '''
 CLUSTER_BLOCK = '''# BEGIN BETTERDOCKER
@@ -44,16 +43,15 @@ VZDUMP_PBS = """# BEGIN BETTERDOCKER
                 $pbs_group_name = "host/dct-$vmid";
 # END BETTERDOCKER
 """
-UI_BLOCK = '''<!-- BEGIN BETTERDOCKER -->
-<link rel="stylesheet" href="/pve2/css/betterdocker.css?v=19.85" />
+UI_BLOCK = f'''<!-- BEGIN BETTERDOCKER -->
+<link rel="stylesheet" href="/pve2/css/betterdocker.css?v={VERSION}" />
 <link rel="stylesheet" href="/xtermjs/xterm.css" />
 <script src="/xtermjs/xterm.js"></script>
 <script src="/xtermjs/addon-fit.js"></script>
-<script src="/pve2/js/betterdocker-locales/en.js?v=19.85"></script>
-<script src="/pve2/js/betterdocker-locales/pl.js?v=19.85"></script>
-<script src="/pve2/js/betterdocker.js?v=19.85"></script>
+<script src="/pve2/js/betterdocker-locales/en.js?v={VERSION}"></script>
+<script src="/pve2/js/betterdocker-locales/pl.js?v={VERSION}"></script>
+<script src="/pve2/js/betterdocker.js?v={VERSION}"></script>
 <!-- END BETTERDOCKER -->'''
-UI_BLOCK = re.sub(r'v=19\.85', 'v=' + VERSION, UI_BLOCK)
 
 
 NODE_LIFECYCLE = [
