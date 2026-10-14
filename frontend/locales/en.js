@@ -139,7 +139,7 @@
             "Uptime": "Uptime",
             "Container": "Container",
             "Choose a running container.": "Choose a running container.",
-            "Deployment action (legacy)": "Deployment action (legacy)",
+            "Deployment action": "Deployment action",
             "CPU usage": "CPU usage",
             "Memory usage": "Memory usage",
             "Static": "Static",

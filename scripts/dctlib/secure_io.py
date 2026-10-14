@@ -111,7 +111,7 @@ def read_json(path, owner=None):
         value = structure(json.loads(read_text(path, owner=owner), parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Non-finite JSON number'))))
         if journal(path) and KEY.exists():
             if not isinstance(value, dict) or not isinstance(value.get('_integrity'), str):
-                raise ValueError('Recovery journal is not authenticated; finish legacy recovery before upgrading')
+                raise ValueError('Recovery journal is not authenticated; manual recovery is required')
             signature = value.pop('_integrity')
             if not hmac.compare_digest(signature, seal(path, value)['_integrity']):
                 raise ValueError('Recovery journal integrity check failed')

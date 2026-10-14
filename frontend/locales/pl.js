@@ -140,7 +140,7 @@
             "Uptime": "Czas działania",
             "Container": "Kontener",
             "Choose a running container.": "Wybierz działający kontener.",
-            "Deployment action (legacy)": "Operacja wdrożenia (starsza wersja)",
+            "Deployment action": "Operacja wdrożenia",
             "CPU usage": "Użycie CPU",
             "Memory usage": "Użycie pamięci",
             "Static": "Statyczny",
