@@ -16,7 +16,7 @@ CONTROL = Path('/etc/betterdocker')
 STATE = Path('/var/lib/betterdocker/installer/release.json')
 MANIFEST = '.release.json'
 SIGNATURE = '.release.sig'
-SOURCE_PATHS = ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'packaging', 'install.sh', 'start.sh', 'README.md', 'API_DOCS.md', 'CONTRIBUTING.md', 'requirements-test.txt')
+SOURCE_PATHS = ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'packaging', 'install.sh', 'start.sh', 'README.md', 'API_DOCS.md', 'CONTRIBUTING.md', 'SECURITY.md', 'RELEASE_NOTES.md', 'requirements-test.txt')
 
 
 def digest(path):

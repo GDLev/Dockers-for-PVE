@@ -101,3 +101,13 @@ python3 tests/live_security_acceptance.py --revision <tested-commit> \
 The report is private and includes exact fixture IDs, node, name and a run marker. Cleanup refuses other identities, even when names share a prefix. After an interrupted run, inspect the journal and use the same command with `--cleanup`. Never remove test resources by a name prefix alone.
 
 A disabled cluster firewall leaves native guest ACCEPT/DROP traffic tests unverified. Missing VLAN/SDN environments and untested backend/mode combinations stay unverified too. Both backend policy fixtures are not evidence of both backends enforcing real traffic. Availability failures use isolated models; the original host services remain running. An independent manual review and clean signed installation acceptance are separate release requirements.
+
+## Publish a release
+
+The current build is unreleased. Complete external CI on the final commit, signed clean-node installation in both runtime modes, the remaining acceptance matrix, and independent manual review before publication. Local checks and disposable signing keys do not satisfy those requirements.
+
+Review [SECURITY.md](SECURITY.md), [RELEASE_NOTES.md](RELEASE_NOTES.md), the README, and HTTP API documentation against that tested commit. Record known restrictions and unresolved acceptance. Do not turn development test results into a claim of VM isolation or support for hostile workloads.
+
+The source archive includes these documents in its signed source manifest. DEBs include them under `/usr/share/doc/proxmox-betterdockers/`; the artifact check compares their hashes with the signed source. Cluster installer transfers retain the documents alongside the authenticated code.
+
+Establish the production signing key and independently confirmed fingerprint, then follow the signing procedure above. Publish the exact tested artifacts under a new immutable version. For affected releases or signing-key compromise, follow the withdrawal procedure in [SECURITY.md](SECURITY.md). Security reports go to [security@gdlev.dev](mailto:security@gdlev.dev), not public issues.

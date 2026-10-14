@@ -25,7 +25,7 @@ from installer_ui import Cancelled, Choice, MESSAGES, Terminal
 
 SOURCE = Path(__file__).resolve().parent.parent
 CACHE = Path('/var/lib/betterdocker/installer')
-FILES = ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'start.sh', 'install.sh', '.release.json', '.release.sig')
+FILES = ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'start.sh', 'install.sh', 'README.md', 'API_DOCS.md', 'CONTRIBUTING.md', 'SECURITY.md', 'RELEASE_NOTES.md', '.release.json', '.release.sig')
 SERVICES = ('pvedaemon', 'pveproxy', 'pvescheduler', 'pve-ha-crm', 'pve-ha-lrm')
 PROBE = '''import json,os,pathlib,subprocess
 p=pathlib.Path('/etc/betterdocker/runtime.json')
