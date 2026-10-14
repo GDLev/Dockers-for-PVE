@@ -1,4 +1,4 @@
-stages: [check, package, publish_test]
+stages: [check, package]
 
 # Project runner for these disposable Linux jobs.
 default:
@@ -38,19 +38,3 @@ package:
     paths: [dist/]
     expire_in: 30 days
 
-# Disposable signing only. Production releases require a separately held key.
-publish_test:
-  stage: publish_test
-  image: python:3.12-bookworm@sha256:5560e9ab8709f459489e5b8aa696eda8a07ef821e14bb122be62d91234bfa98b
-  needs:
-    - job: package
-      artifacts: true
-  rules:
-    - if: '$CI_SERVER_HOST == "git.example.org" && $CI_COMMIT_TAG =~ /^test-acceptance-/'
-  script:
-    - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates openssl
-    - python packaging/publish-test-release.py
-  artifacts:
-    paths:
-      - dist/TEST_PUBLICATION.json
-    expire_in: 30 days

@@ -38,7 +38,7 @@ Uninstalling the extension retains Docker workloads, data, and required host mai
 
 ## Hardened policy
 
-New DCTs created without node `Sys.Modify` use Hardened. Administrator-created or legacy DCTs can use Standard. Only a node administrator can change the policy of a stopped DCT.
+New DCTs created without node `Sys.Modify` use Hardened. Administrator-created DCTs can use Standard. Only a node administrator can change the policy of a stopped DCT.
 
 Hardened requires no new privileges, Docker's default seccomp filtering, and `cap_drop: [ALL]` with additions restricted to the extension's allowlist. It rejects privileged containers, shared host namespaces, devices, custom runtimes, and settings that weaken these requirements. Rootful Hardened also requires the installed `betterdocker-default` AppArmor profile in enforce mode. Rootless has no container AppArmor profile.
 
@@ -58,7 +58,7 @@ Log rotation is per container. Retention budgets and free-space reservations lim
 
 The current checkout has no established production signing key. Unsigned CI artifacts and a reviewed development checkout are not signed installation releases.
 
-Before publishing, complete the required release checks, clean signed installation acceptance, the remaining security matrix, and an independent manual review. Publish only the tested artifacts with signed metadata and a public-key fingerprint confirmed through an independent channel. See [release preparation](CONTRIBUTING.md) and [release notes](RELEASE_NOTES.md).
+Before publishing, complete the required release checks, clean signed installation acceptance, the supported environment matrix, and an independent manual review. Publish only the tested artifacts with signed metadata and a public-key fingerprint confirmed through an independent channel. See [release preparation](CONTRIBUTING.md) and [release notes](RELEASE_NOTES.md).
 
 For a confirmed release vulnerability, identify the affected versions, publish an advisory with the impact and mitigation, and withdraw affected downloads and installation instructions. Prepare and test a replacement release under a new version. Do not overwrite a published version with different bytes. Keep the advisory and affected hashes available so administrators can identify their installations.
 
