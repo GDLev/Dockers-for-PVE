@@ -18,7 +18,7 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | --- | --- | --- |
 | GET | `/nodes/<node>/docker` | List visible DCTs on a node. |
 | GET | `/nodes/<node>/docker?diagnostics=1` | Administrator diagnostics, including the node's `runtime` and `runtime_health`. Returns an array with one diagnostic object. |
-| POST | `/nodes/<node>/docker` | Create a DCT; send `deployment` as a JSON-encoded string and optional `pool` and `start`. Omitted `start` keeps the legacy API default of starting immediately. |
+| POST | `/nodes/<node>/docker` | Create a DCT; send `deployment` as a JSON-encoded string and optional `pool` and `start`. Omitted `start` starts the DCT immediately. |
 | GET | `G/management` | Status, services, capabilities and configuration digest. |
 | GET / PUT | `G/config` | Notes, tags, protection, startup and hook configuration. |
 | GET / PUT | `G/network` | Endpoint settings, pending changes and firewall flag. PUT `revert=1` with `digest` to discard pending network changes. |
@@ -126,7 +126,7 @@ Resource options apply per service instance. Omit `--service` for a single-servi
 
 `PUT` to the same path sets the resource ceilings. Send `cpus`, `memory`, `pids` and the last `digest`. Optional `services` and `replicas` limit the number of services and total replicas. Optional `exempt=1` explicitly exempts a DCT from aggregate budgets. Changing any of these values requires guest configuration privileges and `Sys.Modify` on the node. The DCT must be stopped, outside HA and not a template.
 
-For legacy budgets, zero removes a ceiling. New delegated DCTs require positive ceilings unless an administrator explicitly enables the exemption. An exemption does not remove existing container caps or the Hardened security policy.
+For administrator-managed budgets, zero removes a ceiling. New delegated DCTs require positive ceilings unless an administrator explicitly enables the exemption. An exemption does not remove existing container caps or the Hardened security policy.
 
 For example, with the same authentication headers used above:
 
