@@ -3,6 +3,7 @@
 
 Run after the existing preservation suite. Supply an unused IPv4/CIDR.
 """
+import live_environment as env
 import copy
 import json
 from pathlib import Path
@@ -122,7 +123,7 @@ disks.configure(identifier,node,'mp2',{'service':'app','target':'/more','storage
             children.append(child_vmid)
             from dctlib.endpoints import resolved
             used_ips = {endpoint.get('address') for guest in w.summaries() for endpoint in resolved(guest).values()}
-            clone_ip = sys.argv[2] if len(sys.argv) > 2 else next('192.0.2.' + str(last) + '/20' for last in range(200, 238) if '192.0.2.' + str(last) not in used_ips)
+            clone_ip = sys.argv[2] if len(sys.argv) > 2 else next(env.address(last) + '/' + str(env.prefix()) for last in range(200, 238) if env.address(last) not in used_ips)
             call('dct', 'clone', vmid, child_vmid, '--full', 0, '--hostname', 'linked-disk-test', '--net0', 'bridge=vmbr0,ip=' + clone_ip)
             child = next(row for row in api('get', '/cluster/resources', type='vm') if int(row['vmid']) == child_vmid)
             child_id = child['id'].split('/')[-1]

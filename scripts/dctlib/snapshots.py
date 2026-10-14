@@ -51,7 +51,7 @@ def snapshot_tree_state(identifier, names=None):
                 state['current'] = read_json(restored).get('name', '')
         if state.get('current') not in names:
             state['current'] = ''
-        # An invalid legacy sidecar must never make the tree recursive.
+        # An invalid sidecar must never make the tree recursive.
         for name in state['parents']:
             seen, parent = {name}, state['parents'][name]
             while parent:

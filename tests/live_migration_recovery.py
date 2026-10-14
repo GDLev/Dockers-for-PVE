@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
-sys.path[:0] = ['/usr/local/lib/betterdocker', '/tmp/bd-stage45-source/tests']
+sys.path.insert(0, '/usr/local/lib/betterdocker')
 from live_cluster import api, task, wait_for, base, get, current, power, command, fetch
 from dctlib import projects as w
 import transfer

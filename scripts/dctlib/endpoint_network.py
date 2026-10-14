@@ -129,16 +129,16 @@ def routing(info, remove=False):
 
 def ensure_address(info, wait=True):
     from . import projects as w
-    from . import network as legacy
+    from . import network
     addresses = {}
     for name, endpoint in model.resolved(info).items():
         parent = ensure_link(endpoint)
         if endpoint['ipv4mode'] == 'dhcp':
-            legacy.start_dhcp(endpoint)
+            network.start_dhcp(endpoint)
             import time
             deadline = time.monotonic() + (60 if wait else 0)
             while True:
-                lease = legacy.lease(endpoint)
+                lease = network.lease(endpoint)
                 if lease:
                     from .network_security import block_address
                     block_address(endpoint, lease['address'], 4)
