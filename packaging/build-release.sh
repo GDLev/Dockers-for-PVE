@@ -14,6 +14,10 @@ done
 find "$BUILD_DIR" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$BUILD_DIR" -name .DS_Store -delete
 find "$BUILD_DIR" -name '*.pyc' -delete
+# Runner checkout modes are not installation permissions.
+find "$BUILD_DIR" -type d -exec chmod 0755 {} +
+find "$BUILD_DIR" -type f -perm /111 -exec chmod 0755 {} +
+find "$BUILD_DIR" -type f ! -perm /111 -exec chmod 0644 {} +
 tar --sort=name --mtime="@$RELEASE_EPOCH" --owner=0 --group=0 --numeric-owner \
     -czf "$OUTPUT_DIR/betterdockers-$RELEASE_VERSION.tar.gz" -C "$BUILD_DIR" "betterdockers-$RELEASE_VERSION"
 (cd "$OUTPUT_DIR" && sha256sum "betterdockers-$RELEASE_VERSION.tar.gz" > SOURCE_SHA256SUMS)

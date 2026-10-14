@@ -22,7 +22,7 @@ Package: proxmox-betterdockers
 Version: @VERSION@
 Architecture: all
 Maintainer: BetterDockers contributors
-Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, openssl, apparmor, e2fsprogs, util-linux, rsync, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, ndisc6, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin | docker-compose-v2, uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
+Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, openssl, apparmor, e2fsprogs, util-linux, rsync, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, ndisc6, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin (>= 5.6.0) | docker-compose-v2 (>= 5.6.0), uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
 Recommends: docker-ce-rootless-extras
 Description: Native Proxmox VE interface for host Docker Compose projects
 CONTROL
@@ -109,4 +109,8 @@ case "$1" in
 esac
 PRERM
 chmod 0755 "$BUILD_DIR/DEBIAN/preinst" "$BUILD_DIR/DEBIAN/postinst" "$BUILD_DIR/DEBIAN/prerm"
+# Runner checkout modes are not installation permissions.
+find "$BUILD_DIR" -type d -exec chmod 0755 {} +
+find "$BUILD_DIR" -type f -perm /111 -exec chmod 0755 {} +
+find "$BUILD_DIR" -type f ! -perm /111 -exec chmod 0644 {} +
 dpkg-deb --root-owner-group --build "$BUILD_DIR" "$OUTPUT_DIR/proxmox-betterdockers_${RELEASE_VERSION}_all.deb"
