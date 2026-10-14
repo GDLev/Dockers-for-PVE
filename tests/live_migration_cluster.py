@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 import uuid
-sys.path[:0] = ['/usr/local/lib/betterdocker', '/tmp/bd-stage45-source/tests']
+sys.path.insert(0, '/usr/local/lib/betterdocker')
 from live_cluster import *
 
 STATE = Path('/root/bd-migration-cluster.json')

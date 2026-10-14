@@ -62,7 +62,7 @@ def main():
             archive = row['volid']
             assert row['subtype'] == 'docker'
             used = {entry.get('address') for entry in w.summaries()}
-            restore_ip = next('192.0.2.' + str(last) + '/20' for last in range(200, 224) if '192.0.2.' + str(last) not in used)
+            restore_ip = next(env.address(last) + '/' + str(env.prefix()) for last in range(200, 224) if env.address(last) not in used)
             api('create', f"/nodes/{env.node('primary')}/docker", archive=archive, newid=ids[1], storage='local-lvm',
                 deployment=json.dumps({'name': 'release-pbs-restore-test', 'bridge': 'vmbr0', 'cidr': restore_ip}))
             restored = next(row['id'] for row in w.summaries() if row.get('vmid') == ids[1])

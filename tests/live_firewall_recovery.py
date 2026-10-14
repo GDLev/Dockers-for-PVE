@@ -56,7 +56,7 @@ if running:
 for info in guests:
     if info['id'] != a['id'] and info['node'] == node: power(info, 'shutdown')
 # HA requires a completed native ZFS replica. Use the existing test storage on
-# pve1/pve2; the reboot target pve3 has no ZFS pool.
+# Reboot targets must provide the storage required by the fixture.
 ha_name = state['prefix'] + '-ha'
 ha_node = env.node('primary')
 ha = next((i for i in worker.summaries() if i['name'] == ha_name), None)
