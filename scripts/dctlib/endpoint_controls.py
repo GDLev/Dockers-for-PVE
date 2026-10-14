@@ -4,7 +4,7 @@ import json
 from .endpoints import resolved
 
 
-def render(infos):
+def render(infos, bindings=None, rootless=False):
     endpoints = [endpoint for info in infos if 'interfaces' in info for endpoint in resolved(info).values()]
     lines = ['table inet betterdocker_endpoints {']
     for index, endpoint in enumerate(endpoints):
@@ -33,22 +33,46 @@ def render(infos):
                     direction = 'out' if hook == 'postrouting' else 'in'
                     lines.append(match + f' jump rate_{direction}_{index}')
         lines.append('}')
+    if rootless:
+        lines.append('chain host_endpoint_guard { type filter hook input priority -20; policy accept;')
+        for info in infos:
+            for endpoint in resolved(info).values():
+                addresses = [endpoint['address']] if endpoint.get('address') else []
+                if endpoint.get('cidr6'): addresses.append(str(ipaddress.IPv6Interface(endpoint['cidr6']).ip))
+                for address in addresses:
+                    parsed = ipaddress.ip_address(address)
+                    if parsed.is_unspecified: continue
+                    family = 'ip6' if parsed.version == 6 else 'ip'
+                    match = family + ' daddr ' + str(parsed)
+                    if parsed.version == 6:
+                        lines.append(match + ' icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept')
+                        if endpoint.get('ipv6mode') == 'dhcp': lines.append(match + ' udp sport 547 udp dport 546 accept')
+                    elif endpoint.get('ipv4mode') == 'dhcp':
+                        lines.append(match + ' udp sport 67 udp dport 68 accept')
+                    for binding in (bindings or {}).get(info['id'], []):
+                        bound = binding[4] if len(binding) == 5 else info.get('address')
+                        if bound == str(parsed):
+                            protocol, port = binding[:2]
+                            lines.append(match + ' ' + protocol + ' dport ' + str(port) + ' accept')
+                    lines.append(match + ' drop')
+        lines.append('}')
     lines.append('}')
     return '\n'.join(lines) + '\n'
 
 
-def apply(infos):
+
+def apply(infos, controls=True):
     import firewall
     from . import projects as w
     rules = render(infos)
     previous = firewall.STATE / 'endpoints.nft'
     import subprocess
-    if not previous.exists() or previous.read_text() != rules or subprocess.run(['nft', 'list', 'table', 'inet', 'betterdocker_endpoints'], capture_output=True).returncode:
+    if controls and (not previous.exists() or previous.read_text() != rules or subprocess.run(['nft', 'list', 'table', 'inet', 'betterdocker_endpoints'], capture_output=True).returncode):
         firewall.apply_rules(rules, table='betterdocker_endpoints', cache='endpoints.nft')
     published = [binding for info in infos for binding in firewall.published_ports(info)]
     ipv6 = [binding for binding in published if len(binding) == 5 and ipaddress.ip_address(binding[4]).version == 6]
-    apply_host_exceptions(ipv6)
     if not w.node_runtime.load().rootless:
+        apply_host_exceptions(ipv6)
         return
     mappings = []
     for binding in ipv6:
@@ -56,6 +80,9 @@ def apply(infos):
         if protocol not in ('tcp', 'udp'):
             raise ValueError('Rootless IPv6 published endpoints support TCP and UDP')
         mappings.append({'address': address, 'port': port, 'protocol': protocol, 'target': target, 'internal': internal})
+    from .network_security import proxy_mappings
+    mappings = proxy_mappings(mappings)
+    apply_host_exceptions(ipv6)
     path = w.ROOT.parent / 'ipv6-proxy.json'
     w.write_json(path, mappings)
     unit = 'betterdocker-ipv6-proxy.service'

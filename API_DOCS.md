@@ -242,6 +242,15 @@ Each interface accepts `bridge`, `hwaddr`, `mtu`, `firewall`, `tag`, `link_down`
 
 These are published endpoints on the host, not extra NICs inside each Docker service. Gateways provide source routing for endpoint traffic without changing the node's management routes. Docker's private service networks and their default route remain separate. Published IPv6 ports pass DCT firewall policy before bypassing the separate node INPUT policy. Rootless IPv6 uses a host TCP/UDP adapter; it does not enable IPv6 inside the private Docker networks. Disconnect blocks endpoint traffic while keeping its address reserved.
 
+Firewall reloads validate the complete candidate before applying it. Host tables are changed in one nftables transaction. Rootless reloads coordinate the private namespace and host through a temporary forwarding guard; a failed reload restores the previous tables, and failed rollback keeps rootless forwarding closed. Start and recovery check the installed generation, not just cached files. Native DHCP, NDP and router-advertisement options are respected; unsupported options fail explicitly.
+
+Rootless private networks enforce their assigned IPv4 and MAC identities even when optional guest filtering is disabled. Members of one DCT remain in the same trust domain; its private networks are not service-level isolation. IPv6 is supported at published endpoints, including the rootless TCP/UDP adapter, not inside private Docker bridges. The adapter accepts only explicit unicast endpoint addresses and targets in the managed rootless pool. Rootless endpoint addresses allow only their published application ports and acquisition control traffic, so wildcard host listeners are not exposed through them. Rootless resources cannot use external networks, volume drivers or driver options to mount host sockets.
+
+DHCP and IPv6 acquisition validate address families, lifetimes and conflicts before storing a lease or assigning an address. New controlled addresses are quarantined before assignment and opened only after their current policy is installed; IPv6 neighbor discovery remains available for duplicate-address detection. VLAN endpoints receive the same conflict checks. Router advertisements must arrive on the selected interface from a link-local sender with hop limit 255 and a valid autonomous /64 prefix. These checks do not authenticate the DHCP server or router: dynamic acquisition requires a trusted LAN. Acquisition does not install management routes or DNS. SDN endpoints use existing VNets; automatic SDN DHCP/IPAM and transparent VLAN trunks remain unsupported.
+
+Network acceptance currently uses mocked failures and policy-generation checks. Live source-spoofing and failure-injection traffic tests are separate acceptance work and are not claimed as passed.
+
+
 ```bash
 curl --fail --silent --show-error -X PUT \
   -H "Authorization: PVEAPIToken=$PVE_TOKEN" \

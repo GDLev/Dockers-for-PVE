@@ -485,6 +485,9 @@ def snapshot_capture(identifier, node, name, description='', recovery=False, qui
 def docker_engine(method, path, body):
     """Only the local Docker socket is used; never log Config/Env or daemon responses."""
     if method == 'POST' and path.startswith('/containers/create'):
+        if node_runtime.load().rootless:
+            from .network_security import rootless_container
+            rootless_container(body)
         from .retention import container_logs
         container_logs(body)
     if method == 'POST' and path.startswith('/containers/create'):

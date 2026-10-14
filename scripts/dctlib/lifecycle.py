@@ -100,8 +100,11 @@ def daemon_resume(node):
             if row['id'] in owned and row['state'] in ('running', 'restarting', 'paused') and not (worker.ROOT / row['project'] / 'ha.json').exists():
                 check_profile(row['project'])
                 worker.project_limits.preflight(row['project'])
-        if node_runtime.load().rootless or any(info.get('firewall') for info in worker.summaries() if info['node'] == node):
-            worker.run([str(worker.HELPERS / 'firewall.py'), 'apply'])
+        projects = {row['project'] for row in state['containers'] if row['id'] in owned and row['state'] in ('running', 'restarting', 'paused') and not (worker.ROOT / row['project'] / 'ha.json').exists()}
+        infos = {info['id']: info for info in worker.summaries() if info['node'] == node}
+        for project in projects:
+            worker.prepare_network_start(infos[project])
+            worker.prepare_firewall(infos[project])
         for row in state['containers']:
             if (worker.ROOT / row['project'] / 'ha.json').exists():
                 continue
@@ -113,14 +116,14 @@ def daemon_resume(node):
             if policy == 'on-failure' and row['policy'].get('MaximumRetryCount'):
                 policy += ':' + str(row['policy']['MaximumRetryCount'])
             worker.run(['docker', 'update', '--restart=' + policy, row['id']], capture_output=True)
-        if node_runtime.load().rootless:
-            try:
-                worker.run([str(worker.HELPERS / 'firewall.py'), 'apply'])
-            except Exception:
-                for row in state['containers']:
-                    if row['id'] in owned and row['state'] in ('running', 'restarting', 'paused'):
-                        worker.run(['docker', 'stop', row['id']], capture_output=True)
-                raise
+        try:
+            for project in projects:
+                worker.finish_network_start(infos[project])
+        except Exception:
+            for row in state['containers']:
+                if row['id'] in owned and row['project'] in projects and row['state'] in ('running', 'restarting', 'paused'):
+                    worker.run(['docker', 'stop', row['id']], capture_output=True)
+            raise
         for project in {row['project'] for row in state['containers']}:
             (worker.ROOT.parent / 'restart-paused' / (project + '.json')).unlink(missing_ok=True)
         path.unlink()

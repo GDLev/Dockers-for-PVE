@@ -31,6 +31,8 @@ CASES = (
     'test_peak_space.PeakSpace',
     'test_filesystem_policy.FilesystemPolicy',
     'test_abandoned_operations.AbandonedOperations',
+    'test_network_isolation.NetworkIsolation',
+    'test_network_isolation.FirewallReload',
 )
 
 
@@ -59,6 +61,11 @@ def _run_cases(verbosity, retention, space):
         # Older mutation fixtures mock the Engine for their original scope.
         # Retention has its own image-accounting contracts below.
         with contextlib.ExitStack() as fixtures:
+            if not case.startswith('test_network_isolation.'):
+                from dctlib import projects
+                fixtures.enter_context(patch.object(projects, 'firewall_ready'))
+                from dctlib import network_security
+                fixtures.enter_context(patch.object(network_security, 'block_address'))
             if not case.startswith('test_retention.'):
                 fixtures.enter_context(patch.object(retention, 'preservation'))
             if not case.startswith(('test_peak_space.', 'test_abandoned_operations.')):

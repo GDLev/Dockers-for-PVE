@@ -30,7 +30,7 @@ def router_prefix(packet, mac):
             preferred = struct.unpack('!I', option[8:12])[0]
             if lifetime and preferred <= lifetime:
                 prefix = ipaddress.IPv6Address(option[16:32])
-                if prefix.is_multicast or prefix.is_link_local or prefix.is_unspecified:
+                if prefix.is_multicast or prefix.is_link_local or prefix.is_unspecified or prefix.is_loopback or int(prefix) & ((1 << 64) - 1):
                     return None
                 link = bytearray.fromhex(mac.replace(':', ''))
                 link[0] ^= 2
@@ -157,10 +157,14 @@ def event(environment):
         raise ValueError('DHCPv6 hook received an unowned interface')
     reason = environment.get('reason')
     if reason in ('BOUND6', 'RENEW6', 'REBIND6'):
-        address = ipaddress.IPv6Address(environment['new_ip6_address'])
+        from .network_security import acquired, lifetime as checked_lifetime
+        address = ipaddress.IPv6Address(acquired(endpoint, environment['new_ip6_address'], 6))
         if address.is_multicast or address.is_link_local or address.is_unspecified or address.is_loopback:
             raise ValueError('Invalid DHCPv6 address')
-        lifetime = int(environment.get('new_max_life', '0'))
+        lifetime = checked_lifetime(environment.get('new_max_life', '0'))
+        preferred = checked_lifetime(environment.get('new_preferred_life', '0'), 'preferred lifetime', allow_zero=True)
+        if preferred > lifetime:
+            raise ValueError('Preferred lifetime exceeds valid lifetime')
         if not 0 < lifetime <= 4294967295:
             raise ValueError('Invalid DHCPv6 lifetime')
         prefix = int(environment.get('new_ip6_prefixlen', '64'))
@@ -171,7 +175,7 @@ def event(environment):
         router = {key: previous[key] for key in ('gw6', 'router_expires', 'router_checked') if key in previous} if (
             previous.get('boot') == w.network_boot_id() and previous.get('hwaddr') == endpoint['hwaddr']) else {}
         w.write_json(path, dict(router, **{'cidr6': str(address) + '/' + str(prefix), 'mode': 'dhcp',
-            'expires': int(time.time()) + lifetime, 'preferred': int(time.time()) + min(lifetime, max(0, int(environment.get('new_preferred_life', '0')))),
+            'expires': int(time.time()) + lifetime, 'preferred': int(time.time()) + preferred,
             'hwaddr': endpoint['hwaddr'], 'boot': w.network_boot_id()}))
     elif reason in ('EXPIRE6', 'STOP6', 'RELEASE6'):
         cache(endpoint).unlink(missing_ok=True)

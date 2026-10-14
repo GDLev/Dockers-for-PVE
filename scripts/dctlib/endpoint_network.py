@@ -140,6 +140,8 @@ def ensure_address(info, wait=True):
             while True:
                 lease = legacy.lease(endpoint)
                 if lease:
+                    from .network_security import block_address
+                    block_address(endpoint, lease['address'], 4)
                     addresses[name] = lease['address']; w.add_address(endpoint['interface'], lease['address']); break
                 if not wait:
                     break
@@ -152,6 +154,8 @@ def ensure_address(info, wait=True):
                 owned = any(entry.get('local') == endpoint['address'] for link in existing for entry in link.get('addr_info', []))
                 if not owned and subprocess.run(['arping', '-D', '-I', parent, '-c', '3', '-w', '4', endpoint['address']], capture_output=True, timeout=10).returncode:
                     raise ValueError('Duplicate VLAN endpoint address')
+            from .network_security import block_address
+            block_address(endpoint, endpoint['address'], 4)
             w.add_address(endpoint['interface'], endpoint['address']); addresses[name] = endpoint['address']
         if endpoint.get('ipv6mode') in ('auto', 'dhcp'):
             from .ipv6_dynamic import lease as ipv6_lease
@@ -177,6 +181,9 @@ def ensure_address(info, wait=True):
                 raise ValueError('IPv6 address belongs to another DCT')
             existing = json.loads(w.capture(['ip', '-j', '-6', 'address', 'show', 'dev', endpoint['interface']]))
             if not any(entry.get('local') == address for link in existing for entry in link.get('addr_info', [])):
+                from .network_security import acquired, block_address
+                acquired(endpoint, address, 6)
+                block_address(endpoint, address, 6)
                 command = ['ip', '-6', 'address', 'add', address + '/128', 'dev', endpoint['interface']]
                 if endpoint.get('expires'):
                     import time

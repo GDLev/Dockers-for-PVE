@@ -125,12 +125,19 @@ def cleanup_capture(identifier, resume=True):
         if any(cid in owned and owned[cid]['state'] == 'paused' for cid in state.get('paused', [])) or any(cid in owned and owned[cid]['state'] in ('created', 'exited') for cid in state.get('restart', [])):
             from dctlib.hardening import check_profile
             check_profile(identifier)
+        resuming = any(cid in owned and owned[cid]['state'] == 'paused' for cid in state.get('paused', [])) or any(cid in owned and owned[cid]['state'] in ('created', 'exited') for cid in state.get('restart', []))
+        if resuming:
+            info = worker.detail(identifier, worker.current_node())
+            worker.prepare_network_start(info)
+            worker.prepare_firewall(info)
         for cid in state.get('paused', []):
             if cid in owned and owned[cid]['state'] == 'paused':
                 worker.run(['docker', 'unpause', cid], capture_output=True)
         for cid in state.get('restart', []):
             if cid in owned and owned[cid]['state'] in ('created', 'exited'):
                 worker.run(['docker', 'start', cid], capture_output=True)
+        if resuming:
+            worker.finish_network_start(info)
     for tag in state.get('tags', []):
         if not re.fullmatch('betterdocker-export/' + identifier + ':[0-9a-f]{32}', tag):
             raise ValueError('Invalid export image ownership')

@@ -198,6 +198,8 @@ def ensure_address(info, wait=True):
         return info['address']
     worker.ensure_link(info)
     if info.get('ipv4mode', 'static') == 'static':
+        from .network_security import block_address
+        block_address(info, info['address'], 4)
         worker.add_address(info['interface'], info['address'])
         return info['address']
     worker.start_dhcp(info)
@@ -206,6 +208,8 @@ def ensure_address(info, wait=True):
         assigned = worker.lease(info)
         if assigned:
             worker.check_address(assigned['address'], info['bridge'], info['id'], info['interface'])
+            from .network_security import block_address
+            block_address(info, assigned['address'], 4)
             worker.add_address(info['interface'], assigned['address'])
             info['address'] = assigned['address']
             return info['address']
@@ -236,15 +240,18 @@ def dhcp_event(environment):
     if reason == 'TIMEOUT':
         raise ValueError('Waiting for a valid DHCP offer; an expired fallback lease is not accepted')
     if reason in ('BOUND', 'RENEW', 'REBIND', 'REBOOT'):
-        address = str(ipaddress.IPv4Address(environment.get('new_ip_address', '')))
+        from .network_security import dhcp4, acquired
+        address, seconds = dhcp4(environment)
+        acquired(info, address, 4)
         if not info.get('tag'):
             worker.check_address(address, info['bridge'], info['id'], interface)
         previous = worker.lease(info)
         if not info.get('tag') and (not previous or previous['address'] != address):
             worker.check_address(address, info['bridge'], info['id'], interface, probe=True)
+        from .network_security import block_address
+        block_address(info, address, 4)
         worker.add_address(interface, address)
-        seconds = int(environment.get('new_dhcp_lease_time', '3600'))
-        worker.write_json(path, {'address': address, 'interface': interface, 'expires': time.time() + max(1, seconds)})
+        worker.write_json(path, {'address': address, 'interface': interface, 'expires': time.time() + seconds})
         if previous and previous['address'] != address:
             worker.run(['ip', 'address', 'del', previous['address'] + '/32', 'dev', interface])
     elif reason in ('EXPIRE', 'FAIL', 'STOP', 'RELEASE'):
@@ -385,10 +392,9 @@ def sync_dhcp(info):
         worker.write_json(directory / 'network-reconcile.json', {'address': assigned['address']})
         worker.stop_network_instances(info['id'])
         worker.reconcile_network_runtime(info)
-        if info.get('firewall'):
-            info['address'] = assigned['address']
-            worker.write_json(worker.METADATA / (info['id'] + '.json'), info)
-            worker.prepare_firewall(info)
+        info['address'] = assigned['address']
+        worker.write_json(worker.METADATA / (info['id'] + '.json'), info)
+        worker.prepare_firewall(info)
         records = worker.container_records(info['id'])
         for saved in resume:
             row = next((row for row in records if row['service'] == saved['service'] and
@@ -398,6 +404,7 @@ def sync_dhcp(info):
             worker.run(['docker', 'start', row['id']], capture_output=True)
             if saved.get('paused'):
                 worker.run(['docker', 'pause', row['id']], capture_output=True)
+        worker.finish_network_start(info)
         worker.restore_restart_policy(info['id'])
         info['address'] = assigned['address']
         info.pop('network_resume', None)
@@ -425,13 +432,21 @@ def prepare_firewall(info):
     if not (directory / 'snapshot-restored.json').exists():
         worker.run(worker.compose_base(directory, info['id']) + ['up', '--no-start', '--no-recreate'], timeout=1800)
     worker.run([str(worker.HELPERS / 'firewall.py'), 'apply'])
+    worker.run([str(worker.HELPERS / 'firewall.py'), 'verify', info['id']])
 
+
+
+def firewall_ready(identifier):
+    info = read_json(worker.METADATA / (worker.project_id(identifier) + '.json'))
+    if info.get('firewall') or node_runtime.load().rootless or 'interfaces' in info:
+        worker.run([str(worker.HELPERS / 'firewall.py'), 'verify', identifier])
 
 def finish_network_start(info):
     if not info.get('firewall') and not node_runtime.load().rootless and 'interfaces' not in info:
         return
     try:
         worker.run([str(worker.HELPERS / 'firewall.py'), 'apply'])
+        worker.run([str(worker.HELPERS / 'firewall.py'), 'verify', info['id']])
     except Exception:
         # Never leave a newly started guest with incomplete requested filtering.
         worker.run(worker.compose_base(worker.ROOT / info['id'], info['id']) + ['stop'], timeout=1800)

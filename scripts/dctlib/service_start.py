@@ -35,6 +35,7 @@ def start(identifier, selected=None, timeout=180):
     from . import projects as w
     from .hardening import check_start
     check_start(identifier)
+    w.firewall_ready(identifier)
     w.project_limits.preflight(identifier)
     config = read_json(w.ROOT / identifier / 'compose.runtime.json')
     services = config['services']

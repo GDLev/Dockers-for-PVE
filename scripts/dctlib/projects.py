@@ -115,6 +115,7 @@ from .network import (
     sync_dhcp,
     firewall_check,
     prepare_firewall,
+    firewall_ready,
     finish_network_start,
     load_pending_network,
     save_pending_network,

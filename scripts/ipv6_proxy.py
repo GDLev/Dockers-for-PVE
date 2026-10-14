@@ -118,13 +118,11 @@ def main():
     while True:
         # A missing or corrupt configuration closes all endpoints.
         try:
-            mappings = json.loads(CONFIG.read_text())
+            from dctlib.secure_io import read_json
+            from dctlib.network_security import proxy_mappings
+            mappings = proxy_mappings(read_json(CONFIG))
             requested = {}
             for mapping in mappings:
-                if ipaddress.ip_address(mapping['address']).version != 6 or ipaddress.ip_address(mapping['target']) not in ipaddress.IPv4Network('10.240.0.0/16') or mapping['protocol'] not in ('tcp', 'udp'):
-                    raise ValueError('Invalid proxy mapping')
-                if not 1 <= mapping['port'] <= 65535 or not 1 <= mapping['internal'] <= 65535:
-                    raise ValueError('Invalid proxy port')
                 requested[json.dumps(mapping, sort_keys=True)] = mapping
         except (OSError, ValueError, KeyError, TypeError):
             requested = {}

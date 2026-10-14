@@ -229,6 +229,8 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
     creating = not (project_directory / 'request.json').exists()
     worker.project_limits.apply_defaults(config, project_directory, creating=creating)
     if node_runtime.load().rootless:
+        from .network_security import rootless_resources
+        rootless_resources(config)
         for service in config['services'].values():
             for mount in service.get('volumes', []):
                 if mount.get('type') == 'bind':
