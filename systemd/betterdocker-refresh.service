@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh BetterDocker project status
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/betterdocker/provision.py refresh

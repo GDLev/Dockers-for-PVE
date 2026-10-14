@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh BetterDocker status every 15 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15s
+Unit=betterdocker-refresh.service
+
+[Install]
+WantedBy=timers.target

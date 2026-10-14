@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodically check BetterDocker package integration
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

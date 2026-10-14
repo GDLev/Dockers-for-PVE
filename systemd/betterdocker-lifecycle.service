@@ -1,0 +1,18 @@
+[Unit]
+Description=Coordinate DCT lifecycle with Docker and PVE guests
+Requires=betterdocker-addresses.service
+BindsTo=docker.service
+PartOf=docker.service
+After=docker.service betterdocker-addresses.service
+Before=pve-guests.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/betterdocker/provision.py daemon-resume
+ExecStop=/usr/local/lib/betterdocker/provision.py daemon-prepare
+TimeoutStartSec=300
+TimeoutStopSec=300
+
+[Install]
+WantedBy=docker.service

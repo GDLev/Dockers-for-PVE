@@ -1,0 +1,17 @@
+[
+  "common.js",
+  "actions.js",
+  "network.js",
+  "transfer.js",
+  "deployment.js",
+  "storage.js",
+  "console.js",
+  "summary.js",
+  "logs.js",
+  "diagnostics.js",
+  "snapshots.js",
+  "security.js",
+  "images.js",
+  "config.js",
+  "integration.js"
+]

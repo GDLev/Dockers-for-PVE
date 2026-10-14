@@ -1,0 +1,10 @@
+[Unit]
+Description=Restore Docker guest firewall before Docker starts
+Requires=pve-cluster.service
+After=pve-cluster.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/betterdocker/firewall.py restore
+RemainAfterExit=yes

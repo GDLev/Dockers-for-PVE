@@ -1,0 +1,68 @@
+/* Match the surrounding PVE icon colour, including light/dark and selection. */
+.bd-docker-icon { position: relative; }
+.bd-docker-icon::before {
+    content: '';
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.125em;
+    background-color: currentColor;
+    -webkit-mask: url('/pve2/images/betterdocker.svg') center / contain no-repeat;
+    mask: url('/pve2/images/betterdocker.svg') center / contain no-repeat;
+}
+.x-menu-item-icon.bd-docker-icon,
+.x-treelist-item-icon.bd-docker-icon { position: absolute; }
+.x-treelist-item-icon.bd-docker-icon {
+    top: 0;
+    bottom: 0;
+    height: auto;
+}
+/* ExtJS gives these icons different box heights. Centre within each box. */
+.x-btn-icon-el.bd-docker-icon::before,
+.x-menu-item-icon.bd-docker-icon::before,
+.x-tree-icon.bd-docker-icon::before,
+.x-treelist-item-icon.bd-docker-icon::before,
+.x-panel-header-icon.bd-docker-icon::before,
+.x-tab-icon-el.bd-docker-icon::before,
+.x-grid-icon-custom.bd-docker-icon::before {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+}
+.x-grid-icon-custom.bd-docker-icon {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.125em;
+}
+.x-tree-icon-custom.bd-docker-icon::after,
+.x-grid-icon-custom.bd-docker-icon::after {
+    position: absolute;
+    left: auto;
+    top: auto;
+    right: -3px;
+    bottom: -1px;
+    line-height: 1;
+}
+/* Use PVE's template document with a Docker badge in place of the LXC cube. */
+.bd-docker-template-icon:not(.locked)::after {
+    content: '';
+    display: inline-block;
+    width: 1.1em;
+    height: 0.825em;
+    background-color: currentColor;
+    -webkit-mask: url('/pve2/images/betterdocker.svg') center / contain no-repeat;
+    mask: url('/pve2/images/betterdocker.svg') center / contain no-repeat;
+    text-shadow: none;
+}
+.x-treelist-item-icon.bd-docker-template-icon:not(.locked)::after {
+    font-size: 0.75em;
+    margin-left: -25%;
+}
+.bd-source textarea, textarea.bd-source {
+    font-family: monospace;
+    tab-size: 2;
+    white-space: pre;
+    overflow: auto;
+}

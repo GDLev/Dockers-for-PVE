@@ -1,0 +1,31 @@
+name: Validate
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: sudo bash scripts/ci-dependencies.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - run: python3 -m pip install --require-hashes -r requirements-test.txt
+      - run: sudo env PATH=/opt/betterdocker-ci-python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /opt/betterdocker-ci-python/bin/python /opt/betterdocker-ci-source/tests/check_release_ci.py
+      - run: python3 tests/check_unit.py
+      - run: bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
+      - run: python3 scripts/build_frontend.py | node --check
+      - run: node tests/test_frontend.js
+      - run: bash packaging/build-deb.sh
+      - run: bash packaging/build-release.sh
+      - run: sudo /opt/betterdocker-ci-python/bin/python tests/check_release_artifacts.py
+      - run: dpkg-deb --info dist/*.deb
+      - run: dpkg-deb --contents dist/*.deb
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: betterdocker-deb
+          path: dist/

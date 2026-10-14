@@ -1,0 +1,13 @@
+[Unit]
+Description=BetterDocker DHCP client for project %i
+Requires=pve-cluster.service
+Wants=network-online.target
+After=network-online.target pve-cluster.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/betterdocker/provision.py dhcp-client %i
+ExecStop=/usr/local/lib/betterdocker/provision.py dhcp-release %i
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s

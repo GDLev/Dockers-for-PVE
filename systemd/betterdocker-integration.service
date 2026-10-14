@@ -1,0 +1,7 @@
+[Unit]
+Description=Check BetterDocker integration after Proxmox updates
+After=pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/betterdocker/patch.py status
