@@ -42,7 +42,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_daemon_resume_preserves_stopped_and_foreign_instances(self):
         path=self.journal()
-        with self.boot_file(),patch.object(worker,'container_records',return_value=[{'id':'a'*64},{'id':'b'*64}]),patch.object(worker,'run') as run:
+        with self.boot_file(),patch.object(worker,'prepare_network_start'),patch.object(worker,'prepare_firewall'),patch.object(worker,'finish_network_start'),patch.object(worker,'container_records',return_value=[{'id':'a'*64},{'id':'b'*64}]),patch.object(worker,'run') as run:
             worker.daemon_resume('pve')
         starts=[call.args[0] for call in run.call_args_list if call.args[0][1]=='start']
         self.assertEqual(starts,[['docker','start','a'*64]])
@@ -56,7 +56,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_failed_resume_retains_recovery_journal(self):
         path=self.journal()
-        with self.boot_file(),patch.object(worker,'container_records',return_value=[{'id':'a'*64}]),patch.object(worker,'run',side_effect=OSError('Docker unavailable')):
+        with self.boot_file(),patch.object(worker,'prepare_network_start'),patch.object(worker,'prepare_firewall'),patch.object(worker,'finish_network_start'),patch.object(worker,'container_records',return_value=[{'id':'a'*64}]),patch.object(worker,'run',side_effect=OSError('Docker unavailable')):
             with self.assertRaises(OSError):worker.daemon_resume('pve')
         self.assertTrue(path.exists())
 

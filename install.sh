@@ -2,15 +2,19 @@
 # Remote entry point for the corresponding immutable release.
 # Define the entire entry point before executing it when read from a pipe.
 set -Eeuo pipefail
+umask 077
 
 main() {
+    for option in "$@"; do
+        [[ "$option" != --allow-downgrade ]] || export BETTERDOCKER_ALLOW_DOWNGRADE=1
+    done
     local project_dir
     if [[ ${1:-} == --help || ${1:-} == -h ]]; then
         echo 'Usage: bash install.sh [install|repair|uninstall|finish|check] [--nodes=node1,node2] [--runtime=rootful|rootless] [--yes] [--no-restart] [--interactive]'
         return 0
     fi
     [[ $EUID -eq 0 ]] || { echo 'Run as root on a Proxmox VE host.' >&2; return 1; }
-    for command in pveversion python3 curl tar mktemp; do
+    for command in pveversion python3 curl tar mktemp openssl; do
         command -v "$command" >/dev/null || { echo "Missing: $command" >&2; return 1; }
     done
 
@@ -20,19 +24,50 @@ main() {
     local release_version=0.20.0
     local archive_name="betterdockers-$release_version.tar.gz"
     local release_url="https://github.com/GDLev/Proxmox-BetterDockers/-/releases/v$release_version/downloads"
-    local expected_sha=${BETTERDOCKER_SOURCE_SHA256:-}
-    if [[ -n ${BETTERDOCKER_SOURCE_URL:-} && -z $expected_sha ]]; then
-        echo 'A custom source URL requires BETTERDOCKER_SOURCE_SHA256.' >&2
-        return 1
-    fi
-    if [[ -z $expected_sha ]]; then
-        curl --fail --silent --show-error --location --retry 3 --max-filesize 65536 \
-            "$release_url/SOURCE_SHA256SUMS" --output "$project_dir/SOURCE_SHA256SUMS" </dev/null
-        expected_sha=$(awk -v name="$archive_name" '$2 == name { print $1 }' "$project_dir/SOURCE_SHA256SUMS")
-    fi
-    [[ $expected_sha =~ ^[0-9a-fA-F]{64}$ ]] || { echo 'Invalid release checksum.' >&2; return 1; }
+    local trusted_key=/etc/betterdocker/release-key.pem
+    local trusted_pin=/etc/betterdocker/release-key.sha256
+    python3 - "$trusted_key" "$trusted_pin" <<'TRUST'
+import pathlib, os
+for name in __import__('sys').argv[1:]:
+    p = pathlib.Path(name)
+    for part in [p, *p.parents]:
+        s = part.lstat()
+        if part.is_symlink() or s.st_uid != 0 or s.st_mode & 0o022:
+            raise SystemExit('Release trust files must be root-owned and protected.')
+TRUST
+    local actual_pin
+    actual_pin=$(openssl pkey -pubin -in "$trusted_key" -outform DER | sha256sum | cut -d ' ' -f1)
+    [[ "$actual_pin" == "$(cat "$trusted_pin")" ]] || { echo 'Release key fingerprint mismatch.' >&2; return 1; }
+    [[ -z ${BETTERDOCKER_SOURCE_SHA256:-} ]] || { echo 'Checksum overrides are no longer supported; use signed release metadata.' >&2; return 1; }
+    local metadata_url=${BETTERDOCKER_RELEASE_URL:-$release_url}
+    for file in RELEASE.json RELEASE.sig; do
+        curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 --max-filesize 4194304 \
+            "$metadata_url/$file" --output "$project_dir/$file" </dev/null
+    done
+    openssl dgst -sha256 -verify "$trusted_key" -signature "$project_dir/RELEASE.sig" "$project_dir/RELEASE.json" >/dev/null
+    local expected_sha
+    expected_sha=$(python3 - "$project_dir/RELEASE.json" "$release_version" "${BASH_SOURCE[0]}" <<'METADATA'
+import hashlib, json, pathlib, re, sys
+path, expected, installer = sys.argv[1:]
+def pairs(items):
+    result = {}
+    for k, v in items:
+        if k in result: raise SystemExit('Duplicate release metadata field.')
+        result[k] = v
+    return result
+m = json.loads(pathlib.Path(path).read_text(), object_pairs_hook=pairs)
+if m.get('format') != 1 or m.get('version') != expected:
+    raise SystemExit('Release version mismatch.')
+artifacts = m['artifacts']
+if hashlib.sha256(pathlib.Path(installer).read_bytes()).hexdigest() != artifacts['install.sh']:
+    raise SystemExit('Installer checksum mismatch. Download and verify install.sh before execution.')
+sha = artifacts['betterdockers-' + expected + '.tar.gz']
+if not re.fullmatch('[0-9a-f]{64}', sha): raise SystemExit('Invalid signed archive checksum.')
+print(sha)
+METADATA
+)
     echo "Downloading Proxmox BetterDockers $release_version."
-    curl --fail --silent --show-error --location --retry 3 \
+    curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 \
         "${BETTERDOCKER_SOURCE_URL:-$release_url/$archive_name}" --max-filesize 134217728 \
         --output "$project_dir/project.tar.gz" </dev/null
     python3 - "$project_dir/project.tar.gz" "$expected_sha" "$project_dir" <<'PY'
@@ -97,6 +132,9 @@ PY
         echo 'Downloaded archive does not contain the BetterDocker installer.' >&2
         return 1
     }
+    cp "$project_dir/RELEASE.json" "$project_dir/.release.json"
+    cp "$project_dir/RELEASE.sig" "$project_dir/.release.sig"
+    python3 "$project_dir/scripts/release.py" source "$project_dir"
     # Package managers must not consume the incoming installation script.
     python3 "$project_dir/scripts/installer.py" "$@" </dev/null
 }

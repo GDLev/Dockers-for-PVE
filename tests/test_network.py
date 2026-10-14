@@ -11,6 +11,10 @@ INFO = dict(BASE, id=IDENTIFIER, node='pve', interface='bdaaaaaaaaaaaa', hwaddr=
 
 
 class NetworkTests(unittest.TestCase):
+    def setUp(self):
+        conflict = patch('dctlib.network_security.acquired', side_effect=lambda info, value, family: value)
+        conflict.start(); self.addCleanup(conflict.stop)
+
     def test_incoming_dhcp_requires_matching_guest_and_target(self):
         import stat
         from types import SimpleNamespace

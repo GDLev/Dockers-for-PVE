@@ -29,8 +29,8 @@ From the repository root, with Python 3.12 or newer and Node.js installed:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python3 -m pip install -r requirements-test.txt
-python3 -m unittest discover -s tests
+python3 -m pip install --require-hashes -r requirements-test.txt
+python3 tests/check_unit.py
 python3 scripts/build_frontend.py | node --check
 node tests/test_frontend.js
 bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh packaging/build-release.sh
@@ -54,4 +54,33 @@ Backups can omit disk contents selected with `backup=0`; clones, migration, repl
 
 A separate file per disk was considered. One collection keeps configuration, ownership and rollback together and avoids a directory scan racing a disk edit. The primary disk layout stays readable by existing installations.
 
-Release packages read their version from `scripts/dctlib/version.py`. Build source downloads with `bash packaging/build-release.sh` on Linux. Publish the archive and `SOURCE_SHA256SUMS` under the corresponding versioned release before distributing its installer. Native-source fixtures include SHA-256 manifests and cover both supported PVE branches. GitLab and GitHub CI run these compatibility checks and produce release artifacts.
+Release packages read their version from `scripts/dctlib/version.py`. Build the DEB with `bash packaging/build-deb.sh` and the source archive with `bash packaging/build-release.sh` on Linux. Ordinary CI produces unsigned build artifacts. These are not installation releases.
+
+After reviewing the commit and its required check results, sign the exact artifacts on a separate signing machine:
+
+```bash
+python3 packaging/sign-release.py --key /secure/offline/betterdockers-release.pem --output dist
+```
+
+Use an RSA signing key of at least 3072 bits. Keep it outside the repository, build containers and ordinary CI secrets. Encrypt and back it up offline. Publish `RELEASE.json`, `RELEASE.sig`, `install.sh`, the source archive and the DEB and public key together under the matching versioned release. Never rebuild artifacts between testing, signing and publishing. Source hashes are read from the built archive; signing rejects a different installer.
+
+The administrator establishes initial trust by comparing the public-key DER SHA-256 fingerprint through an independent channel, such as a previously authenticated maintainer contact or an already trusted release announcement. No production key or fingerprint is provisioned by this checkout. Do not publish installation instructions claiming otherwise.
+
+For key rotation, announce the replacement fingerprint through the same independent channel before switching releases. Administrators compare it and replace both root-owned trust files on each node during maintenance. There is one active key per node; releases signed by other keys fail. If a key is compromised, stop release distribution and revoke it through the independent channel. Updating a key from the download server alone is not sufficient.
+
+Install a DEB through a verified release's verifier, not directly with `dpkg -i`:
+
+```bash
+python3 scripts/release.py deb proxmox-betterdockers_0.20.0_all.deb \
+    --manifest RELEASE.json --signature RELEASE.sig --version 0.20.0
+```
+
+This verifies the package before creating a private installation authorization. The package pre-install script checks that authorization and refuses unsigned direct installation. Cluster targets verify signed metadata before archive extraction, check the transfer hash received through authenticated SSH and unpack with the isolated nobody reader. Post-install and PVE repair triggers check the unpacked payload against signed source hashes. `--allow-downgrade` is an explicit administrator override. Trust files and version history remain after removal.
+
+For development deployments use `bash start.sh --development-source`; it prints a warning and does not create a signed-release history entry. Signed source cannot use this bypass. A development repair cache needs the same explicit flag. This is for reviewed local work, not release downloads.
+
+Required release checks run with Linux root privileges in disposable CI workers. `scripts/ci-dependencies.sh` installs a pinned Compose CLI without starting a daemon. `tests/check_release_ci.py` runs the non-invasive security contracts, Compose parsing, installer authentication and both PVE 9.1/9.2 source fixtures. Any skipped required test fails the job. The ordinary unit and frontend checks also run. `tests/check_unit.py` redirects node-control state to temporary files and mocks unrelated admission helpers for older Engine fixtures; the required policy suites exercise those helpers separately. Clean-node rootful/rootless installation remains a separate acceptance test before publication.
+
+GitHub jobs have read-only repository permissions. External actions use commit hashes; GitLab images use registry digests. Compose uses a version and SHA-256 pin, and Python packages use hashes. CI workers still obtain distribution packages from their authenticated package repositories. Protect release tags and signing access; a successful untrusted pull-request job is not authorization to publish.
+
+Review upstream security notices regularly. Update action commits, image digests, Compose and Python hashes in a dedicated PR. Obtain pins from the upstream repository, registry or release, review the change, rerun required checks and the supported PVE fixture matrix on that exact commit, then approve the new pins. Do not use automatic mutable-tag refreshes for releases.

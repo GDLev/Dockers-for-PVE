@@ -49,7 +49,7 @@ class ManagementTests(unittest.TestCase):
 
     def test_unsupported_container_quota_fails_before_runtime_change(self):
         with patch.object(worker, 'rootfs_quota_support', return_value={'supported': False}), patch.object(worker, 'locked') as lock:
-            with self.assertRaisesRegex(ValueError, 'XFS'):
+            with self.assertRaisesRegex(ValueError, 'not supported'):
                 worker.service_settings(ID, 'pve', 'web', dict(VALUES, disk=512))
             lock.assert_not_called()
 

@@ -12,6 +12,8 @@ ID = 'a' * 32
 
 class StorageTests(TestCase):
     def setUp(self):
+        engine = patch('dctlib.recovery.require_docker')
+        engine.start(); self.addCleanup(engine.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         lock = patch.object(worker, 'LOCK', Path(temporary.name) / 'node.lock')
@@ -56,7 +58,7 @@ class StorageTests(TestCase):
     def test_storage_errors_reach_task_log(self):
         error = subprocess.CalledProcessError(2, [], stderr='Insufficient storage space\n')
         with patch.object(worker, 'run', side_effect=error), self.assertRaisesRegex(ValueError, 'Insufficient storage space'):
-            worker.pve_storage(ID, 'allocate')
+            worker.pve_storage(ID, 'allocate', storage='local-lvm', size_mib=64)
 
     def test_retained_disks_keep_guest_id_reserved(self):
         with patch.object(worker, 'storage_config', return_value={'volid': 'local-lvm:vm-105-disk-0'}), patch.object(worker, 'reserved_ids') as ids:

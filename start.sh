@@ -7,7 +7,7 @@ if [[ $# -eq 0 ]]; then
 fi
 for option in "$@"; do
     case "$option" in
-        finish|--nodes|--nodes=*|--runtime|--yes|--no-restart|--interactive|--help|-h)
+        finish|--development-source|--allow-downgrade|--nodes|--nodes=*|--runtime|--yes|--no-restart|--interactive|--help|-h)
             exec python3 "$PROJECT_DIR/scripts/installer.py" "$@" ;;
     esac
 done
@@ -42,6 +42,11 @@ done
 for command in pveversion pvesh perl systemctl flock; do
     command -v "$command" >/dev/null || { echo "Missing: $command" >&2; exit 1; }
 done
+if [[ ${BETTERDOCKER_DEVELOPMENT_SOURCE:-0} == 1 && ! -e "$PROJECT_DIR/.release.json" ]]; then
+    echo 'WARNING: explicitly using unsigned development source.' >&2
+else
+    python3 "$PROJECT_DIR/scripts/release.py" source "$PROJECT_DIR"
+fi
 exec 9>/run/lock/betterdocker-install.lock
 flock -n 9 || { echo 'Another BetterDocker installer is running.' >&2; exit 1; }
 VERSION=$(pveversion)
@@ -205,7 +210,7 @@ done
 for source in "$PROJECT_DIR"/backend/PVE/API2/BetterDocker/*.pm; do
     TARGETS+=("/usr/share/perl5/PVE/API2/BetterDocker/$(basename "$source")")
 done
-TARGETS+=(/usr/local/lib/betterdocker/service_security.py)
+TARGETS+=(/usr/local/lib/betterdocker/service_security.py /usr/local/lib/betterdocker/release.py /var/lib/betterdocker/installer/release.json)
 TARGETS+=(/usr/local/lib/betterdocker/parse_config.py /usr/local/lib/betterdocker/archive_scan.py /usr/local/lib/betterdocker/security_install.py /etc/apparmor.d/betterdocker /etc/betterdocker/recovery.key)
 TARGETS+=(/usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py /usr/local/lib/betterdocker/rrd.pl)
 for index in "${!TARGETS[@]}"; do
@@ -266,6 +271,7 @@ done
 install -m 0755 "$PROJECT_DIR/scripts/archive_scan.py" /usr/local/lib/betterdocker/archive_scan.py
 install -m 0755 "$PROJECT_DIR/scripts/parse_config.py" /usr/local/lib/betterdocker/parse_config.py
 install -m 0755 "$PROJECT_DIR/scripts/security_install.py" /usr/local/lib/betterdocker/security_install.py
+install -m 0755 "$PROJECT_DIR/scripts/release.py" /usr/local/lib/betterdocker/release.py
 install -m 0644 "$PROJECT_DIR/scripts/service_security.py" /usr/local/lib/betterdocker/service_security.py
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
 install -d -m 0755 /usr/share/perl5/PVE/CLI
@@ -357,6 +363,9 @@ systemctl is-active --quiet pvedaemon pveproxy
 NODE=$(hostname -s)
 pvesh usage "/nodes/$NODE/docker" --verbose >/dev/null
 pvesh get /cluster/resources --output-format json >/dev/null
+if [[ -f "$PROJECT_DIR/.release.json" ]]; then
+    python3 "$PROJECT_DIR/scripts/release.py" record "$PROJECT_DIR"
+fi
 trap - ERR
 if [[ $DEFER_RESTART == 1 ]]; then
     echo 'BetterDocker installed. Panel/API reload is pending.'

@@ -198,7 +198,7 @@ class PortableStateTests(unittest.TestCase):
             state.write(state.journal_path(ID), {'paused': ['mine', 'foreign'], 'restart': ['stopped', 'foreign'],
                                                 'tags': ['betterdocker-export/' + ID + ':' + '3' * 32]})
             with patch.object(worker, 'container_records', return_value=[{'id': 'mine', 'state': 'paused'},
-                                                                         {'id': 'stopped', 'state': 'exited'}]), patch.object(worker, 'run') as run, patch('dctlib.recovery.require_docker'):
+                                                                         {'id': 'stopped', 'state': 'exited'}]), patch.object(worker, 'run') as run, patch('dctlib.recovery.require_docker'), patch.object(worker, 'detail', return_value={'id': ID}), patch.object(worker, 'current_node', return_value='pve'), patch.object(worker, 'prepare_network_start'), patch.object(worker, 'prepare_firewall'), patch.object(worker, 'finish_network_start'), patch('dctlib.hardening.check_profile'):
                 state.cleanup_capture(ID)
             self.assertEqual(run.call_args_list[0].args[0], ['docker', 'unpause', 'mine'])
             self.assertEqual(run.call_args_list[1].args[0], ['docker', 'start', 'stopped'])

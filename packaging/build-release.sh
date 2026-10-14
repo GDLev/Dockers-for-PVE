@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the immutable source archive and checksum used by install.sh.
+# Build the source archive. Authenticate it separately with sign-release.py.
 set -Eeuo pipefail
 SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR=${1:-"$SOURCE_DIR/dist"}
@@ -13,6 +13,7 @@ for path in assets frontend backend scripts systemd packaging install.sh start.s
 done
 find "$BUILD_DIR" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$BUILD_DIR" -name .DS_Store -delete
+find "$BUILD_DIR" -name '*.pyc' -delete
 tar --sort=name --mtime="@$RELEASE_EPOCH" --owner=0 --group=0 --numeric-owner \
     -czf "$OUTPUT_DIR/betterdockers-$RELEASE_VERSION.tar.gz" -C "$BUILD_DIR" "betterdockers-$RELEASE_VERSION"
 (cd "$OUTPUT_DIR" && sha256sum "betterdockers-$RELEASE_VERSION.tar.gz" > SOURCE_SHA256SUMS)

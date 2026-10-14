@@ -19,10 +19,12 @@ class DeploymentSecurityTests(unittest.TestCase):
         self.project.mkdir()
         self.patch = patch.object(worker, 'ROOT', self.root)
         self.patch.start()
-        self.config = {'services': {'app': {'image': 'busybox:1.37'}},
+        availability = patch('dctlib.hardening.available')
+        availability.start(); self.addCleanup(availability.stop)
+        self.config = {'services': {'app': {'image': 'busybox:1.37', 'cpus': 1, 'mem_limit': '512m', 'pids_limit': 128}},
                        'networks': {'default': {'name': 'bd-' + ID + '_default'}}}
-        self.container = {'HostConfig': {'NetworkMode': 'bd-' + ID + '_default', 'IpcMode': 'private',
-                           'CgroupnsMode': 'private', 'Runtime': 'runc'}, 'Mounts': []}
+        self.container = {'Config': {'Image': 'busybox:1.37', 'Labels': {'com.docker.compose.service': 'app'}}, 'HostConfig': {'NetworkMode': 'bd-' + ID + '_default', 'IpcMode': 'private',
+                           'CgroupnsMode': 'private', 'Runtime': 'runc', 'NanoCpus': 1000000000, 'Memory': 536870912, 'PidsLimit': 128}, 'Mounts': []}
 
     def tearDown(self):
         self.patch.stop()
@@ -156,7 +158,7 @@ class DeploymentSecurityTests(unittest.TestCase):
         with patch.dict(os.environ, {'BETTERDOCKER_TRUSTED': '0'}), \
              patch.object(state, 'check_state', return_value={'id': ID, 'mounts': []}), \
              patch.object(state, 'operation') as operation, patch.object(worker, 'run') as run:
-            with self.assertRaisesRegex(ValueError, 'Privileged'):
+            with self.assertRaisesRegex(ValueError, '[Pp]rivileged|incompatible with hardened policy'):
                 state.restore_state(folder, 'b' * 32, 'pve', {})
             operation.assert_not_called()
             run.assert_not_called()

@@ -9,7 +9,10 @@ ID, worker = delegation.ID, delegation.worker
 refresh_network = worker.refresh
 
 class NetworkEditTests(unittest.TestCase):
-    setUp = delegation.DelegationTests.setUp
+    def setUp(self):
+        delegation.DelegationTests.setUp(self)
+        engine = patch('dctlib.recovery.require_docker')
+        engine.start(); self.addCleanup(engine.stop)
     tearDown = delegation.DelegationTests.tearDown
 
     def configure(self):
@@ -88,14 +91,18 @@ class NetworkEditTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(info['status'],'stopped')
 
-    def test_boot_recovery_can_restore_addresses_before_docker_starts(self):
+    def test_boot_recovery_waits_without_mutating_when_docker_is_unavailable(self):
+        from dctlib.recovery import DockerUnavailable
         self.configure()
         metadata = json.loads((self.metadata/(ID+'.json')).read_text())
-        worker.write_json(self.directory/'network-transaction.json', {'metadata':metadata,'files':{}})
-        with patch.object(worker, 'run', return_value=type('Result', (), {'returncode':3})()), \
-             patch.object(worker, 'container_records', side_effect=AssertionError('Docker is not running')), \
-             patch.object(worker, 'remove_network'), patch.object(worker, 'ensure_address'):
-            self.assertTrue(worker.recover_network_transaction(ID,'pve'))
+        journal = self.directory/'network-transaction.json'
+        worker.write_json(journal, {'metadata':metadata,'files':{}})
+        original = journal.read_bytes()
+        with patch('dctlib.recovery.require_docker', side_effect=DockerUnavailable('Docker unavailable')), patch.object(worker, 'container_records') as records, patch.object(worker, 'remove_network') as remove, patch.object(worker, 'ensure_address') as address:
+            with self.assertRaises(DockerUnavailable):
+                worker.recover_network_transaction(ID,'pve')
+            records.assert_not_called(); remove.assert_not_called(); address.assert_not_called()
+        self.assertEqual(journal.read_bytes(), original)
 
     def test_boot_does_not_mount_a_retained_disk_owned_by_another_node(self):
         data = self.configure()

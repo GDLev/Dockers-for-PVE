@@ -37,8 +37,8 @@ class ComposeIntegrationTests(unittest.TestCase):
         # Production subprocesses run as root; this parser-only test uses the test user's CLI.
         def run(args, **kwargs):
             return subprocess.run(args, check=True, text=True, **kwargs)
-        with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'run', side_effect=run):
-            directory, staging = Path(folder) / 'project', Path(folder) / 'staging'
+        with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'run', side_effect=run):
+            directory, staging = Path(folder) / ('a' * 32), Path(folder) / 'staging'
             data = dict(BASE, compose=yaml, environment='VALUE=old')
             config = worker.prepare(data, 'a' * 32, directory)
             self.assertEqual(config['services']['web']['volumes'][0]['source'], str(directory / 'data'))

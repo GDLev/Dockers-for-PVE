@@ -100,11 +100,11 @@ class FirewallTests(unittest.TestCase):
             path = Path(folder) / 'applied.nft'
             path.write_text('previous rules')
             with self.assertRaisesRegex(ValueError, 'Rejected'):
-                firewall.apply_rules('candidate rules')
+                firewall.apply_rules('table inet betterdocker { }')
             self.assertEqual(path.read_text(), 'previous rules')
 
     def test_unsupported_options_do_not_look_enabled(self):
-        for option in ('ndp', 'ips', 'dhcp'):
+        for option in ('ips',):
             with self.subTest(option=option), self.assertRaisesRegex(ValueError, 'not supported'):
                 firewall.check_options({option: 1})
 
@@ -114,8 +114,9 @@ class FirewallTests(unittest.TestCase):
             run.return_value.returncode = 0
             guest = Path(folder) / 'applied.nft'
             guest.write_text('guest filtering')
-            firewall.apply_rules('rootless forwarding', table='betterdocker_rootless', cache='rootless.nft')
+            rules = 'table inet betterdocker_rootless { }'
+            firewall.apply_rules(rules, table='betterdocker_rootless', cache='rootless.nft')
             self.assertEqual(guest.read_text(), 'guest filtering')
-            self.assertEqual((Path(folder) / 'rootless.nft').read_text(), 'rootless forwarding')
+            self.assertEqual((Path(folder) / 'rootless.nft').read_text(), rules)
             for call in command.call_args_list:
-                self.assertEqual(call.kwargs['input'], 'delete table inet betterdocker_rootless\nrootless forwarding')
+                self.assertEqual(call.kwargs['input'], 'delete table inet betterdocker_rootless\n' + __import__('dctlib.firewall_reload', fromlist=['stamped']).stamped(rules))

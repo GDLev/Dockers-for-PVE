@@ -20,27 +20,56 @@ DCT summaries show managed data-disk usage separately from container filesystem 
 
 Run as **root** on a Proxmox VE 9.1 or 9.2 node with internet access. Other versions are not currently supported.
 
-The v0.20.0 download commands below require published release artifacts. Until that release is published, run `bash start.sh` from this checkout.
+Signed release downloads require a public signing key and its SHA-256 fingerprint confirmed with the maintainer through a separate channel. Do not trust a fingerprint supplied only by the download server. The release signing key has not been established yet; until a signed release is published, use a reviewed checkout with `bash start.sh --development-source`. That option explicitly accepts unsigned development code.
+
+Once a signed release is available, obtain `release-key.pem`, compare its fingerprint with the independently confirmed value, then save the key and fingerprint as root:
 
 ```bash
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/v0.20.0/install.sh | bash
+openssl pkey -pubin -in release-key.pem -outform DER | sha256sum
+# Only continue after comparing the output with the independently confirmed fingerprint.
+install -d -m 0755 /etc/betterdocker
+install -m 0644 release-key.pem /etc/betterdocker/release-key.pem
+openssl pkey -pubin -in release-key.pem -outform DER | sha256sum | cut -d ' ' -f1 > /etc/betterdocker/release-key.sha256
+chmod 0644 /etc/betterdocker/release-key.sha256
+```
+
+Download and verify the installer before running it. Stop if any command fails:
+
+```bash
+set -euo pipefail
+BD_RELEASE=https://github.com/GDLev/Proxmox-BetterDockers/-/releases/v0.20.0/downloads
+BD_DOWNLOAD=$(mktemp -d)
+cd "$BD_DOWNLOAD"
+for file in RELEASE.json RELEASE.sig install.sh; do
+    curl --proto '=https' --proto-redir '=https' -fsSL --max-filesize 4194304 "$BD_RELEASE/$file" -o "$file"
+done
+openssl dgst -sha256 -verify /etc/betterdocker/release-key.pem -signature RELEASE.sig RELEASE.json
+python3 - <<'VERIFY'
+import hashlib, json, pathlib
+metadata = json.loads(pathlib.Path('RELEASE.json').read_text())
+if metadata['version'] != '0.20.0':
+    raise SystemExit('Wrong release version')
+if hashlib.sha256(pathlib.Path('install.sh').read_bytes()).hexdigest() != metadata['artifacts']['install.sh']:
+    raise SystemExit('Installer checksum mismatch')
+VERIFY
+bash install.sh
 ```
 
 The terminal installer lets you choose **Install / Update**, **Repair** or **Uninstall**, select one or more cluster nodes and choose rootful or rootless for new installations. Use the arrow keys, Space to select nodes and Enter to continue. It uses PVE's existing SSH trust to reach other nodes.
 
 After applying changes, it shows a result and log path for each node. Press **Enter** at the final prompt to reload the PVE panel and API services. Then refresh the browser with **Ctrl+Shift+R** and click **Create DCT**. If you cancel that prompt, use the printed `finish` command later.
 
-Run the same command to update or repair. Existing nodes keep their saved runtime mode. Rootless is the default for fresh installations. For an unattended installation, choose explicitly:
+Reuse the verified installer to update or repair. Existing nodes keep their saved runtime mode. Rootless is the default for fresh installations. For an unattended installation, choose explicitly:
 
 ```bash
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/v0.20.0/install.sh | bash -s -- install --runtime=rootless --yes
+bash install.sh install --runtime=rootless --yes
 ```
 
-Add `--nodes=pve1,pve2` to target specific cluster nodes or `--no-restart` to defer service reload. Without a terminal, specify an operation; no menu is opened. Running `bash start.sh` from a downloaded checkout opens the same installer. DEB configuration and PVE update triggers keep their package workflow and reload services automatically.
+Add `--nodes=pve1,pve2` to target specific cluster nodes or `--no-restart` to defer service reload. Without a terminal, specify an operation; no menu is opened. Signed sources and the repair cache retain their manifest and signature. A reviewed development checkout requires `bash start.sh --development-source`. DEB configuration and PVE update triggers keep their package workflow and reload services automatically.
 
 Rootless runs Docker under the dedicated `betterdocker` account. PVE still manages host networking, storage and guest permissions as root. Both modes use the same web interface. Updates and repair preserve the saved choice; existing installations stay rootful. A DEB installation uses the package configuration choice.
 
-Rootless needs cgroup v2, delegated CPU/memory/PID controllers, compatible Docker rootless binaries and unused `10.240.0.0/16` and `169.254.240.0/30` network ranges. The installer rejects incompatible setups. Release downloads use a fixed version and a SHA-256 checksum. A custom source URL also requires `BETTERDOCKER_SOURCE_SHA256`. Rootless uses PVE-managed forwarding for published ports, including 80 and 443.
+Rootless needs cgroup v2, delegated CPU/memory/PID controllers, compatible Docker rootless binaries and unused `10.240.0.0/16` and `169.254.240.0/30` network ranges. The installer rejects incompatible setups. Release downloads verify signed metadata, artifact hashes and source files. `BETTERDOCKER_RELEASE_URL` can select another HTTPS mirror; `BETTERDOCKER_SOURCE_URL` can select an archive URL, but its content must match the signed release. Checksum overrides are unsupported. Older releases are refused unless you explicitly pass `--allow-downgrade`. Each selected node needs its own trusted signing key. Rootless uses PVE-managed forwarding for published ports, including 80 and 443.
 
 Rootless containers use user namespaces and Docker's seccomp filtering. The Docker AppArmor profile is unavailable in this mode on the tested PVE kernels; containers use `apparmor=unconfined`. The extension does not disable host AppArmor.
 
@@ -61,10 +90,10 @@ For a controlled rootless Docker restart, run `/usr/local/lib/betterdocker/runti
 
 ## Uninstallation
 
-Run the installation command again as **root** and choose **Uninstall**. For unattended removal:
+Run the verified installer again as **root** and choose **Uninstall**. For unattended removal, after the same download verification:
 
 ```bash
-curl -fsSL https://github.com/GDLev/Proxmox-BetterDockers/-/raw/v0.20.0/install.sh | bash -s -- uninstall --yes
+bash install.sh uninstall --yes
 ```
 
 Remove DCT HA resources and replication jobs before uninstalling. Uninstallation removes the CLI and web/API integration. Interactive runs wait for Enter before reloading PVE services. **Docker, existing workloads, their data, network and firewall maintenance services remain on the node.** The uninstaller restores the restart policies declared for the services. Guest removal retains data unless you select permanent removal of DCT-owned data. External mounts remain outside that removal scope.
@@ -92,6 +121,8 @@ These paths are on the Proxmox node after installation.
 | `/etc/apparmor.d/local/betterdocker-dhclient` | DHCP rules included by the distribution dhclient profile. Retained with network maintenance on uninstall. |
 | `/var/backups/betterdocker/` | Files backed up by the installer. |
 | `/var/lib/betterdocker/installer/` | Private installation logs, cached installer source and pending panel reload state. Retained for recovery after uninstall. |
+| `/etc/betterdocker/release-key.pem`, `/etc/betterdocker/release-key.sha256` | Administrator-approved release key and fingerprint. Retained on uninstall. |
+| `/var/lib/betterdocker/installer/release.json` | Last installed signed version and manifest hash. Retained on uninstall. |
 | `/etc/betterdocker/runtime.json` | Root-owned, node-local runtime mode, account, socket and UID/GID mapping. Retained on uninstall. |
 | `/var/lib/betterdocker/runtime/.config/` | Rootless daemon and user service configuration. Retained on uninstall. |
 | `/etc/systemd/system/user@<uid>.service.d/betterdocker.conf` | Rootless cgroup delegation and startup dependencies. Retained on uninstall. |

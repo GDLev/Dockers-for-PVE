@@ -3,6 +3,7 @@
 import argparse
 from collections import deque
 import contextlib
+import hashlib
 from datetime import datetime, timezone
 import io
 import json
@@ -24,7 +25,7 @@ from installer_ui import Cancelled, Choice, MESSAGES, Terminal
 
 SOURCE = Path(__file__).resolve().parent.parent
 CACHE = Path('/var/lib/betterdocker/installer')
-FILES = ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'start.sh', 'install.sh')
+FILES = ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'start.sh', 'install.sh', '.release.json', '.release.sig')
 SERVICES = ('pvedaemon', 'pveproxy', 'pvescheduler', 'pve-ha-crm', 'pve-ha-lrm')
 PROBE = '''import json,os,pathlib,subprocess
 p=pathlib.Path('/etc/betterdocker/runtime.json')
@@ -55,12 +56,13 @@ def failure_tail(path):
     return [lines[-1].strip()] if lines else []
 
 
-def archive(source=SOURCE):
+def archive(source=None):
+    source = SOURCE if source is None else Path(source)
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w:gz') as package:
         for name in FILES:
             if (source / name).exists():
-                package.add(source / name, arcname=name, filter=lambda item: None if '__pycache__' in Path(item.name).parts or item.name.endswith('.pyc') else item)
+                package.add(source / name, arcname='betterdockers/' + name, filter=lambda item: None if '__pycache__' in Path(item.name).parts or item.name.endswith('.pyc') else item)
     return output.getvalue()
 
 
@@ -175,7 +177,24 @@ class Runner:
         self.results = []
 
     def prepare(self, nodes):
+        if not getattr(self, 'development', False):
+            import release
+            metadata = release.source(SOURCE, getattr(self, 'allow_downgrade', False))
+        bootstrap = (SOURCE / 'install.sh').read_bytes()
+        verifier = (SOURCE / 'scripts/release.py').read_bytes()
+        if not getattr(self, 'development', False):
+            for name, content in (('install.sh', bootstrap), ('scripts/release.py', verifier)):
+                if hashlib.sha256(content).hexdigest() != metadata['source'][name]:
+                    raise ValueError('Installer source changed during preparation')
+        reader = bootstrap.decode().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        authenticate = verifier.decode().split("\nif __name__ == '__main__':", 1)[0] + '''
+key, pin = trust()
+metadata = read_manifest(Path(sys.argv[1]), Path(sys.argv[2]), key, pin)
+check_version(metadata, sys.argv[3] == '1', manifest_digest=digest(sys.argv[1]))
+'''
+        authenticate = 'import sys\n' + authenticate
         data = archive()
+        checksum = hashlib.sha256(data).hexdigest()
         for node in nodes:
             if self.interrupted:
                 raise Cancelled()
@@ -184,11 +203,22 @@ class Runner:
             if not re.fullmatch(r'/tmp/betterdocker-install\.[A-Za-z0-9]{8}', folder):
                 raise ValueError('Unexpected installation staging path')
             self.prepared[node] = folder
+            if not getattr(self, 'development', False):
+                for name in ('.release.json', '.release.sig'):
+                    self.cluster.run(node, ['bash', '-c', 'cat > ' + shlex.quote(folder + '/transport' + name)], input=(SOURCE / name).read_bytes(), check=True)
+                self.cluster.run(node, ['python3', '-c', authenticate, folder + '/transport.release.json', folder + '/transport.release.sig', '1' if getattr(self, 'allow_downgrade', False) else '0'], check=True)
             self.cluster.run(node, ['bash', '-c', 'cat > ' + shlex.quote(folder + '/source.tar.gz')], input=data, check=True)
-            self.cluster.run(node, ['tar', '--no-same-owner', '-xzf', folder + '/source.tar.gz', '-C', folder], check=True)
+            self.cluster.run(node, ['python3', '-c', reader, folder + '/source.tar.gz', checksum, folder], check=True)
+            if not getattr(self, 'development', False):
+                self.cluster.run(node, ['python3', folder + '/scripts/release.py', 'source', folder] + (['--allow-downgrade'] if getattr(self, 'allow_downgrade', False) else []), check=True)
 
     def worker(self, node, action, mode=None, operation=None):
-        args = ['bash', self.prepared[node] + '/start.sh', action]
+        args = ['env']
+        if getattr(self, 'development', False):
+            args += ['BETTERDOCKER_DEVELOPMENT_SOURCE=1']
+        if getattr(self, 'allow_downgrade', False):
+            args += ['BETTERDOCKER_ALLOW_DOWNGRADE=1']
+        args += ['bash', self.prepared[node] + '/start.sh', action]
         if mode:
             args += ['--runtime=' + mode]
         if operation:
@@ -320,6 +350,8 @@ def modes_for(nodes, requested=None, fresh_only=False):
 def parser():
     result = argparse.ArgumentParser(description='Install, repair or remove BetterDockers on selected PVE nodes.')
     result.add_argument('action', nargs='?', choices=('install', 'repair', 'uninstall', 'finish', 'check'))
+    result.add_argument('--development-source', action='store_true', help='Explicitly install an unsigned local checkout. Never use for downloaded releases.')
+    result.add_argument('--allow-downgrade', action='store_true', help='Deliberately install an older signed release.')
     result.add_argument('--nodes', help='Comma-separated cluster node names. Default: local node.')
     result.add_argument('--runtime', choices=('rootful', 'rootless'))
     result.add_argument('--interactive', action='store_true', help='Open terminal forms even with an explicit action.')
@@ -348,6 +380,13 @@ def main():
     args = parser().parse_args()
     if os.geteuid() != 0:
         raise ValueError('Run as root on a Proxmox VE node')
+    if args.development_source:
+        if (SOURCE / '.release.json').exists():
+            raise ValueError('Signed sources cannot bypass verification')
+        print('WARNING: explicitly using unsigned development source.', file=sys.stderr)
+    else:
+        import release
+        release.source(SOURCE, args.allow_downgrade)
     interactive = not args.yes and (args.action is None or args.interactive)
     ui = Terminal()
     runner = None
@@ -408,6 +447,8 @@ def main():
         if interactive:
             ui.confirm(ui.t('start'))
         runner = Runner(cluster, ui)
+        runner.development = args.development_source
+        runner.allow_downgrade = args.allow_downgrade
         for name in (signal.SIGINT, signal.SIGTERM):
             signal.signal(name, runner.cancel)
         runner.prepare(requested)
@@ -428,7 +469,7 @@ def main():
         if action == 'finish' and not pending:
             ui.output('  ' + ui.t('no_pending'))
         if pending:
-            command = 'bash /var/lib/betterdocker/installer/source/start.sh finish --nodes=' + ','.join(pending) + ' --yes'
+            command = 'bash /var/lib/betterdocker/installer/source/start.sh finish --nodes=' + ','.join(pending) + ' --yes' + (' --development-source' if runner.development else '')
             ui.output('  ' + ui.t('pending_nodes', nodes=', '.join(pending)))
             ui.output('  ' + ui.t('resume', command=command))
             if not args.no_restart and not runner.interrupted:
