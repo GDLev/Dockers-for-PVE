@@ -92,7 +92,7 @@ def workloads():
 
 
 def lifecycle(source, logs, state_path):
-    import live_rootless_installation as maintenance
+    import live_cluster_maintenance as maintenance
     from live_pools_hooks import api
     maintenance.DROPIN = '/etc/systemd/system/{unit}.service.d/betterdocker-installer-test.conf'
     maintenance.CONDITION = '/run/betterdocker-installer-test-allow'
@@ -158,7 +158,7 @@ def main():
     logs = Path(args.logs)
     logs.mkdir(mode=0o700, exist_ok=True)
     if args.restore:
-        import live_rootless_installation as maintenance
+        import live_cluster_maintenance as maintenance
         maintenance.DROPIN = '/etc/systemd/system/{unit}.service.d/betterdocker-installer-test.conf'
         maintenance.CONDITION = '/run/betterdocker-installer-test-allow'
         remote(env.node('rootless'), ['bash', str(source / 'start.sh'), 'repair'], check=True, timeout=300)
