@@ -353,7 +353,7 @@ systemctl enable --now betterdocker-firewall.service
 systemctl start betterdocker-firewall-restore.service
 systemctl restart betterdocker-firewall.service
 systemctl enable --now betterdocker-addresses.service betterdocker-refresh.timer betterdocker-integration.timer betterdocker-lifecycle.service
-systemctl restart betterdocker-addresses.service
+systemctl reload betterdocker-addresses.service
 python3 "$PROJECT_DIR/scripts/patch.py" apply
 perl -I/usr/share/perl5 -MPVE::API2::Cluster -e 'PVE::API2::BetterDocker::migrate_ids()'
 perl -I/usr/share/perl5 -MPVE::API2::Nodes -e 'PVE::API2::Nodes->validate_method_schemas(1)'
