@@ -35,6 +35,12 @@ def node(name):
     return config()['nodes'][name]
 
 
+def require_node(value):
+    if value not in config()['nodes'].values():
+        raise ValueError('Target is not a configured test node')
+    return value
+
+
 def address(offset):
     value = ipaddress.IPv4Interface(config()['addresses'])
     result = value.ip + offset

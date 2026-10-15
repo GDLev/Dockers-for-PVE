@@ -105,6 +105,7 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--cleanup', action='store_true')
     args = parser.parse_args()
+    env.require_node(args.node)
     if args.cleanup:
         report = Report.__new__(Report); report.path = args.report; report.data = json.loads(args.report.read_text())
         cleanup(report); live.verify_baseline(report); report.check('recovery cleanup', 'pass', 'Owned guests/backups/actor removed and guest baseline preserved'); report.finish(); return

@@ -34,8 +34,7 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--replace-test-release', action='store_true', help='Explicitly permit replacing an existing development version with different signed test bytes')
     args = parser.parse_args()
-    if args.node not in env.config()['nodes'].values():
-        raise ValueError('Target is not a configured test node')
+    env.require_node(args.node)
     if args.report.exists():
         raise ValueError('Journal already exists; inspect its owned fixtures before retrying')
     source = Path(env.source())
