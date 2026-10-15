@@ -3,7 +3,10 @@
 set -Eeuo pipefail
 [[ $(uname -m) == x86_64 ]] || { echo 'CI Compose pin requires x86_64' >&2; exit 1; }
 apt-get update
-apt-get install -y --no-install-recommends docker.io curl ca-certificates openssl python3-venv
+apt-get install -y --no-install-recommends curl ca-certificates openssl python3-venv
+if ! command -v docker >/dev/null; then
+    apt-get install -y --no-install-recommends docker.io
+fi
 /usr/bin/python3 -m venv /opt/betterdocker-ci-python
 /opt/betterdocker-ci-python/bin/python -m pip install --require-hashes -r requirements-test.txt
 mkdir -p /usr/local/lib/docker/cli-plugins
