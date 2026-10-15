@@ -12,8 +12,10 @@ from pathlib import Path
 import shlex
 import sys
 
-sys.path.insert(0, '/usr/local/lib/betterdocker')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import installer
+sys.path.pop(0)
+sys.path.insert(0, '/usr/local/lib/betterdocker')
 from acceptance_report import Report
 import live_environment as env
 import live_guest_lifecycle as lifecycle
