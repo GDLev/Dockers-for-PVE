@@ -37,6 +37,41 @@ SOURCES
     apt-get update
 }
 
+install_rootless_packages() (
+    masked=()
+    installing=0
+    cleanup() {
+        local status=$?
+        trap - EXIT
+        set +e
+        if (( installing )) && ! systemctl disable docker.service docker.socket; then
+            echo 'Cannot disable the newly installed rootful Docker units; keeping them masked.' >&2
+            exit 1
+        fi
+        if (( ${#masked[@]} )); then
+            systemctl unmask "${masked[@]}" || status=1
+        fi
+        exit "$status"
+    }
+    if ! command -v docker >/dev/null; then
+        if command -v dockerd >/dev/null || systemctl is-active --quiet docker.service docker.socket; then
+            echo 'Existing Docker daemon has no client. Repair its binaries before installing rootless support.' >&2
+            exit 1
+        fi
+        trap cleanup EXIT
+        # Persistent masks also prevent a host-root daemon starting after a
+        # power loss during apt. Remove only masks created by this invocation.
+        for unit in docker.service docker.socket; do
+            if [[ $(systemctl is-enabled "$unit" 2>/dev/null || true) != masked* ]]; then
+                systemctl mask "$unit" || exit $?
+                masked+=("$unit")
+            fi
+        done
+        installing=1
+    fi
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-ce-rootless-extras docker-compose-plugin || exit $?
+)
+
 if [[ "$MODE" == rootless ]]; then
     if ! command -v dockerd-rootless.sh >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
         setup_repository
@@ -44,7 +79,7 @@ if [[ "$MODE" == rootless ]]; then
             echo 'Existing Docker distribution lacks rootless support. Install compatible rootless binaries explicitly.' >&2
             exit 1
         fi
-        apt-get install -y docker-ce docker-ce-cli containerd.io docker-ce-rootless-extras docker-compose-plugin
+        install_rootless_packages
     fi
     require_compose
     echo 'Using rootless Docker binaries; the installer configures the dedicated user service.'
