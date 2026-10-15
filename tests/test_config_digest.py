@@ -26,6 +26,21 @@ class ConfigurationDigestTests(unittest.TestCase):
         for p in reversed(self.patches):p.stop()
         self.tmp.cleanup()
     def digest(self):return worker.detail(ID,'pve')['digest']
+    def test_existing_inline_environment_is_redacted_from_docker_task_errors(self):
+        import io
+        import subprocess
+        from dctlib import security_errors
+        before = set(security_errors._values)
+        self.addCleanup(lambda: setattr(security_errors, '_values', before))
+        secret = 'opaque-inline-credential-9472'
+        worker.write_json(self.directory / 'compose.runtime.json', {'services': {'app': {'environment': {'PASSWORD': secret}}}})
+        worker.detail(ID, 'pve')
+        result = subprocess.CompletedProcess(['docker'], 0, stderr='Engine error: ' + secret)
+        output = io.StringIO()
+        with patch.object(worker.node_runtime, 'run', return_value=result), contextlib.redirect_stderr(output):
+            worker.run(['docker', 'restart', 'fixture'])
+        self.assertNotIn(secret, output.getvalue())
+        self.assertIn('[redacted]', output.getvalue())
     def test_stable_across_key_order_metrics_and_runtime_changes(self):
         original=self.digest()
         worker.write_json(self.directory/'request.json',dict(reversed(list(self.source.items()))))
