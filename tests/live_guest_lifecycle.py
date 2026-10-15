@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rootless image/clone/PBS acceptance on exactly registered disposable DCTs."""
+"""Image/clone/PBS acceptance in the selected runtime on exactly registered disposable DCTs."""
 import live_environment as env
 import argparse
 import hashlib
@@ -29,7 +29,9 @@ def inspection(info):
     status = live.remote(info['node'], ['docker', 'exec', c['Id'], 'cat', '/proc/1/status'], check=True).stdout
     fields = dict(line.split(':', 1) for line in status.splitlines() if ':' in line)
     assert fields['NoNewPrivs'].strip() == '1' and fields['Seccomp'].strip() == '2'
-    assert 'ALL' in c['HostConfig']['CapDrop'] and c['AppArmorProfile'] in ('', 'unconfined')
+    assert 'ALL' in c['HostConfig']['CapDrop']
+    mode = live.state(info['node'])['mode']
+    assert c['AppArmorProfile'] in ('', 'unconfined') if mode == 'rootless' else c['AppArmorProfile'] == 'betterdocker-default'
     assert c['HostConfig']['NanoCpus'] == 500000000 and c['HostConfig']['Memory'] == 134217728 and c['HostConfig']['PidsLimit'] == 64
     assert live.api('get', live.base(info) + '/management')['security_policy'] == 'hardened'
     return c
@@ -112,10 +114,11 @@ def main():
     report.data['working_tree'] = True
     report.data['baseline'] = dict(resources=live.resources(), cluster_firewall=live.api('get', '/cluster/firewall/options'),
         nodes={node: live.state(node) for node in nodes}, node_firewall={node: live.api('get', '/nodes/' + node + '/firewall/options') for node in nodes})
-    assert report.data['baseline']['nodes'][args.node]['mode'] == 'rootless'
+    mode = report.data['baseline']['nodes'][args.node]['mode']
+    assert mode in ('rootful', 'rootless')
     report.save()
     try:
-        item = report.plan_guest(args.node, int(live.api('get', '/cluster/nextid')), 'release-rootless-' + report.data['run'][:8])
+        item = report.plan_guest(args.node, int(live.api('get', '/cluster/nextid')), 'release-' + mode + '-' + report.data['run'][:8])
         compose = {'services': {'app': {'image': 'busybox:1.37', 'pull_policy': 'never', 'init': True,
             'command': ['sh', '-c', "trap 'exit 0' TERM; while true; do sleep 1; done"],
             'cpus': .5, 'mem_limit': '128m', 'pids_limit': 64, 'volumes': ['./data:/data', 'records:/records'],
@@ -141,7 +144,7 @@ def main():
             assert live.remote(args.node, ['docker', 'exec', c['Id'], 'cat', path], check=True).stdout == marker
         live.remote(args.node, ['docker', 'exec', c['Id'], 'sh', '-c', 'printf %s ' + marker + ' >/layer-value; chown 12345:12345 /data/value /records/value /layer-value; chmod 640 /data/value /records/value /layer-value'], check=True)
         expected = files(source); live.power(source, 'shutdown')
-        report.check('rootless registry pull and immutable image update', 'pass', 'busybox 1.37 to 1.36; volumes, Hardened and enforced caps retained')
+        report.check(mode + ' registry pull and immutable image update', 'pass', 'busybox 1.37 to 1.36; volumes, Hardened and enforced caps retained')
         nonce = report.data['run'][:8]
         actor = dict(user='bdrelease-' + nonce + '@pve', role='BDRelease' + nonce, acl_paths=[], created=False, role_created=False, removed=False)
         report.data['actor'] = actor; report.save()
@@ -180,7 +183,7 @@ def main():
             inspection(target); assert files(target) == expected
             live.task(request(token, 'POST', live.base(target) + '/action', action='shutdown', timeout=30))
             targets.append(target)
-            report.check('rootless delegated ' + operation, 'pass', 'Actual HTTP user/token without node Sys.Modify; data, UID/GID/mode, private image provenance, Hardened and caps verified')
+            report.check(mode + ' delegated ' + operation, 'pass', 'Actual HTTP user/token without node Sys.Modify; data, UID/GID/mode, private image provenance, Hardened and caps verified')
         tag = 'betterdocker-acceptance-' + report.data['run'] + '-foreign'
         owned_image = dict(node=args.node, owner=targets[0]['id'], tag=tag, removed=False)
         report.data.setdefault('images', []).append(owned_image); report.save()
@@ -193,7 +196,7 @@ def main():
         else: raise AssertionError('Unrelated private image preview was accepted')
         report.check('cross-DCT private image admission', 'pass', 'Normal image-preview request rejects a different DCT private image before pull')
     except BaseException as error:
-        report.check('rootless release acceptance', 'fail', str(error)[-2000:]); raise
+        report.check(mode + ' release acceptance', 'fail', str(error)[-2000:]); raise
     finally:
         try:
             cleanup(report); live.verify_baseline(report)

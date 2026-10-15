@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Check action state and guest identity through PVE HTTP on disposable DCTs.\n\nRun on {env.node('primary')} after deployment. Leaves one stopped guest for the final GUI\nchecks. cleanup removes only its recorded guests, backup and pool.\n"
+'Check action state and guest identity through PVE HTTP on disposable DCTs.\n\nRun on <node> after deployment. Leaves one stopped guest for the final GUI\nchecks. cleanup removes only its recorded guests, backup and pool.\n'
+import live_environment as env
 import json
 from pathlib import Path
 import shlex

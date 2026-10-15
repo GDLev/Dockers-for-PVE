@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Run on a test PVE node. Creates disposable DCTs, writes a PBS backup, then removes its guests.\n\nSupply three unused addresses on the bridge and a second node with BetterDockers.\nExample: python3 tests/live_acceptance.py --target {env.node('rootless')} --backup-storage {env.backup_storage()}\n  --address {env.address(225)} --clone-address {env.address(224)} --restore-address {env.address(223)}\n"
+'Run on a test PVE node. Creates disposable DCTs, writes a PBS backup, then removes its guests.\n\nSupply three unused addresses on the bridge and a second node with BetterDockers.\nExample: python3 tests/live_acceptance.py --target <node> --backup-storage <backup_storage>\n  --address <address> --clone-address <address> --restore-address <address>\n'
+import live_environment as env
 import argparse
 import json
 from pathlib import Path

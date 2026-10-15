@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Prepare, change and remove one disposable DCT for stable-refresh GUI checks.\n\nRun on {env.node('primary')} after deployment. No changes to existing guests or PBS.\n"
+'Prepare, change and remove one disposable DCT for stable-refresh GUI checks.\n\nRun on <node> after deployment. No changes to existing guests or PBS.\n'
+import live_environment as env
 import json
 from pathlib import Path
 import shutil

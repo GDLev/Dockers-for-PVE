@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Actual rootless disk, clone, template and PBS ownership checks.\n\nRun after live_rootless_cluster.py on {env.node('primary')}. Disposable guest IDs and backup\nvolumes are recorded for --cleanup; PBS receives backups only.\n"
+'Actual rootless disk, clone, template and PBS ownership checks.\n\nRun after live_rootless_cluster.py on <node>. Disposable guest IDs and backup\nvolumes are recorded for --cleanup; PBS receives backups only.\n'
+import live_environment as env
 import argparse
 import json
 from pathlib import Path

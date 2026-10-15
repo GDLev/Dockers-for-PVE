@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Verify create errors and prepare a disposable DCT for final form checks.\n\nRun on {env.node('primary')} after deployment. cleanup removes only the recorded fixture.\nThe HTTP helpers are the same ones used by the other live PVE checks.\n"
+'Verify create errors and prepare a disposable DCT for final form checks.\n\nRun on <node> after deployment. cleanup removes only the recorded fixture.\nThe HTTP helpers are the same ones used by the other live PVE checks.\n'
+import live_environment as env
 import json
 from pathlib import Path
 import shutil

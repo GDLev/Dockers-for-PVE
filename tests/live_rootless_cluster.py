@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Rootless data and cluster acceptance on explicitly approved test nodes.\n\nRun on {env.node('primary')}. Retain the manifest on failure; --cleanup removes only fixtures\nrecorded here. The temporary ZFS pools never touch an existing storage pool.\n"
+'Rootless data and cluster acceptance on explicitly approved test nodes.\n\nRun on <node>. Retain the manifest on failure; --cleanup removes only fixtures\nrecorded here. The temporary ZFS pools never touch an existing storage pool.\n'
+import live_environment as env
 import argparse
 import json
 from pathlib import Path

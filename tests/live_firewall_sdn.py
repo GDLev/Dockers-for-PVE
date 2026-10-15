@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Exercise a disposable native SDN VNet on {env.node('rootless')}, including SDN.Use."
+'Exercise a disposable native SDN VNet on <node>, including SDN.Use.'
+import live_environment as env
 import json
 from pathlib import Path
 import secrets
