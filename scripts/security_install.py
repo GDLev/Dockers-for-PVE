@@ -27,7 +27,7 @@ def initialize(mode, profile):
         root = Path('/var/lib/betterdocker')
         pending = [p for p in (root / 'projects').glob('*/*.json') if journal(p)] + list((root / 'imports').glob('*.json'))
         if pending:
-            raise ValueError('Finish interrupted DCT operations with the previous version before installing recovery authentication')
+            raise ValueError('Recovery key is missing while DCT operations are pending. Restore the original key from backup before continuing.')
         atomic_text(KEY, secrets.token_hex(32))
     if mode == 'rootful':
         enabled = Path('/sys/module/apparmor/parameters/enabled')
