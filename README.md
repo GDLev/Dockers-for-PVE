@@ -19,6 +19,8 @@ Docker runs on the PVE host. A DCT can contain several services under one guest 
 - A Linux bridge and available addresses for the DCT endpoints.
 - Rootless mode also requires cgroup v2, delegated CPU/memory/PID controllers, rootless Docker binaries, and unused `10.240.0.0/16` and `169.254.240.0/30` ranges.
 
+Validation covers PVE 9.1.1 and 9.2.21, Docker 29.8.2 and 29.9.0, and Compose 5.6.0. PBS backup/restore uses native PVE storage and was checked with PBS 4.2-0. Other combinations have not been verified.
+
 Choose the runtime when installing. Updates and repair preserve the node's mode.
 
 | Mode | Docker runtime | Container AppArmor | Writable-layer quotas |
@@ -59,6 +61,8 @@ bash /var/lib/betterdocker/installer/source/start.sh repair --yes
 ```
 
 Install / Update updates the extension. Repair reapplies its integration to the installed PVE files. Back up workloads before maintenance. PVE package updates can require repair; unsupported native layouts are rejected.
+
+Verify integration after PVE package updates. Do not create guests while any cluster node needs integration repair; native VMID protection depends on that integration.
 
 Do not change runtime mode during an update. Offline conversion has separate prerequisites and a recovery journal, described in [CONTRIBUTING.md](CONTRIBUTING.md#runtime-conversion).
 

@@ -22,7 +22,7 @@ Docker runs directly on the PVE node. DCTs share its kernel. A DCT is not a VM o
 
 Rootless private networks enforce assigned IPv4 and MAC identities and block direct bridge traffic between different DCTs. These rules remain active when optional guest firewall filtering is disabled. Services within one DCT share a network trust domain. DCTs can communicate through published ports, subject to enabled guest firewall policy.
 
-Published IPv6 uses a host TCP/UDP adapter in rootless mode. Private Docker bridges do not support IPv6. Endpoint addresses restrict host access to published application ports and acquisition control traffic. DHCP and router advertisements require a trusted LAN; address validation does not authenticate the server or router.
+Published IPv6 uses a host TCP/UDP adapter in rootless mode, so its ports must be free on the host. Private Docker bridges do not support IPv6. In both runtimes, endpoint addresses restrict host access to published application ports and acquisition control traffic. Wildcard node listeners are not admitted as application sockets. DHCP and router advertisements require a trusted LAN; address validation does not authenticate the server or router.
 
 Keep PVE, Docker, the kernel, and application images updated. Rootless reduces host-root exposure, but all DCTs still depend on the shared runtime and kernel.
 
