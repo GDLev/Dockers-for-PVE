@@ -217,5 +217,70 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(added.exists())
 
 
+
+
+@unittest.skipUnless(os.geteuid() == 0, 'Docker client ownership requires host root')
+class DelegatedClientTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        client_root = patch.object(runtime, 'CLIENT_ROOT', self.root)
+        client_root.start(); self.addCleanup(client_root.stop)
+        selected = patch.object(runtime, 'load', return_value=runtime.Runtime())
+        selected.start(); self.addCleanup(selected.stop)
+        self.child = patch.object(runtime, 'execute', return_value=subprocess.CompletedProcess([], 0, 'OK', ''))
+        self.execute = self.child.start(); self.addCleanup(self.child.stop)
+
+    def test_runtime_modes_use_separate_client_directories(self):
+        rootful = runtime.Runtime().environment(delegated=True)['DOCKER_CONFIG']
+        rootless = ROOTLESS.environment(delegated=True)['DOCKER_CONFIG']
+        self.assertNotEqual(rootful, rootless)
+        runtime.run(['docker', 'info'], delegated=True)
+        self.assertEqual(self.execute.call_args.kwargs['env']['DOCKER_CONFIG'], rootful)
+        self.assertEqual(Path(rootful).stat().st_uid, 0)
+        self.assertEqual(Path(rootful).stat().st_mode & 0o777, 0o700)
+
+    def test_old_runtime_owned_directory_is_never_reused_or_chowned(self):
+        old = self.root / 'delegated-client'
+        old.mkdir(); os.chown(old, 65534, 65534)
+        runtime.run(['docker', 'info'], delegated=True)
+        self.assertNotEqual(self.execute.call_args.kwargs['env']['DOCKER_CONFIG'], str(old))
+        self.assertEqual(old.stat().st_uid, 65534)
+
+    def test_rootful_rejects_runtime_owned_directory_before_starting_client(self):
+        client = self.root / 'delegated-client-rootful'
+        client.mkdir(); os.chown(client, 65534, 65534)
+        with self.assertRaisesRegex(ValueError, 'owner|protected'):
+            runtime.run(['docker', 'info'], delegated=True)
+        self.execute.assert_not_called()
+
+    def test_rootful_rejects_writable_and_sticky_parent(self):
+        for mode in (0o777, 0o1777):
+            self.root.chmod(mode)
+            try:
+                with self.assertRaisesRegex(ValueError, 'writable|protected'):
+                    runtime.run(['docker', 'info'], delegated=True)
+            finally:
+                self.root.chmod(0o700)
+        self.execute.assert_not_called()
+        self.assertFalse((self.root / 'delegated-client-rootful').exists())
+
+    def test_rootful_rejects_link_before_starting_client(self):
+        target = self.root / 'benign-data'; target.mkdir()
+        (self.root / 'delegated-client-rootful').symlink_to(target, target_is_directory=True)
+        with self.assertRaises(OSError):
+            runtime.run(['docker', 'info'], delegated=True)
+        self.execute.assert_not_called()
+
+    def test_mode_specific_credentials_stay_private(self):
+        for mode, selected in [('rootful', runtime.Runtime()), ('rootless', ROOTLESS)]:
+            client = self.root / ('delegated-client-' + mode); client.mkdir()
+            config = client / 'config.json'; config.write_text('{"auths":{}}'); config.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, 'Credentials'):
+                selected.environment(delegated=True)
+        self.execute.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

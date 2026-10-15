@@ -129,12 +129,14 @@ class DeploymentSecurityTests(unittest.TestCase):
                 worker.validate_delegated_networks([value])
         worker.validate_delegated_networks([{'Driver': 'bridge', 'Options': {}}])
 
+    @unittest.skipUnless(os.geteuid() == 0, 'Docker client ownership requires host root')
     def test_client_credentials_are_separate_and_identity_reaches_helpers(self):
         with patch.dict(os.environ, {'BETTERDOCKER_TRUSTED': '0', 'BETTERDOCKER_TASK_USER': 'owner@pve!token'}), \
-             patch('runtime.execute') as run, patch.object(worker, 'ROOT', self.root / 'projects'):
+             patch('runtime.execute') as run, patch.object(worker, 'ROOT', self.root / 'projects'), \
+             patch.object(worker.node_runtime, 'CLIENT_ROOT', self.root):
             worker.run(['docker', 'info'])
             environment = run.call_args.kwargs['env']
-            self.assertEqual(environment['DOCKER_CONFIG'], '/var/lib/betterdocker/delegated-client')
+            self.assertEqual(environment['DOCKER_CONFIG'], str(self.root / 'delegated-client-rootful'))
             self.assertNotIn('BETTERDOCKER_TASK_USER', environment)
             worker.run(['python3', 'host-helper.py'])
             environment = run.call_args.kwargs['env']
