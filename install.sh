@@ -23,7 +23,7 @@ main() {
     trap "rm -rf -- '$project_dir'" EXIT
     local release_version=0.20.0
     local archive_name="betterdockers-$release_version.tar.gz"
-    local release_url="https://github.com/GDLev/Proxmox-BetterDockers/-/releases/v$release_version/downloads"
+    local release_url="https://github.com/GDLev/Proxmox-BetterDockers/releases/download/v$release_version"
     local trusted_key=/etc/betterdocker/release-key.pem
     local trusted_pin=/etc/betterdocker/release-key.sha256
     python3 - "$trusted_key" "$trusted_pin" <<'TRUST'
