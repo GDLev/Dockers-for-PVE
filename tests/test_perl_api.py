@@ -16,6 +16,38 @@ def route_source(name):
 
 
 class PerlAPITests(unittest.TestCase):
+    def test_remote_console_preserves_authorized_guest_context(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        function = source.split('sub console_helper_command {', 1)[1].split('\n}\n', 1)[0]
+        code = r'''
+use JSON::PP qw(encode_json decode_json);
+BEGIN { $INC{'PVE/INotify.pm'} = 1; $INC{'PVE/SSHInfo.pm'} = 1; }
+package PVE::INotify; sub nodename { 'pve1' }
+package PVE::SSHInfo;
+sub get_ssh_info { {name => $_[0]} }
+sub ssh_info_to_command { ['ssh', $_[0]->{name}] }
+package PVE::Tools; sub cmd2string { JSON::PP::encode_json($_[0]) }
+package main;
+my $helper = '/helper';
+sub console_helper_command { BODY }
+my $context = encode_json({id=>'a' x 32,node=>'pve2',vmid=>105,runtime_mode=>'rootless'});
+local $ENV{BETTERDOCKER_REQUEST_CONTEXT} = $context;
+local $ENV{BETTERDOCKER_TASK_USER} = 'user@pve!console';
+local $ENV{BETTERDOCKER_TRUSTED} = '0';
+local $ENV{BETTERDOCKER_REQUIRE_SAFE} = '1';
+my $args = {id=>'a' x 32,node=>'pve2',container=>'b' x 64};
+for my $action ('console-check', 'console') {
+ my $remote = console_helper_command($args, $action, '/bin/sh', $action eq 'console');
+ my $command = decode_json($remote->[-1]);
+ die 'Request context lost across SSH' unless grep { $_ eq 'BETTERDOCKER_REQUEST_CONTEXT='.$context } @$command;
+ die 'Caller lost across SSH' unless grep { $_ eq 'BETTERDOCKER_TASK_USER=user@pve!console' } @$command;
+ die 'Safe deployment check lost across SSH' unless grep { $_ eq 'BETTERDOCKER_REQUIRE_SAFE=1' } @$command;
+}
+print 'PASS';
+'''.replace('BODY', function)
+        result = subprocess.run(['perl', '-e', code], check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout, 'PASS')
+
     def test_disk_cleanup_permissions_are_checked_before_worker_creation(self):
         source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
         start = source.index("name => 'delete_storage_volume'")
