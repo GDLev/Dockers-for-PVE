@@ -122,7 +122,10 @@ def finish_restart():
     node = subprocess.check_output(['hostname', '-s'], text=True).strip()
     if Path('/usr/share/perl5/PVE/API2/BetterDocker.pm').exists():
         subprocess.run(['pvesh', 'usage', '/nodes/' + node + '/docker', '--verbose'], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(['python3', str(SOURCE / 'scripts/patch.py'), 'status'], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(['pvesh', 'get', '/cluster/resources', '--output-format', 'json'], check=True, stdout=subprocess.DEVNULL)
+    if Path('/usr/share/perl5/PVE/API2/BetterDocker.pm').exists():
+        register_node('ready')
     path.unlink()
     print('PVE panel and API services reloaded.')
 
@@ -392,7 +395,7 @@ def main():
             raise ValueError('Run as root')
         if sys.argv[1] == '--check-uninstall' and len(sys.argv) == 2:
             integration.check_uninstall()
-        elif sys.argv[1] == '--registration' and len(sys.argv) == 3 and sys.argv[2] in ('ready', 'remove'):
+        elif sys.argv[1] == '--registration' and len(sys.argv) == 3 and sys.argv[2] in ('pending', 'ready', 'remove'):
             register_node(sys.argv[2])
         elif sys.argv[1] == '--registration-worker' and len(sys.argv) == 4:
             integration.registration(sys.argv[2], sys.argv[3])

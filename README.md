@@ -15,7 +15,7 @@ Docker runs on the PVE host. A DCT can contain several services under one guest 
 - Proxmox VE 9.1 or 9.2 on Debian 13. Other PVE versions are not supported.
 - Root access to each installation node and internet access for dependencies and images.
 - Docker Engine with Compose 5.6.0 or newer.
-- Install BetterDockers on every cluster node before creating DCTs, including nodes that will not run Docker guests. All nodes must reserve the same guest IDs. Install it on new nodes before adding workloads.
+- Install BetterDockers on every cluster node before creating DCTs, including nodes that will not run Docker guests. All nodes must reserve the same guest IDs. Install it on a new node before joining a cluster with DCTs, then run Repair after joining to register the node.
 - A Linux bridge and available addresses for the DCT endpoints.
 - Rootless mode also requires cgroup v2, delegated CPU/memory/PID controllers, rootless Docker binaries, and unused `10.240.0.0/16` and `169.254.240.0/30` ranges.
 
@@ -47,6 +47,8 @@ bash install.sh install --runtime=rootless --yes
 ```
 
 Add `--nodes=pve1,pve2` to select all cluster nodes on first installation, or `--no-restart` to defer service reload. Later updates and repairs can target individual installed nodes. [CONTRIBUTING.md](CONTRIBUTING.md) covers development checkouts, package installation and signing.
+
+New DCT IDs are blocked until installation and the panel/API reload have finished on every node. An offline node with a completed installation retains its registration.
 
 ## Update and repair
 
