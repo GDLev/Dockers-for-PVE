@@ -78,7 +78,7 @@ def run(action):
             remote(env.node('secondary'), ['reboot', '-f'], timeout=15)
         except subprocess.TimeoutExpired:
             pass  # Reboot can leave the SSH channel open; the boot ID is verified below.
-        print('pve2 force-reboot requested; waiting for native fenced recovery', flush=True)
+        print('Target force-reboot requested; waiting for native fenced recovery', flush=True)
         check(env.node('rootless'))
         state['recovered'] = True; save()
         print('PASS native CRM fenced recovery uses rootless runtime and remaps owners', flush=True)
