@@ -8,6 +8,7 @@ Before=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/lib/betterdocker/provision.py restore
+ExecReload=/usr/local/lib/betterdocker/provision.py restore
 RemainAfterExit=yes
 
 [Install]
