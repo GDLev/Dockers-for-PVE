@@ -424,18 +424,18 @@ def reconcile():
             raise ValueError('DCT cluster configuration is unavailable; retaining firewall rules')
         metadata = [read_json(path) for path in worker.METADATA.glob('*.json')]
         infos = [i for i in metadata if i['node'] == worker.current_node() and i.get('vmid')]
-        from dctlib.endpoint_controls import apply as apply_controls, render as endpoint_rules
+        from dctlib.endpoint_controls import activate as activate_controls, render as endpoint_rules
         config = native_config(infos)
         bridges = {i['id']: networks(i) for i in infos if i.get('firewall') or rootless or any(v.get('firewall') for v in i.get('interfaces', {}).values())}
-        bindings = {i['id']: published_ports(i) for i in infos if i.get('firewall') or rootless or any(v.get('firewall') for v in i.get('interfaces', {}).values())}
+        bindings = {i['id']: published_ports(i) for i in infos}
         if rootless:
             reconcile_rootless(infos, config, bridges, bindings)
             return
         guards = identity_guards([info for info in infos if info['id'] in bridges])
         rules = render(infos, config, bridges, bindings, guards=guards)
         from dctlib.firewall_reload import transaction
-        transaction([(TABLE, rules, 'applied.nft', (), ()), ('betterdocker_endpoints', endpoint_rules(infos), 'endpoints.nft', (), ())],
-                    activate=lambda: apply_controls(infos, controls=False))
+        transaction([(TABLE, rules, 'applied.nft', (), ()), ('betterdocker_endpoints', endpoint_rules(infos, bindings=bindings), 'endpoints.nft', (), ())],
+                    activate=lambda: activate_controls(infos, bindings))
         from dctlib.network_security import release_ready
         release_ready(infos)
         active = [i['vmid'] for i in infos if config['cluster_enabled'] and (i.get('firewall') or any(endpoint.get('firewall') for endpoint in i.get('interfaces', {}).values())) and
@@ -486,13 +486,13 @@ def reconcile_rootless(infos, config, bridges, bindings):
                 lines.append(f'ip daddr {address} {protocol} dport {port} dnat ip to {target}:{target_port}')
         lines.append('}')
     lines.append('}')
-    from dctlib.endpoint_controls import render as endpoint_rules, apply as apply_controls
+    from dctlib.endpoint_controls import render as endpoint_rules, activate as activate_controls
     from dctlib.firewall_reload import transaction
     with host.namespace() as (_, _, prefix, descriptors):
         transaction([(TABLE, inner, 'inner.nft', prefix, descriptors), (TABLE, rules, 'applied.nft', (), ()),
-                     ('betterdocker_endpoints', endpoint_rules(infos, bindings=bindings, rootless=True), 'endpoints.nft', (), ()),
+                     ('betterdocker_endpoints', endpoint_rules(infos, bindings=bindings), 'endpoints.nft', (), ()),
                      ('betterdocker_rootless', '\n'.join(lines) + '\n', 'rootless.nft', (), ())],
-                    activate=lambda: apply_controls(infos, controls=False), rootless=True)
+                    activate=lambda: activate_controls(infos, bindings), rootless=True)
     from dctlib.network_security import release_ready
     release_ready(infos)
     active = [i['vmid'] for i in infos if config['cluster_enabled'] and (i.get('firewall') or any(endpoint.get('firewall') for endpoint in i.get('interfaces', {}).values())) and

@@ -1,10 +1,10 @@
-"""Enforce Disconnect and byte-rate limits before Docker's port forwarding."""
+"""Endpoint rate limits and protection from unrelated host listeners."""
 import ipaddress
 import json
 from .endpoints import resolved
 
 
-def render(infos, bindings=None, rootless=False):
+def render(infos, bindings=None):
     endpoints = [endpoint for info in infos if 'interfaces' in info for endpoint in resolved(info).values()]
     lines = ['table inet betterdocker_endpoints {']
     for index, endpoint in enumerate(endpoints):
@@ -33,48 +33,42 @@ def render(infos, bindings=None, rootless=False):
                     direction = 'out' if hook == 'postrouting' else 'in'
                     lines.append(match + f' jump rate_{direction}_{index}')
         lines.append('}')
-    if rootless:
-        lines.append('chain host_endpoint_guard { type filter hook input priority -20; policy accept;')
-        for info in infos:
-            for endpoint in resolved(info).values():
-                addresses = [endpoint['address']] if endpoint.get('address') else []
-                if endpoint.get('cidr6'): addresses.append(str(ipaddress.IPv6Interface(endpoint['cidr6']).ip))
-                for address in addresses:
-                    parsed = ipaddress.ip_address(address)
-                    if parsed.is_unspecified: continue
-                    family = 'ip6' if parsed.version == 6 else 'ip'
-                    match = family + ' daddr ' + str(parsed)
-                    if parsed.version == 6:
-                        lines.append(match + ' icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept')
-                        if endpoint.get('ipv6mode') == 'dhcp': lines.append(match + ' udp sport 547 udp dport 546 accept')
-                    elif endpoint.get('ipv4mode') == 'dhcp':
-                        lines.append(match + ' udp sport 67 udp dport 68 accept')
-                    for binding in (bindings or {}).get(info['id'], []):
-                        bound = binding[4] if len(binding) == 5 else info.get('address')
-                        if bound == str(parsed):
-                            protocol, port = binding[:2]
-                            lines.append(match + ' ' + protocol + ' dport ' + str(port) + ' accept')
-                            # A node-local client may use its endpoint as the source.
-                            # Admit only replies belonging to this published service.
-                            lines.append(match + ' ct direction reply ct state established ' +
-                                         'ct original ' + family + ' daddr ' + str(parsed) +
-                                         ' ct original proto-dst ' + str(port) + ' meta l4proto ' + protocol + ' accept')
-                    lines.append(match + ' drop')
-        lines.append('}')
+    lines.append('chain host_endpoint_guard { type filter hook input priority -20; policy accept;')
+    for info in infos:
+        for endpoint in resolved(info).values():
+            addresses = [endpoint['address']] if endpoint.get('address') else []
+            if endpoint.get('cidr6'): addresses.append(str(ipaddress.IPv6Interface(endpoint['cidr6']).ip))
+            for address in addresses:
+                parsed = ipaddress.ip_address(address)
+                if parsed.is_unspecified: continue
+                family = 'ip6' if parsed.version == 6 else 'ip'
+                match = family + ' daddr ' + str(parsed)
+                if parsed.version == 6:
+                    lines.append(match + ' icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept')
+                    if endpoint.get('ipv6mode') == 'dhcp': lines.append(match + ' udp sport 547 udp dport 546 accept')
+                elif endpoint.get('ipv4mode') == 'dhcp':
+                    lines.append(match + ' udp sport 67 udp dport 68 accept')
+                for binding in (bindings or {}).get(info['id'], []):
+                    bound = binding[4] if len(binding) == 5 else info.get('address')
+                    if bound == str(parsed):
+                        protocol, port = binding[:2]
+                        # A declared port must never admit a wildcard node listener.
+                        lines.append(match + ' ' + protocol + ' dport ' + str(port) + ' socket wildcard 0 accept')
+                        # A node-local client may use its endpoint as the source.
+                        # Admit only replies belonging to this published service.
+                        lines.append(match + ' ct direction reply ct state established ' +
+                                     'ct original ' + family + ' daddr ' + str(parsed) +
+                                     ' ct original proto-dst ' + str(port) + ' meta l4proto ' + protocol + ' accept')
+                lines.append(match + ' drop')
+    lines.append('}')
     lines.append('}')
     return '\n'.join(lines) + '\n'
 
 
 
-def apply(infos, controls=True):
-    import firewall
+def activate(infos, bindings):
     from . import projects as w
-    rules = render(infos)
-    previous = firewall.STATE / 'endpoints.nft'
-    import subprocess
-    if controls and (not previous.exists() or previous.read_text() != rules or subprocess.run(['nft', 'list', 'table', 'inet', 'betterdocker_endpoints'], capture_output=True).returncode):
-        firewall.apply_rules(rules, table='betterdocker_endpoints', cache='endpoints.nft')
-    published = [binding for info in infos for binding in firewall.published_ports(info)]
+    published = [binding for entries in bindings.values() for binding in entries]
     ipv6 = [binding for binding in published if len(binding) == 5 and ipaddress.ip_address(binding[4]).version == 6]
     if not w.node_runtime.load().rootless:
         apply_host_exceptions(ipv6)
