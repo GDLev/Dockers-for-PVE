@@ -141,7 +141,7 @@ sys.path.insert(0,'/usr/local/lib/betterdocker')
 from dctlib import projects as w
 request=w.read_json(w.ROOT/w.project_id(sys.argv[1])/'request.json')
 services=json.loads(request['compose'])['services']
-print(all(s.get('labels',{}).get('betterdocker.acceptance-run')==sys.argv[2] for s in services.values()))
+print(all(s.get('labels',{}).get('dev.gdlev.acceptance-run')==sys.argv[2] for s in services.values()))
 '''
     marker=remote(info['node'],['python3','-c',marker_code,info['id'],report.data['run']],check=True).stdout.strip()
     if marker!='True':raise ValueError('Fixture does not carry this run ownership marker')
@@ -228,7 +228,7 @@ def traffic(report, node, address, index):
         compose = {'services': {service: dict(image='busybox:1.37', pull_policy='never', init=True,
                     command=['sh', '-c', 'mkdir -p /www; printf %s ' + marker + ' > /www/index.html; exec httpd -f -p 80 -h /www'],
                     cpus=.25, mem_limit='64m', pids_limit=64, read_only=True, tmpfs=['/www:rw,size=1m'],
-                    labels={'betterdocker.acceptance-run': report.data['run']},
+                    labels={'dev.gdlev.acceptance-run': report.data['run']},
                     **({'ports': ['18087:80']} if service == 'app' else {})) for service in ('app', 'internal')}}
         deployment = dict(vmid=vmid, name=name, mode='compose', compose=json.dumps(compose),
                           interfaces={'net0':dict(bridge='vmbr0', ipv4mode='static', cidr=ip+'/20', ipv6mode='static', cidr6=ipv6+'/64', firewall=1)})
