@@ -30,7 +30,7 @@ def main():
         folder = Path(folder); point = folder / 'xfs'; point.mkdir()
         image = folder / 'disk.raw'
         with image.open('wb') as output:
-            output.truncate(1024**3)
+            output.truncate(2 * 1024**3)
         run(['mkfs.xfs', '-f', str(image)])
         try:
             run(['mount', '-o', 'loop,prjquota', str(image), str(point)]); mounted = True
