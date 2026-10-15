@@ -65,6 +65,26 @@ class DataTests(unittest.TestCase):
             worker.refresh('pve')
         self.assertNotIn('hookscript', json.loads(path.read_text()))
 
+    def test_refresh_rechecks_active_operation_after_acquiring_metadata_lock(self):
+        from contextlib import contextmanager
+        info = {'id': ID, 'node': 'pve', 'vmid': 100, 'status': 'stopped'}
+        path = worker.METADATA / (ID + '.json'); path.write_text(json.dumps(info))
+        busy = False
+        @contextmanager
+        def acquired(*args, **kwargs):
+            nonlocal busy
+            busy = True
+            yield
+        with patch.object(worker, 'locked', side_effect=acquired), \
+                patch.object(worker, 'operation_state', side_effect=lambda identifier: {'active': busy}), \
+                patch.object(worker, 'capture', return_value=''), \
+                patch.object(worker, 'sync_dhcp') as sync, \
+                patch.object(worker, 'recover_network_transaction') as recover, \
+                patch.object(worker, 'management') as management:
+            worker.refresh('pve')
+        sync.assert_not_called(); recover.assert_not_called(); management.assert_not_called()
+        self.assertEqual(json.loads(path.read_text()), info)
+
     def test_refresh_does_not_recover_an_active_snapshot(self):
         info = {'id': ID, 'node': 'pve', 'vmid': 100, 'status': 'stopped'}
         (worker.METADATA / (ID + '.json')).write_text(json.dumps(info))

@@ -631,6 +631,8 @@ def refresh(node):
         with locked(info['id']):
             if not (METADATA / (info['id'] + '.json')).exists():
                 continue
+            if operation_state(info['id']).get('active'):
+                continue
             # Portable state transactions use the same per-project operation lock.
             if (ROOT / info['id'] / 'export-transaction.json').exists() or (ROOT.parent / 'imports' / (info['id'] + '.json')).exists():
                 from guest_state import recover
@@ -661,6 +663,8 @@ def refresh(node):
         with locked(info['id']):
             if not (METADATA / (info['id'] + '.json')).exists():
                 continue
+            if operation_state(info['id']).get('active'):
+                continue
             info = read_json(METADATA / (info['id'] + '.json'))
             if info['node'] != node or info.get('ha_recovery') or info['status'] == 'network-error':
                 continue
@@ -684,6 +688,8 @@ def refresh(node):
                     continue
                 with locked(info['id']):
                     if not (METADATA / (info['id'] + '.json')).exists():
+                        continue
+                    if operation_state(info['id']).get('active'):
                         continue
                     info = read_json(METADATA / (info['id'] + '.json'))
                     if info['node'] != node or info.get('ha_recovery') or info.get('template'):
