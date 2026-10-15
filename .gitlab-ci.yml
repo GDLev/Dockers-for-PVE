@@ -10,7 +10,7 @@ python:
   script:
     - bash scripts/ci-dependencies.sh
     - python -m pip install --require-hashes -r requirements-test.txt
-    - env PATH=/opt/betterdocker-ci-python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /opt/betterdocker-ci-python/bin/python /opt/betterdocker-ci-source/tests/check_release_ci.py
+    - env PATH=/var/lib/betterdocker-ci/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /var/lib/betterdocker-ci/python/bin/python /var/lib/betterdocker-ci/source/tests/check_release_ci.py
     - python tests/check_unit.py
     - bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
 
