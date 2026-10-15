@@ -96,6 +96,24 @@ class SwapTests(unittest.TestCase):
         self.assertEqual(json.loads((self.directory / 'compose.runtime.json').read_text()), candidate)
         self.assertFalse((self.directory / swap.JOURNAL).exists())
 
+    def test_disk_commit_keeps_journal_authenticated(self):
+        from dctlib import secure_io
+        key = self.root / 'recovery.key'
+        secure_io.atomic_text(key, 'test-only-key')
+        path = self.directory / 'disk-transaction.json'
+        before = {'phase': 'preparing', 'key': 'mp1'}
+        after = dict(before, phase='committed')
+        with patch.object(secure_io, 'KEY', key):
+            worker.write_json(path, before)
+            swap.execute({'id': ID}, '*', [], self.config, {}, {}, {},
+                         updates={'disk-transaction.json': json.dumps(after)})
+            self.assertEqual(secure_io.read_json(path), after)
+            changed = json.loads(path.read_text())
+            changed['key'] = 'mp2'
+            path.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, 'integrity'):
+                secure_io.read_json(path)
+
     def test_second_replica_failure_restores_originals_and_pending_changes(self):
         self.fail_at = 2
         with self.assertRaisesRegex(ValueError, 'Injected'):
