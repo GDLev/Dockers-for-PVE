@@ -8,7 +8,7 @@ BetterDockers adds Docker projects to the Proxmox VE web interface as **DCT** gu
 Docker runs on the PVE host. A DCT can contain several services under one guest ID.
 
 > [!WARNING]
-> Version 0.20.0 is a prerelease, with no production release or established production signing key. Use it only on small, non-critical installations, preferably a single node. It is not recommended for commercial or complex deployments.
+> Version 0.20.0 is a prerelease. Production acceptance is not complete. Use it only on small, non-critical installations, preferably a single node. It is not recommended for commercial or complex deployments.
 
 ## Requirements
 

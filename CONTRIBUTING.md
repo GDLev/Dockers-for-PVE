@@ -82,7 +82,7 @@ python3 packaging/sign-release.py --key /secure/betterdockers-release.pem --outp
 
 Use an RSA key of at least 3072 bits. Keep the private key outside the repository and ordinary CI. Publish the metadata, signature, public key, installer, source archive, and DEB together. Do not rebuild after signing or replace an existing release with different bytes.
 
-No production key is provisioned by this repository. Administrators must confirm its DER SHA-256 fingerprint through an independently authenticated channel before saving `/etc/betterdocker/release-key.pem` and `/etc/betterdocker/release-key.sha256` as root-owned files. A key and fingerprint downloaded together do not establish trust.
+The release public key is in `packaging/release-key.pem`. The installer does not provision trust automatically. Administrators must confirm its DER SHA-256 fingerprint through an independently authenticated channel before saving `/etc/betterdocker/release-key.pem` and `/etc/betterdocker/release-key.sha256` as root-owned files. A key and fingerprint downloaded together do not establish trust.
 
 Install a signed DEB through the verified release helper:
 
