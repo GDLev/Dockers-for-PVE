@@ -67,6 +67,8 @@ def proxy_mappings(values):
 
 
 def rootless_resources(config):
+    if any(service.get('volume_driver') not in (None, '', 'local') for service in config.get('services', {}).values()):
+        raise ValueError('Rootless DCT resources require the local volume driver')
     for kind in ('volumes', 'networks'):
         for definition in config.get(kind, {}).values():
             definition = definition or {}
@@ -79,6 +81,8 @@ def rootless_container(body):
     identifier = (body.get('Labels') or {}).get('betterdocker.id')
     if not identifier: raise ValueError('Rootless DCT container ownership is missing')
     host = body.get('HostConfig') or {}
+    if host.get('VolumeDriver') not in (None, '', 'local'):
+        raise ValueError('Rootless mounts require the local volume driver')
     for binding in host.get('Binds') or []:
         source = binding.split(':', 1)[0]
         if source.startswith('/'):
@@ -87,7 +91,12 @@ def rootless_container(body):
             volume(source)
     for mount in host.get('Mounts') or []:
         if mount.get('Type') == 'bind': w.safe_bind(mount.get('Source', ''), identifier)
-        elif mount.get('Type') == 'volume': volume(mount.get('Source', ''))
+        elif mount.get('Type') == 'volume':
+            driver = (mount.get('VolumeOptions') or {}).get('DriverConfig') or {}
+            if driver.get('Name') not in (None, '', 'local') or driver.get('Options'):
+                raise ValueError('Rootless mounts cannot use volume driver options or external drivers')
+            if mount.get('Source'):
+                volume(mount['Source'])
 
 
 def volume(name):
