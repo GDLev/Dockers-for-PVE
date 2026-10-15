@@ -1,9 +1,7 @@
 # Release notes
 
-No production version has been released. TEST publications are verification artifacts, not supported installation releases.
+## 0.20.0 (prerelease)
 
-## Unreleased
+The first BetterDockers prerelease integrates Compose projects into PVE as DCT guests, with rootful or rootless Docker, guest permissions, resource controls, networking, storage, snapshots, PBS backup/restore and cluster operations.
 
-The development version is 0.20.0. It provides DCT management through PVE's panel, API, and CLI, with rootful or rootless Docker, resource controls, networking, managed disks, snapshots, backups, and cluster integration.
-
-Production publication requires a maintainer-approved signing key, final artifact and installation lifecycle checks, the supported environment matrix, and independent security review. See [SECURITY.md](SECURITY.md).
+This is a prerelease for small, non-critical installations. Read the [requirements and operational limits](README.md) and [security model](SECURITY.md) before installation. It is not recommended for production or hostile multi-tenant workloads.

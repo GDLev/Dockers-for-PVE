@@ -17,6 +17,10 @@ Keep changes focused. Include a regression check and distinguish mocked contract
 
 The frontend runs in PVE's ExtJS environment and has no npm dependencies. Edit source files, not the generated or installed bundle.
 
+## Development installation
+
+Review and check out the intended commit on a disposable PVE node, then run `bash start.sh --development-source`. This explicitly accepts unsigned source. Do not use that flag for downloaded release archives or packages.
+
 ## Run checks
 
 Use Python 3.12 or newer, Node.js, and Docker Compose 5.6.0 or newer:
@@ -97,7 +101,7 @@ The separate `Publish prerelease` workflow accepts a successful Validate run ID 
 
 Direct `dpkg -i` requires the helper's verified authorization. Source transfers verify signatures and hashes before isolated extraction. Package configuration and repair verify installed source. Trust and signed-version state remain after uninstall. For key rotation and withdrawal, see [SECURITY.md](SECURITY.md#release-security).
 
-Until the first production release, the project targets the current development state. Older experimental builds are not supported upgrade targets. Recovery journals and data-retention safeguards still protect interrupted operations and existing workloads.
+Recovery journals and data-retention safeguards protect interrupted operations and existing workloads. Do not remove them as an installation shortcut.
 
 ## Runtime conversion
 
