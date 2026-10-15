@@ -1,5 +1,5 @@
 """Replace stopped service instances while retaining their files and rollback originals."""
-from .secure_io import read_json, read_text
+from .secure_io import read_json, read_text, journal as recovery_journal
 import copy
 import json
 import os
@@ -298,6 +298,8 @@ def execute(info, service, entries, candidate, settings, pending, defaults, upda
             target = directory / name
             if value is None:
                 target.unlink(missing_ok=True)
+            elif recovery_journal(target):
+                durable_write(target, json.loads(value))
             else:
                 durable_text(target, value)
         if metadata is not None:
