@@ -638,7 +638,7 @@ def refresh(node):
             if not (METADATA / (info['id'] + '.json')).exists():
                 continue
             recover_network_transaction(info['id'], node)
-            info.update(read_json(METADATA / (info['id'] + '.json')))
+            info = read_json(METADATA / (info['id'] + '.json'))
             if info['node'] != node or info.get('ha_recovery'):
                 continue
             try:
@@ -661,7 +661,8 @@ def refresh(node):
         with locked(info['id']):
             if not (METADATA / (info['id'] + '.json')).exists():
                 continue
-            if info['status'] == 'network-error':
+            info = read_json(METADATA / (info['id'] + '.json'))
+            if info['node'] != node or info.get('ha_recovery') or info['status'] == 'network-error':
                 continue
             states = [entry['State'] for entry in entries
                       if ('betterdocker.id=' + info['id']) in entry.get('Labels', '').split(',')]
@@ -683,6 +684,9 @@ def refresh(node):
                     continue
                 with locked(info['id']):
                     if not (METADATA / (info['id'] + '.json')).exists():
+                        continue
+                    info = read_json(METADATA / (info['id'] + '.json'))
+                    if info['node'] != node or info.get('ha_recovery') or info.get('template'):
                         continue
                     snapshot = management(info['id'], node, shared_stats=shared_stats)
                     if snapshot.get('ha_recovery'):

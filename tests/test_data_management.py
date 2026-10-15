@@ -27,6 +27,44 @@ class DataTests(unittest.TestCase):
         (worker.METADATA / 'ids/100.json').write_text(json.dumps({'id': ID, 'node': 'pve'}))
         (worker.ROOT / ID / 'compose.runtime.json').write_text('{"services":{}}')
 
+    def test_refresh_preserves_template_and_configuration_changed_during_poll(self):
+        initial = {'id': ID, 'node': 'pve', 'vmid': 100, 'status': 'stopped',
+                   'expected': 1, 'template': False, 'protection': False, 'notes': 'before', 'hookscript': 'local:snippets/old.sh'}
+        path = worker.METADATA / (ID + '.json')
+        path.write_text(json.dumps(initial))
+        (worker.ROOT / ID / 'metrics.json').write_text('{}')
+        def poll(*args, **kwargs):
+            current = json.loads(path.read_text())
+            current.update(template=True, protection=True, notes='after', expected=2)
+            current.pop('hookscript')
+            path.write_text(json.dumps(current))
+            return ''
+        with patch.object(worker, 'capture', side_effect=poll), \
+                patch.object(worker, 'operation_state', return_value={'active': False}), \
+                patch.object(worker, 'sync_dhcp'), patch.object(worker, 'recover_network_transaction'):
+            worker.refresh('pve')
+        current = json.loads(path.read_text())
+        self.assertTrue(current['template'])
+        self.assertTrue(current['protection'])
+        self.assertEqual((current['notes'], current['expected']), ('after', 2))
+        self.assertNotIn('hookscript', current)
+
+    def test_refresh_does_not_resurrect_configuration_deleted_before_reconciliation(self):
+        previous = {'id': ID, 'node': 'pve', 'vmid': 100, 'status': 'stopped',
+                    'hookscript': 'local:snippets/old.sh'}
+        current = {key: value for key, value in previous.items() if key != 'hookscript'}
+        path = worker.METADATA / (ID + '.json'); path.write_text(json.dumps(current))
+        (worker.ROOT / ID / 'metrics.json').write_text('{}')
+        def reconcile(info):
+            path.write_text(json.dumps(info))
+        with patch.object(worker, 'summaries', return_value=[previous]), \
+                patch.object(worker, 'capture', return_value=''), \
+                patch.object(worker, 'operation_state', return_value={'active': False}), \
+                patch.object(worker, 'sync_dhcp', side_effect=reconcile), \
+                patch.object(worker, 'recover_network_transaction'):
+            worker.refresh('pve')
+        self.assertNotIn('hookscript', json.loads(path.read_text()))
+
     def test_refresh_does_not_recover_an_active_snapshot(self):
         info = {'id': ID, 'node': 'pve', 'vmid': 100, 'status': 'stopped'}
         (worker.METADATA / (ID + '.json')).write_text(json.dumps(info))
