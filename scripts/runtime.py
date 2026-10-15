@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import socket
 import stat
 import struct
@@ -179,6 +180,8 @@ def read_access(path, runtime=None):
 def check_volume_path(path, name, runtime=None):
     runtime = runtime or load()
     if runtime.rootless:
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', name):
+            raise ValueError('Invalid rootless Docker volume name')
         expected = Path(runtime.data) / 'volumes' / name / '_data'
         if Path(path) != expected or any(p.is_symlink() for p in [expected, *expected.parents]):
             raise ValueError('Docker volume path is outside the selected runtime storage')

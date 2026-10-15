@@ -21,7 +21,8 @@ def main():
     identifier = None
     children = []
     config = {'services': {'app': {'image': 'busybox:1.37', 'init': True, 'command': ['sleep', '86400'],
-        'deploy': {'replicas': 2}, 'volumes': ['./data:/data', '/anonymous'], 'environment': {'VALUE': 'before'}}}}
+        'deploy': {'replicas': 2}, 'volumes': ['./data:/data', 'named:/named', '/anonymous'],
+        'environment': {'VALUE': 'before'}}}, 'volumes': {'named': {}}}
     with tempfile.TemporaryDirectory(prefix='bd-release-test-') as folder:
         folder = Path(folder)
         source = folder / 'compose.json'; source.write_text(json.dumps(config))
@@ -34,7 +35,7 @@ def main():
             originals = sorted(w.container_records(identifier), key=lambda row: row['number'])
             volumes = {}
             for row in originals:
-                call('docker', 'exec', row['id'], 'sh', '-c', 'echo "$1" > /marker; echo "$1" > /anonymous/value; echo data > /data/value', 'sh', row['number'])
+                call('docker', 'exec', row['id'], 'sh', '-c', 'echo "$1" > /marker; echo "$1" > /anonymous/value; echo data > /data/value; echo named-data > /named/value', 'sh', row['number'])
                 inspected = json.loads(call('docker', 'inspect', row['id']))[0]
                 volumes[row['number']] = next(m['Name'] for m in inspected['Mounts'] if m['Destination'] == '/anonymous')
             call('dct', 'stop', vmid)
@@ -51,6 +52,7 @@ def main():
             for row in current[:2]:
                 assert call('docker', 'exec', row['id'], 'cat', '/marker').strip() == row['number']
                 assert call('docker', 'exec', row['id'], 'cat', '/anonymous/value').strip() == row['number']
+                assert call('docker', 'exec', row['id'], 'cat', '/named/value').strip() == 'named-data'
                 inspected = json.loads(call('docker', 'inspect', row['id']))[0]
                 assert next(m['Name'] for m in inspected['Mounts'] if m['Destination'] == '/anonymous') == volumes[row['number']]
                 assert 'VALUE=after-$literal' in inspected['Config']['Env']
@@ -60,7 +62,7 @@ def main():
             call('dct', 'stop', vmid)
             # Anonymous per-replica volumes retain their own lifecycle. The project
             # data disk manages named volumes and project bind directories.
-            updated['services']['app']['volumes'] = ['./data:/data']
+            updated['services']['app']['volumes'] = ['./data:/data', 'named:/named']
             info = w.detail(identifier, node)
             with w.operation(identifier, 'update'):
                 w.update(identifier, node, w.validate(dict(info['deployment'], compose=json.dumps(updated))), info['digest'])
@@ -73,6 +75,7 @@ def main():
             for row in current[:2]:
                 assert call('docker', 'exec', row['id'], 'cat', '/marker').strip() == row['number']
                 assert call('docker', 'exec', row['id'], 'cat', '/extra/value').strip() == 'extra'
+                assert call('docker', 'exec', row['id'], 'cat', '/named/value').strip() == 'named-data'
             call('dct', 'stop', vmid)
             settings = w.storage_config(identifier)
             assert settings['additional']['mp1']['size_mib'] >= 384
@@ -131,6 +134,7 @@ disks.configure(identifier,node,'mp2',{'service':'app','target':'/more','storage
             call('dct', 'start', child_vmid)
             cid = w.container_records(child_id)[0]['id']
             assert call('docker', 'exec', cid, 'cat', '/data/value').strip() == 'kept'
+            assert call('docker', 'exec', cid, 'cat', '/named/value').strip() == 'named-data'
             call('docker', 'exec', cid, 'sh', '-c', 'echo child > /data/value')
             source_data = Path(next(iter(w.storage_config(identifier)['mapping'].values()))) / 'value'
             assert source_data.read_text().strip() == 'kept', 'Child changed template data'
