@@ -56,9 +56,40 @@ Log rotation is per container. Retention budgets and free-space reservations lim
 
 ## Release security
 
-The current checkout has no established production signing key. Unsigned CI artifacts and a reviewed development checkout are not signed installation releases.
+Release assets are signed with the maintainer key in `packaging/release-key.pem`. Unsigned CI artifacts and development checkouts are not signed installation releases.
 
 Before publishing, complete the required release checks, clean signed installation acceptance, the supported environment matrix, and an independent manual review. Publish only the tested artifacts with signed metadata and a public-key fingerprint confirmed through an independent channel. See [release preparation](CONTRIBUTING.md) and [release notes](RELEASE_NOTES.md).
+
+### Verify a release
+
+Run in a new empty directory on the PVE node as root. Install `curl`, `python3`, `openssl` and `ca-certificates` first if absent. Confirm this public-key fingerprint directly with the maintainer through an independently trusted channel before using it. Downloading a key and fingerprint together does not establish trust.
+
+```bash
+(
+set -euo pipefail
+bd_release_url=https://github.com/GDLev/Proxmox-BetterDockers/releases/download/v0.20.0
+for file in install.sh RELEASE.json RELEASE.sig release-key.pem; do
+    curl --proto '=https' --proto-redir '=https' --fail --location --max-filesize 4194304 \
+        "$bd_release_url/$file" --output "$file"
+done
+bd_pin=8f1983fa57cf5e003b0cd1e8885472c20a8f5fd7f3b376b6d154714a97fc77ff
+test "$(openssl pkey -pubin -in release-key.pem -outform DER | sha256sum | cut -d ' ' -f1)" = "$bd_pin"
+openssl dgst -sha256 -verify release-key.pem -signature RELEASE.sig RELEASE.json
+python3 - <<'VERIFY'
+import hashlib, json, pathlib
+metadata = json.loads(pathlib.Path('RELEASE.json').read_text())
+actual = hashlib.sha256(pathlib.Path('install.sh').read_bytes()).hexdigest()
+if metadata['version'] != '0.20.0' or metadata['artifacts']['install.sh'] != actual:
+    raise SystemExit('Installer checksum or version mismatch')
+VERIFY
+install -d -m 0755 /etc/betterdocker
+install -m 0644 release-key.pem /etc/betterdocker/release-key.pem
+printf '%s\n' "$bd_pin" > /etc/betterdocker/release-key.sha256
+chmod 0644 /etc/betterdocker/release-key.sha256
+)
+```
+
+Stop if any command fails. Do not run the installer after a failed verification. Then follow the [installation instructions](README.md#install-the-prerelease).
 
 For a confirmed release vulnerability, identify the affected versions, publish an advisory with the impact and mitigation, and withdraw affected downloads and installation instructions. Prepare and test a replacement release under a new version. Do not overwrite a published version with different bytes. Keep the advisory and affected hashes available so administrators can identify their installations.
 

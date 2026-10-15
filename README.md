@@ -27,38 +27,32 @@ Choose the runtime when installing. Updates and repair preserve the node's mode.
 
 PVE still manages networking, storage, and permissions as root in both modes. Rootless is the default for new installations. Neither mode provides VM isolation. See [SECURITY.md](SECURITY.md).
 
-## Install the development build
+## Install the prerelease
 
-Review the code and select the commit you intend to install. Run as root on a test PVE node:
+Download the signed installer from the [0.20.0 release](https://github.com/GDLev/Proxmox-BetterDockers/releases/tag/v0.20.0). Follow [release verification and trust setup](SECURITY.md#verify-a-release) before executing it. Run as root on a test PVE node:
 
 ```bash
-git clone https://github.com/GDLev/Proxmox-BetterDockers.git
-cd Proxmox-BetterDockers
-# Check out your reviewed commit before continuing.
-bash start.sh --development-source
+bash install.sh
 ```
-
-`--development-source` explicitly accepts unsigned source. It is not a substitute for a signed production release.
 
 The installer offers Install / Update, Repair, and Uninstall. Select nodes with Space and continue with Enter. Cluster installations use PVE's existing SSH trust. Read the per-node results, then press Enter to reload the panel and API services.
 
 Refresh PVE with Ctrl+Shift+R. Click **Create DCT**, select a node, import a Compose file or choose an image, and configure the network. Check the task result before starting the guest.
 
-For an unattended development installation:
+For an unattended installation after verification:
 
 ```bash
-bash start.sh install --development-source --runtime=rootless --yes
+bash install.sh install --runtime=rootless --yes
 ```
 
-Add `--nodes=pve1,pve2` to select nodes or `--no-restart` to defer service reload. For signed artifact verification and package installation, see [CONTRIBUTING.md](CONTRIBUTING.md#build-and-sign).
+Add `--nodes=pve1,pve2` to select nodes or `--no-restart` to defer service reload. [CONTRIBUTING.md](CONTRIBUTING.md) covers development checkouts, package installation and signing.
 
 ## Update and repair
 
-Review and check out the desired commit, then run:
+For a new release, verify its installer and choose Install / Update. To repair the installed version:
 
 ```bash
-bash start.sh install --development-source
-bash start.sh repair --development-source
+bash /var/lib/betterdocker/installer/source/start.sh repair --yes
 ```
 
 Install / Update updates the extension. Repair reapplies its integration to the installed PVE files. Back up workloads before maintenance. PVE package updates can require repair; unsupported native layouts are rejected.
@@ -70,8 +64,10 @@ Do not change runtime mode during an update. Offline conversion has separate pre
 Remove DCT HA registrations and replication jobs first. Run the reviewed installer and choose Uninstall, or run:
 
 ```bash
-bash start.sh uninstall --yes
+bash /var/lib/betterdocker/installer/source/start.sh uninstall --yes
 ```
+
+For a DEB installation, use `apt remove proxmox-betterdockers` so the package and its repair triggers are removed too.
 
 Uninstall removes the web/API integration and guest CLI. **Docker, workloads, persistent data, runtime configuration, and required network/firewall maintenance remain.** Removing retained data is a separate, explicit operation. Do not delete runtime directories while workloads use them.
 
