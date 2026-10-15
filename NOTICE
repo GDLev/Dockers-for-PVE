@@ -1,0 +1,12 @@
+The archives in tests/fixtures/native/ contain Proxmox VE source files used to
+check integration with native PVE layouts. They are not installed by BetterDockers.
+
+Copyright (C) 2010-2026 Proxmox Server Solutions GmbH
+Licensed under the GNU Affero General Public License, version 3 or later.
+See LICENSE for the license text.
+
+Upstream source repositories:
+https://git.proxmox.com/?p=pve-manager.git
+https://git.proxmox.com/?p=pve-cluster.git
+https://git.proxmox.com/?p=pve-guest-common.git
+https://git.proxmox.com/?p=pve-ha-manager.git
