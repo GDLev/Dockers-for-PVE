@@ -757,7 +757,7 @@ sub console_helper_command {
     my $sshinfo = PVE::SSHInfo::get_ssh_info($param->{node});
     my $ssh = PVE::SSHInfo::ssh_info_to_command($sshinfo, $interactive ? ('-t') : ());
     my @environment = map { $_ . '=' . ($ENV{$_} // '') }
-        qw(BETTERDOCKER_TRUSTED BETTERDOCKER_TASK_USER BETTERDOCKER_REQUIRE_SAFE);
+        qw(BETTERDOCKER_TRUSTED BETTERDOCKER_TASK_USER BETTERDOCKER_REQUIRE_SAFE BETTERDOCKER_REQUEST_CONTEXT);
     return [@$ssh, PVE::Tools::cmd2string(['env', @environment, @$cmd])];
 }
 
