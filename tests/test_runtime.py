@@ -16,6 +16,31 @@ ROOTLESS = runtime.Runtime('rootless', 'betterdocker', 997, 995,
 
 
 class RuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, 'Runtime installation requires host root')
+    def test_fresh_private_runtime_parent_allows_traversal_without_exposing_siblings(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            parent = base / 'state'
+            parent.mkdir(mode=0o700)
+            home = parent / 'runtime'
+            account = SimpleNamespace(pw_uid=12345, pw_gid=12345, pw_dir=str(home))
+            with patch.object(runtime_install, 'HOME', str(home)), \
+                    patch.object(runtime, 'CONFIG', base / 'runtime.json'), \
+                    patch.object(runtime_install, 'preflight'), \
+                    patch.object(runtime_install.pwd, 'getpwnam', return_value=account), \
+                    patch.object(runtime_install, 'command', return_value=subprocess.CompletedProcess([], 0, stdout='betterdocker')), \
+                    patch.object(runtime_install, 'subordinate', return_value=1048576), \
+                    patch.object(runtime, 'load', side_effect=RuntimeError('fixture stops before daemon startup')):
+                with self.assertRaisesRegex(RuntimeError, 'fixture stops before daemon startup'):
+                    runtime_install.initialize('rootless')
+            self.assertEqual(parent.stat().st_mode & 0o777, 0o711)
+            self.assertEqual(parent.stat().st_uid, 0)
+            self.assertEqual(home.stat().st_uid, 0)
+            for name in ('docker', '.docker'):
+                self.assertEqual((home / name).stat().st_mode & 0o777, 0o700)
+                self.assertEqual((home / name).stat().st_uid, account.pw_uid)
+
     def test_legacy_retained_projects_keep_rootful_mode_on_reinstall(self):
         with patch.object(Path, 'exists', return_value=False), \
                 patch.object(Path, 'glob', return_value=[Path('/retained/request.json')]):
