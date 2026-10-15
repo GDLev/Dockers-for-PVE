@@ -54,6 +54,35 @@ class ClusterInstallationTests(unittest.TestCase):
         integration.registration('ready', 'one')
         integration.require_cluster()
 
+    def test_pending_reload_blocks_ids_until_finish_and_failed_finish_stays_pending(self):
+        for node in ('one', 'two'):
+            integration.registration('ready', node)
+        integration.registration('pending', 'two')
+        with self.assertRaisesRegex(ValueError, 'Missing: two'):
+            integration.require_cluster()
+        with tempfile.TemporaryDirectory() as directory, patch.object(installer, 'CACHE', Path(directory)):
+            installer.mark_restart('install')
+            with patch.object(installer.subprocess, 'run', side_effect=OSError('restart failed')):
+                with self.assertRaises(OSError):
+                    installer.finish_restart()
+            self.assertFalse(integration.registered('two'))
+            self.assertTrue((Path(directory) / 'pending-restart.json').exists())
+        integration.registration('ready', 'two')
+        integration.require_cluster()
+
+    def test_finish_registers_only_after_native_api_and_patch_checks(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(installer, 'CACHE', Path(directory)):
+            installer.mark_restart('repair')
+            actual_exists = Path.exists
+            def exists(path):
+                return str(path) == '/usr/share/perl5/PVE/API2/BetterDocker.pm' or actual_exists(path)
+            events = []
+            with patch.object(Path, 'exists', exists), patch.object(installer.subprocess, 'check_output', return_value='one\n'), patch.object(installer.subprocess, 'run', side_effect=lambda args, **kw: events.append(args)), patch.object(installer, 'register_node', side_effect=lambda action: events.append(action)):
+                installer.finish_restart()
+            self.assertEqual(events[-1], 'ready')
+            self.assertTrue(any(args[-1:] == ['status'] for args in events[:-1]))
+            self.assertFalse((Path(directory) / 'pending-restart.json').exists())
+
     def test_corrupt_or_unsafe_record_fails_closed(self):
         integration.registration('ready', 'one')
         record = self.root / 'nodes/one.json'

@@ -43,9 +43,9 @@ def registration(action, node):
     if node not in nodes():
         raise ValueError('Node is not a current cluster member')
     path = METADATA / 'nodes' / (node + '.json')
-    if action == 'ready':
+    if action in ('pending', 'ready'):
         from .version import VERSION
-        atomic_text(path, json.dumps(dict(node=node, state='ready', version=VERSION)) + '\n', public=True)
+        atomic_text(path, json.dumps(dict(node=node, state=action, version=VERSION)) + '\n', public=True)
     elif action == 'remove':
         check_uninstall()
         path.unlink(missing_ok=True)

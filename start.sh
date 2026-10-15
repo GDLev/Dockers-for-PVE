@@ -222,6 +222,7 @@ for index in "${!TARGETS[@]}"; do
 done
 rollback() {
     echo "Installation failed; restoring integration. Backups: $BACKUP_DIR" >&2
+    python3 "$PROJECT_DIR/scripts/installer.py" --registration pending || true
     if [[ ! -e "$BACKUP_DIR/addon-42" && -e /etc/betterdocker/runtime.json ]]; then
         if [[ $(python3 /usr/local/lib/betterdocker/runtime.py identity 2>/dev/null) == *'"rootless"'* ]]; then
             python3 /usr/local/lib/betterdocker/runtime.py service stop || true
@@ -259,6 +260,7 @@ rollback() {
     finish_services || true
 }
 cache_and_mark
+python3 "$PROJECT_DIR/scripts/installer.py" --registration pending
 trap rollback ERR
 stage integration
 install -d -m 0755 /usr/local/lib/betterdocker /usr/local/lib/betterdocker/dctlib
@@ -368,7 +370,6 @@ pvesh get /cluster/resources --output-format json >/dev/null
 if [[ -f "$PROJECT_DIR/.release.json" ]]; then
     python3 "$PROJECT_DIR/scripts/release.py" record "$PROJECT_DIR"
 fi
-python3 "$PROJECT_DIR/scripts/installer.py" --registration ready
 trap - ERR
 if [[ $DEFER_RESTART == 1 ]]; then
     echo 'BetterDocker installed. Panel/API reload is pending.'
