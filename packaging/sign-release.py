@@ -63,5 +63,7 @@ if package_source != expected:
 manifest = args.output / 'RELEASE.json'
 manifest.write_text(json.dumps(dict(format=1, version=version, artifacts={name: release.digest(args.output / name) for name in files}, source=source), sort_keys=True, separators=(',', ':')) + '\n')
 subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(args.key), '-out', str(args.output / 'RELEASE.sig'), str(manifest)], check=True)
+checksummed = sorted([*files, 'RELEASE.json', 'RELEASE.sig', 'release-key.pem'])
+(args.output / 'SHA256SUMS').write_text(''.join(release.digest(args.output / name) + '  ' + name + '\n' for name in checksummed))
 print('Public-key SHA-256:', release.fingerprint(args.output / 'release-key.pem'))
 print('Publish RELEASE.json, RELEASE.sig and the three artifacts only after required checks pass.')

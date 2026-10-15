@@ -74,7 +74,7 @@ The artifact check requires Linux root in a disposable worker. It uses a disposa
 
 CI builds unsigned artifacts and does not publish releases. Test the final commit and exact package bytes, including clean installation, repair, uninstall, service restart, and guest operations in each supported environment.
 
-Sign reviewed artifacts on a separate signing machine:
+Download the `betterdocker-deb` artifact from the successful GitHub `Validate` run for the frozen commit. Sign those exact DEB and source archive bytes from its reviewed checkout, on a separate Linux signing machine with `dpkg-deb`:
 
 ```bash
 python3 packaging/sign-release.py --key /secure/betterdockers-release.pem --output dist
@@ -90,6 +90,10 @@ Install a signed DEB through the verified release helper:
 python3 scripts/release.py deb proxmox-betterdockers_0.20.0_all.deb \
     --manifest RELEASE.json --signature RELEASE.sig --version 0.20.0
 ```
+
+The signer also writes `SHA256SUMS`. Keep the accepted CI artifact unchanged. `packaging/verify-release.py <signed-assets> --build <downloaded-ci-artifact>` verifies the signature, reviewed source, public key, checksums and original build bytes.
+
+The separate `Publish prerelease` workflow accepts a successful Validate run ID and a draft release ID bound to the same full commit SHA. It verifies the draft before approval and repeats verification after the `release` environment approval. It publishes the existing assets without rebuilding or accessing the private signing key. Publishing also requires `RELEASE_PUBLICATION_ENABLED=true`, a public repository and configured required reviewers. Leave publication disabled until the candidate is accepted. Do not give public PR workflows access to signing keys, lab credentials or PVE runners.
 
 Direct `dpkg -i` requires the helper's verified authorization. Source transfers verify signatures and hashes before isolated extraction. Package configuration and repair verify installed source. Trust and signed-version state remain after uninstall. For key rotation and withdrawal, see [SECURITY.md](SECURITY.md#release-security).
 
