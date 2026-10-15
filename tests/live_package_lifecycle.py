@@ -66,7 +66,11 @@ def main():
         assert identity == runtime, 'Runtime identity changed'
         inspected = json.loads(command([helper, 'docker', 'inspect', cid]).stdout)[0]
         assert 'ALL' in inspected['HostConfig']['CapDrop']
-        assert 'no-new-privileges:true' in inspected['HostConfig']['SecurityOpt']
+        status = command([helper, 'docker', 'exec', cid, 'cat', '/proc/1/status']).stdout
+        fields = dict(line.split(':', 1) for line in status.splitlines() if ':' in line)
+        assert fields['NoNewPrivs'].strip() == '1' and fields['Seccomp'].strip() == '2'
+        if runtime['mode'] == 'rootful':
+            assert command([helper, 'docker', 'exec', cid, 'cat', '/proc/1/attr/current']).stdout.strip() == 'betterdocker-default (enforce)'
         assert inspected['AppArmorProfile'] in (('', 'unconfined') if runtime['mode'] == 'rootless' else ('betterdocker-default',))
         assert command([helper, 'docker', 'exec', cid, 'cat', '/data/marker']).stdout == report.data['run']
         assert command([helper, 'docker', 'exec', cid, 'cat', '/layer-marker']).stdout == report.data['run']
