@@ -215,6 +215,7 @@ done
 TARGETS+=(/usr/local/lib/betterdocker/service_security.py /usr/local/lib/betterdocker/release.py /var/lib/betterdocker/installer/release.json)
 TARGETS+=(/usr/local/lib/betterdocker/parse_config.py /usr/local/lib/betterdocker/archive_scan.py /usr/local/lib/betterdocker/security_install.py /etc/apparmor.d/betterdocker /etc/betterdocker/recovery.key)
 TARGETS+=(/usr/share/perl5/PVE/CLI/dct.pm /usr/local/lib/betterdocker/dct.py /usr/local/lib/betterdocker/rrd.pl)
+TARGETS+=(/usr/local/lib/betterdocker/ipv6_proxy.py /usr/local/lib/betterdocker/migration_history.py)
 for index in "${!TARGETS[@]}"; do
     if [[ -e "${TARGETS[$index]}" ]]; then
         cp -a "${TARGETS[$index]}" "$BACKUP_DIR/addon-$index"
@@ -277,6 +278,8 @@ install -m 0755 "$PROJECT_DIR/scripts/parse_config.py" /usr/local/lib/betterdock
 install -m 0755 "$PROJECT_DIR/scripts/security_install.py" /usr/local/lib/betterdocker/security_install.py
 install -m 0755 "$PROJECT_DIR/scripts/release.py" /usr/local/lib/betterdocker/release.py
 install -m 0644 "$PROJECT_DIR/scripts/service_security.py" /usr/local/lib/betterdocker/service_security.py
+install -m 0755 "$PROJECT_DIR/scripts/ipv6_proxy.py" /usr/local/lib/betterdocker/ipv6_proxy.py
+install -m 0644 "$PROJECT_DIR/scripts/migration_history.py" /usr/local/lib/betterdocker/migration_history.py
 install -m 0755 "$PROJECT_DIR/scripts/hooks.pl" "${TARGETS[30]}"
 install -d -m 0755 /usr/share/perl5/PVE/CLI
 install -m 0644 "$PROJECT_DIR/backend/PVE/CLI/dct.pm" /usr/share/perl5/PVE/CLI/dct.pm
