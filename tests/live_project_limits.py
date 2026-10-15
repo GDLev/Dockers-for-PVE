@@ -48,7 +48,7 @@ def main():
             # Exercise the delegated policy after real Docker Compose normalization.
             for setting, message in (({'oom_kill_disable': True}, 'OOM protection'),
                                      ({'oom_score_adj': -1000}, 'OOM protection'),
-                                     ({'logging': {'driver': 'json-file', 'options': {'max-size': '0'}}}, 'Delegated logs')):
+                                     ({'logging': {'driver': 'json-file', 'options': {'max-size': '0'}}}, 'Log rotation exceeds the administrator retention policy')):
                 request = Path(folder) / 'unsafe-request.json'
                 request.write_text(json.dumps({'name': 'policy-check', 'mode': 'compose', 'bridge': 'vmbr0',
                     'cidr': args.cidr, 'compose': json.dumps({'services': {'app': {'image': 'busybox:1.37', **setting}}})}))
