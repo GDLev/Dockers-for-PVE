@@ -56,9 +56,12 @@ def main():
             power(identifier, 'start')
             exec_guest(identifier, 'sh', '-c', 'echo all-transfers >/excluded/value')
             power(identifier, 'force-stop')
+            before_archives = {row['volid'] for row in api('get', f"/nodes/{env.node('primary')}/storage/{env.backup_storage()}/content", content='backup', vmid=ids[0])}
             api('create', f"/nodes/{env.node('primary')}/vzdump", vmid=ids[0], storage=env.backup_storage(), mode='stop')
             backups = api('get', f"/nodes/{env.node('primary')}/storage/{env.backup_storage()}/content", content='backup', vmid=ids[0])
-            row = max(backups, key=lambda row: row['ctime'])
+            created = [row for row in backups if row['volid'] not in before_archives]
+            assert len(created) == 1, 'Cannot identify the single backup created by this test'
+            row = created[0]
             archive = row['volid']
             assert row['subtype'] == 'docker'
             used = {entry.get('address') for entry in w.summaries()}
