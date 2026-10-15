@@ -276,10 +276,6 @@ def run(args, **kwargs):
     kwargs.setdefault('env', {'PATH': PATH, 'HOME': '/root'})
     if slot is not None:
         kwargs['env'] = dict(kwargs['env'], **{ENV: str(slot)})
-    if args and args[0] == 'docker' and not trusted_management():
-        client = ROOT.parent / 'delegated-client'
-        client.mkdir(parents=True, exist_ok=True, mode=0o700)
-        kwargs['env'] = dict(kwargs['env'], DOCKER_CONFIG=str(client))
     for key in ('BETTERDOCKER_TASK_USER', 'BETTERDOCKER_TRUSTED', 'BETTERDOCKER_REQUIRE_SAFE', 'BETTERDOCKER_CONFIG_KEYS', 'BETTERDOCKER_TASK_SYS_MODIFY', 'BETTERDOCKER_REQUEST_CONTEXT'):
         if key in os.environ:
             kwargs['env'][key] = os.environ[key]

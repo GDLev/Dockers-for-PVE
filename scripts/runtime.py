@@ -17,7 +17,7 @@ if __file__.startswith('/usr/local/lib/betterdocker/'):
             if _boot_info.st_uid != 0 or _boot_info.st_mode & 0o022 or _boot_os.path.islink(_boot_name):
                 _boot_sys.stderr.write('BetterDocker: unsafe installed helper ownership or permissions\n')
                 raise SystemExit(1)
-from dctlib.secure_io import read_json
+from dctlib.secure_io import read_json, anchored as control_directory
 import argparse
 import contextlib
 from dataclasses import dataclass
@@ -36,6 +36,7 @@ import sys
 import tempfile
 
 CONFIG = Path('/etc/betterdocker/runtime.json')
+CLIENT_ROOT = Path('/var/lib/betterdocker')
 PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 
@@ -63,7 +64,16 @@ class Runtime:
     def environment(self, delegated=False):
         client = str(Path(self.home) / '.docker')
         if delegated:
-            client = '/var/lib/betterdocker/delegated-client'
+            directory = CLIENT_ROOT / ('delegated-client-' + self.mode)
+            if not self.rootless:
+                for path in (directory.parent, directory):
+                    if path == directory and not (path.exists() or path.is_symlink()):
+                        continue
+                    with control_directory(path, directory=True) as descriptor:
+                        info = os.fstat(descriptor)
+                        if info.st_uid != 0 or info.st_mode & 0o022:
+                            raise ValueError('Rootful Docker client directory must be root-owned and protected')
+            client = str(directory)
         config = Path(client) / 'config.json'
         if config.exists():
             from dctlib.secure_io import read_json
@@ -257,15 +267,16 @@ def run(args, *, delegated=False, filesystem_images=None, **kwargs):
         return execute(args, **kwargs)
     args = list(args)
     kwargs['env'] = runtime.environment(delegated)
+    if delegated:
+        client = Path(kwargs['env']['DOCKER_CONFIG'])
+        client.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if runtime.rootless:
+            os.chown(client, runtime.uid, runtime.gid)
     if len(args) > 1 and args[1] == 'compose' and not runtime.rootless:
         for index, word in enumerate(args[:-1]):
             if word in ('-f', '--file') and Path(args[index + 1]).name == 'compose.runtime.json':
                 check_resources(read_json(Path(args[index + 1])), runtime)
     if runtime.rootless:
-        if delegated:
-            client = Path(kwargs['env']['DOCKER_CONFIG'])
-            client.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.chown(client, runtime.uid, runtime.gid)
         if len(args) > 1 and args[1] == 'compose':
             prepare_compose(args, runtime)
             if 'config' not in args:

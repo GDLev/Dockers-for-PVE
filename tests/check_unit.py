@@ -30,6 +30,8 @@ def run_suite():
     result = unittest.TestResult()
     with tempfile.TemporaryDirectory(prefix='bd-unit-controls-') as folder, contextlib.ExitStack() as controls:
         directory = Path(folder)
+        clients = directory / 'clients'; clients.mkdir(mode=0o700)
+        controls.enter_context(patch.object(projects.node_runtime, 'CLIENT_ROOT', clients))
         for module, name in ((operation_capacity, 'slots'), (retention, 'retention'), (space, 'space')):
             controls.enter_context(patch.object(module, 'ROOT', directory / name))
             controls.enter_context(patch.object(module, 'POLICY', directory / (name + '-policy.json')))

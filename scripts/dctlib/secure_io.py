@@ -79,7 +79,7 @@ def read_text(path, maximum=MAX_JSON, owner=None):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
             raise ValueError('Invalid or oversized host control file')
-        private = Path(path).name in ('.env', 'request.json', 'recovery.key') or (Path(path).name == 'config.json' and Path(path).parent.name in ('.docker', 'delegated-client'))
+        private = Path(path).name in ('.env', 'request.json', 'recovery.key') or (Path(path).name == 'config.json' and Path(path).parent.name in ('.docker', 'delegated-client', 'delegated-client-rootful', 'delegated-client-rootless'))
         if private and info.st_mode & 0o077:
             allowed = False
             if Path(path).name == '.env' and info.st_uid == 0 and info.st_mode & 0o077 == 0o040:
