@@ -35,9 +35,10 @@ def main():
         item=info();return f'/nodes/{item["node"]}/docker/{item["id"]}'
     if args.cleanup:
         for item in worker.summaries():
-            if item['name']==state['name']:
-                task(api('create',base()+'/action',action='force-stop'))
-                task(api('delete',base()))
+            if item['name'] in (state['name'], state['name']+'-denied'):
+                route = f'/nodes/{item["node"]}/docker/{item["id"]}'
+                task(api('create',route+'/action',action='force-stop'))
+                task(api('delete',route))
         for resource,key in [('users','user'),('roles','role')]:
             if state.get(key): api('delete','/access/'+resource+'/'+state[key])
         if state.get('pool'):api('delete','/pools',poolid=state['pool'])
@@ -58,6 +59,14 @@ def main():
     remote(env.node('primary'),['dct','stop',str(vmid)])
     assert json.loads(remote(env.node('primary'),['dct','status',str(vmid),'--output-format','json']).stdout)['status']=='stopped'
     print('PASS CLI resolves guest on remote node',flush=True)
+    denied_name = state['name'] + '-denied'
+    denied = next((item for item in worker.summaries() if item['name'] == denied_name), None)
+    if denied is None:
+        task(api('create', f'/nodes/{env.node("primary")}/docker', deployment={
+            'name': denied_name, 'mode': 'compose', 'bridge': 'vmbr0', 'ipv4mode': 'none',
+            'compose': 'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sleep, "86400"]\n    cpus: 0.1\n    mem_limit: 64m\n    pids_limit: 32\n'}, start=0))
+        denied = next(item for item in worker.summaries() if item['name'] == denied_name)
+    state['denied_id'], state['denied_vmid'] = denied['id'], denied['vmid']; save()
     state['role']='Native'+state['name'][-8:];state['user']=state['name']+'@pve';save()
     if not any(i['userid']==state['user'] for i in api('get','/access/users')):
         api('create','/access/roles',roleid=state['role'],privs='VM.Audit VM.PowerMgmt VM.Migrate')
@@ -73,7 +82,7 @@ def main():
         route='/cluster/bulk-action/guest/'+action+'?'+urllib.parse.urlencode({'vms':ids},doseq=True)
         return http('POST',route,values,headers=headers,expected=expected)
     for action in ('start','migrate'):
-        values={'vms':[vmid,100]}
+        values={'vms':[vmid,state['denied_vmid']]}
         if action=='migrate':values['target']=env.node('secondary')
         bulk(action,values,expected=403)
     task(bulk('start',{'vms':[vmid]}))
