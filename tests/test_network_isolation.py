@@ -179,13 +179,32 @@ class NetworkIsolation(unittest.TestCase):
         self.assertIn('iifname { "br-first" } oifname { "br-first", "br-second" } return',rules)
         self.assertNotIn('iifname { "br-first", "br-second" } oifname',rules)
 
-    def test_rootless_endpoints_do_not_expose_wildcard_host_services(self):
+    def test_endpoints_do_not_expose_wildcard_host_services(self):
         bindings={ID:[('tcp',8080,'10.240.1.2',80)]}
-        rules=controls.render([info()],bindings=bindings,rootless=True)
-        self.assertIn('ip daddr 198.18.0.20 tcp dport 8080 accept',rules)
+        rules=controls.render([info()],bindings=bindings)
+        self.assertIn('ip daddr 198.18.0.20 tcp dport 8080 socket wildcard 0 accept',rules)
         self.assertIn('ip daddr 198.18.0.20 drop',rules)
         self.assertNotIn('dport 8006',rules)
         self.assertNotIn('ip daddr 198.18.0.1 drop',rules)
+
+    def test_stopped_endpoints_keep_host_services_closed(self):
+        rules = controls.render([dict(info(), firewall=0)], bindings={})
+        self.assertIn('ip daddr 198.18.0.20 drop', rules)
+        self.assertNotIn('tcp dport', rules)
+
+    def test_rootful_reconciliation_guards_endpoints_without_guest_firewall(self):
+        guest = dict(info(), firewall=0)
+        w.write_json(w.METADATA / (ID + '.json'), guest)
+        bindings = {ID: [('tcp', 8080, '172.18.0.2', 80)]}
+        with patch.object(f.runtime, 'load', return_value=SimpleNamespace(rootless=False)), patch.object(w, 'current_node', return_value='pve'), patch.object(f, 'native_config', return_value=dict(config(), cluster_enabled=False)), patch.object(f, 'networks') as bridges, patch.object(f, 'published_ports', return_value=bindings[ID]) as published, patch.object(f, 'identity_guards', return_value={}), patch.object(reload, 'transaction') as transaction, patch.object(controls, 'activate') as activate, patch.object(n, 'release_ready'):
+            f.reconcile()
+            rules = next(plan[1] for plan in transaction.call_args.args[0] if plan[0] == 'betterdocker_endpoints')
+            transaction.call_args.kwargs['activate']()
+        bridges.assert_not_called()
+        published.assert_called_once_with(guest)
+        activate.assert_called_once_with([guest], bindings)
+        self.assertIn('ip daddr 198.18.0.20 drop', rules)
+        self.assertIn('tcp dport 8080 socket wildcard 0 accept', rules)
 
     def test_rootless_private_bridges_are_isolated_across_dcts_without_guest_firewall(self):
         guards = {ID: {bridge: {'ips': ['10.240.1.2'], 'macs': [MAC]} for bridge in ('br-first', 'br-second')}, 'b' * 32: {'br-other': {'ips': ['10.240.2.2'], 'macs': [MAC]}}}
@@ -211,7 +230,7 @@ class NetworkIsolation(unittest.TestCase):
     def test_rootless_local_client_replies_are_scoped_to_published_services(self):
         guest = info(); guest['cidr6'] = 'fd00::20/64'
         bindings = {ID: [('tcp', 8080, '10.240.1.2', 80), ('tcp', 8443, '10.240.1.2', 443, 'fd00::20')]}
-        rules = controls.render([guest], bindings=bindings, rootless=True)
+        rules = controls.render([guest], bindings=bindings)
         for family, address, port in (('ip', '198.18.0.20', 8080), ('ip6', 'fd00::20', 8443)):
             reply = family + ' daddr ' + address + ' ct direction reply ct state established ct original ' + family + ' daddr ' + address + ' ct original proto-dst ' + str(port) + ' meta l4proto tcp accept'
             self.assertIn(reply, rules)
