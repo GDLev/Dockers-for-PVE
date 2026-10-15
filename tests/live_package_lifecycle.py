@@ -82,9 +82,8 @@ def main():
             cluster.run(args.node, ['python3', '-c', 'import sys;from pathlib import Path;p=Path(sys.argv[1]);p.write_bytes(sys.stdin.buffer.read());p.chmod(0o600)', directory + '/' + path.name], input=path.read_bytes(), check=True)
         install = ['python3', str(source / 'scripts/release.py'), 'deb', directory + '/' + package.name,
             '--manifest', directory + '/RELEASE.json', '--signature', directory + '/RELEASE.sig']
-        if args.replace_test_release:
-            install += ['--allow-downgrade']
-        command(install); signed = True; stable()
+        first_install = install + (['--allow-downgrade'] if args.replace_test_release else [])
+        command(first_install); signed = True; stable()
         report.check('signed package installation with running DCT', 'pass', 'Existing containers, runtime mapping, writable layer and volume retained')
         command(install); stable()
         command(['dpkg-trigger', '--no-await', '/usr/share/perl5/PVE/API2/Nodes.pm'])
