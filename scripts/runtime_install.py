@@ -12,6 +12,7 @@ import tempfile
 import time
 
 import runtime
+from dctlib.secure_io import anchored
 
 ACCOUNT = 'betterdocker'
 HOME = '/var/lib/betterdocker/runtime'
@@ -234,7 +235,7 @@ def initialize(mode, conversion=False):
     if home.is_symlink() or home.stat().st_uid != 0:
         raise ValueError('Runtime home must be a root-owned real directory')
     # The user manager must reach HOME; sibling control directories stay private.
-    with runtime.anchored(home.parent, directory=True) as parent:
+    with anchored(home.parent, directory=True) as parent:
         if os.fstat(parent).st_uid != 0:
             raise ValueError('Runtime parent must be root-owned')
         os.fchmod(parent, 0o711)
