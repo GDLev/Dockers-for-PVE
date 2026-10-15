@@ -23,7 +23,7 @@ Review and check out the intended commit on a disposable PVE node, then run `bas
 
 ## Run checks
 
-Use Python 3.12 or newer, Node.js, and Docker Compose 5.6.0 or newer:
+Use Python 3.12 or newer, Node.js 22, and Docker Compose 5.6.0 or newer:
 
 ```bash
 python3 -m venv .venv
@@ -37,7 +37,7 @@ bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh pac
 
 The required CI checks run on a disposable Linux worker as root inside the job container. `scripts/ci-dependencies.sh` installs dependencies and copies source to a protected, readable directory. Do not run that setup on a PVE node. `tests/check_release_ci.py` fails on skipped required tests. Ordinary unit tests isolate node-control files and mock external services.
 
-GitLab uses a Linux Docker executor tagged `betterdockers-linux`. Job containers need neither privileged mode nor the host Docker socket. GitHub jobs have read-only repository permissions. Images, actions, Compose, and Python dependencies are pinned. Review pin changes against upstream and repeat the checks.
+GitHub Actions runs the checks on hosted Linux workers with read-only repository permissions. Actions, Compose, and Python dependencies are pinned. Review pin changes against upstream and repeat the checks.
 
 On a supported node or a saved PVE filesystem, run:
 
