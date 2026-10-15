@@ -54,7 +54,7 @@ class SwapTests(unittest.TestCase):
         if kind == 'rename':
             self.rows[command[2]]['Name'] = '/' + command[3]
         if kind == 'rm':
-            del self.rows[command[2]]
+            del self.rows[command[-1]]
         return Mock(returncode=0, stdout='')
 
     def engine(self, method, path, body):
@@ -150,6 +150,7 @@ class SwapTests(unittest.TestCase):
         self.assertTrue((self.directory / swap.JOURNAL).exists())
         swap.recover(ID)
         self.assert_originals()
+        self.assertIn(['docker', 'rm', '--volumes', '3' * 64], self.calls)
 
     def test_missing_original_does_not_delete_replacement(self):
         self.interrupt = True

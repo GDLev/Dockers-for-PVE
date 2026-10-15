@@ -431,7 +431,7 @@ def recover(identifier):
             if (replacement['Config'].get('Labels') or {}).get('betterdocker.settings-transaction') != journal['token']:
                 raise ValueError('Service name is owned by another operation')
             stop_backup(replacement)
-            w.run(['docker', 'rm', replacement['Id']], capture_output=True)
+            w.run(['docker', 'rm', '--volumes', replacement['Id']], capture_output=True)
         if not original:
             continue
         stop_backup(original)
