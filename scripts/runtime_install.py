@@ -233,6 +233,11 @@ def initialize(mode, conversion=False):
     home.mkdir(parents=True, exist_ok=True, mode=0o755)
     if home.is_symlink() or home.stat().st_uid != 0:
         raise ValueError('Runtime home must be a root-owned real directory')
+    # The user manager must reach HOME; sibling control directories stay private.
+    with runtime.anchored(home.parent, directory=True) as parent:
+        if os.fstat(parent).st_uid != 0:
+            raise ValueError('Runtime parent must be root-owned')
+        os.fchmod(parent, 0o711)
     for name in ('docker', '.docker'):
         path = home / name
         path.mkdir(exist_ok=True, mode=0o700)
