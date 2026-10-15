@@ -17,8 +17,11 @@ class GuestIDTests(unittest.TestCase):
                 path = nodes / 'other-node' / kind / f'{vmid}.conf'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('')
-            with patch.object(worker, 'METADATA', metadata), patch.object(worker, 'PVE_NODES', nodes):
+            from dctlib import integration
+            with patch.object(worker, 'METADATA', metadata), patch.object(worker, 'PVE_NODES', nodes), patch.object(integration, 'METADATA', metadata), patch.object(integration, 'nodes', return_value=['pve', 'other-node']):
                 metadata.mkdir()
+                integration.registration('ready', 'pve')
+                integration.registration('ready', 'other-node')
                 legacy = metadata / ('a' * 32 + '.json')
                 legacy.write_text(json.dumps({'id': 'a' * 32, 'node': 'pve', 'name': 'web', 'address': '192.0.2.50'}))
                 self.assertEqual(worker.reserve_id('a' * 32, 'pve'), 102)

@@ -188,6 +188,8 @@ def reserved_ids():
 def reserve_id(identifier, node, preferred=None):
     """Called under the cluster datacenter.cfg lock by the API/installer."""
     project_id(identifier)
+    from .integration import require_cluster
+    require_cluster()
     registry = reserved_ids()
     for vmid, entry in registry.items():
         if entry['id'] == identifier:

@@ -54,6 +54,7 @@ VERSION=$(pveversion)
     echo "Unsupported version: $VERSION. Supported PVE releases: 9.1 and 9.2." >&2; exit 1;
 }
 check_uninstall() {
+        python3 "$PROJECT_DIR/scripts/installer.py" --check-uninstall
         # The native parser skips unknown resource types when the provider is
         # not loaded. Check the on-disk sections before removing that provider.
         perl -e '
@@ -108,6 +109,7 @@ case "$ACTION" in
     uninstall)
         command -v python3 >/dev/null || { echo 'Python 3 is required for uninstall.' >&2; exit 1; }
         check_uninstall
+        python3 "$PROJECT_DIR/scripts/installer.py" --registration remove
         cache_and_mark
         stage remove
         systemctl disable --now betterdocker-integration.timer 2>/dev/null || true
@@ -125,7 +127,7 @@ case "$ACTION" in
             /usr/share/perl5/PVE/BetterDocker/Backup.pm /usr/share/perl5/PVE/BetterDocker/Firewall.pm /usr/share/perl5/PVE/BetterDocker/Replication.pm /usr/share/perl5/PVE/VZDump/Docker.pm /usr/share/perl5/PVE/HA/Resources/Docker.pm
         rm -rf /usr/share/perl5/PVE/API2/BetterDocker
         finish_services
-        echo 'UI integration removed. Docker projects, volumes, network/lease and firewall maintenance are retained.'
+        echo 'PVE integration removed. Docker, runtime configuration and host maintenance are retained.'
         exit 0 ;;
     install|repair) ;;
     *) echo 'Usage: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
@@ -366,6 +368,7 @@ pvesh get /cluster/resources --output-format json >/dev/null
 if [[ -f "$PROJECT_DIR/.release.json" ]]; then
     python3 "$PROJECT_DIR/scripts/release.py" record "$PROJECT_DIR"
 fi
+python3 "$PROJECT_DIR/scripts/installer.py" --registration ready
 trap - ERR
 if [[ $DEFER_RESTART == 1 ]]; then
     echo 'BetterDocker installed. Panel/API reload is pending.'

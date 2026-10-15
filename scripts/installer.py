@@ -22,6 +22,7 @@ import time
 import uuid
 
 from installer_ui import Cancelled, Choice, MESSAGES, Terminal
+from dctlib import integration
 
 SOURCE = Path(__file__).resolve().parent.parent
 CACHE = Path('/var/lib/betterdocker/installer')
@@ -347,6 +348,27 @@ def modes_for(nodes, requested=None, fresh_only=False):
     return values
 
 
+def installation_targets(inventory, requested, action):
+    if action not in ('install', 'repair'):
+        return
+    missing = [item['node'] for item in inventory if item['node'] not in requested and
+               (not integration.registered(item['node']) or (not item['error'] and not item['installed']))]
+    if missing:
+        raise ValueError('BetterDockers must be installed on every cluster node. Include these nodes with --nodes: ' + ', '.join(missing))
+
+
+def register_node(action):
+    # Removal invalidates admission before touching integration files. A failed
+    # removal stays unregistered until repair succeeds, rather than freeing IDs.
+    program = '''use PVE::Cluster; use PVE::INotify;
+PVE::Cluster::cfs_lock_file('datacenter.cfg', 10, sub {
+    system('python3', $ARGV[0], '--registration-worker', $ARGV[1], PVE::INotify::nodename()) == 0
+        or die "BetterDockers cluster registration failed\\n";
+}); die $@ if $@;
+'''
+    subprocess.run(['perl', '-e', program, str(Path(__file__).resolve()), action], check=True)
+
+
 def parser():
     result = argparse.ArgumentParser(description='Install, repair or remove BetterDockers on selected PVE nodes.')
     result.add_argument('action', nargs='?', choices=('install', 'repair', 'uninstall', 'finish', 'check'))
@@ -365,6 +387,18 @@ def cancel_prompt(*_):
 
 
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] in ('--registration', '--registration-worker', '--check-uninstall'):
+        if os.geteuid() != 0:
+            raise ValueError('Run as root')
+        if sys.argv[1] == '--check-uninstall' and len(sys.argv) == 2:
+            integration.check_uninstall()
+        elif sys.argv[1] == '--registration' and len(sys.argv) == 3 and sys.argv[2] in ('ready', 'remove'):
+            register_node(sys.argv[2])
+        elif sys.argv[1] == '--registration-worker' and len(sys.argv) == 4:
+            integration.registration(sys.argv[2], sys.argv[3])
+        else:
+            raise ValueError('Invalid cluster registration arguments')
+        return 0
     if len(sys.argv) == 3 and sys.argv[1] == '--cache-source':
         if os.geteuid() != 0:
             raise ValueError('Run as root')
@@ -421,7 +455,8 @@ def main():
                 choices.append(Choice(node['node'], label, description, enabled))
             if not any(c.enabled for c in choices):
                 raise ValueError(ui.t('no_nodes'))
-            requested = ui.choose(ui.t('targets'), choices, [cluster.local] if any(c.key == cluster.local and c.enabled for c in choices) else [], multiple=True)
+            defaults = [c.key for c in choices if c.enabled and not integration.registered(c.key)] if action == 'install' else []
+            requested = ui.choose(ui.t('targets'), choices, defaults or [c.key for c in choices if c.enabled and c.key == cluster.local], multiple=True)
         requested = requested or [cluster.local]
         indexed = {node['node']: node for node in inventory}
         if any(name not in indexed for name in requested):
@@ -429,6 +464,7 @@ def main():
         nodes = [indexed[name] for name in requested]
         if any(not supported(node, action) for node in nodes):
             raise ValueError(ui.t('unavailable') + ': ' + ', '.join(node['node'] for node in nodes if not supported(node, action)))
+        installation_targets(inventory, requested, action)
         if action in ('uninstall', 'finish', 'check'):
             modes = {node['node']: node['mode'] for node in nodes}
         else:

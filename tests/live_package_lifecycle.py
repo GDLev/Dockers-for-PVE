@@ -108,13 +108,25 @@ def main():
         assert rejected.returncode and 'fixed' in rejected.stderr, rejected.stderr
         stable()
         report.check('repair and runtime-change rejection', 'pass', 'Repair retained workloads; changing the fixed runtime was rejected')
-        command(['dpkg', '--remove', 'proxmox-betterdockers']); stable()
-        assert cluster.run(args.node, ['test', '-e', '/usr/sbin/dct']).returncode == 1
-        assert cluster.run(args.node, ['test', '-e', '/usr/share/perl5/PVE/API2/BetterDocker.pm']).returncode == 1
-        report.check('package uninstall with running DCT', 'pass', 'Integration removed; Docker container, volume, writable layer and runtime retained')
-        command(install); stable()
+        rejected = cluster.run(args.node, ['dpkg', '--remove', 'proxmox-betterdockers'], text=True, timeout=120)
+        assert rejected.returncode and 'Guest ID reservations must be empty' in rejected.stderr, rejected.stderr
+        stable()
+        assert cluster.run(args.node, ['test', '-e', '/usr/sbin/dct']).returncode == 0
         assert lifecycle.own(report, item)
-        report.check('extension reinstall after removal', 'pass', 'Retained DCT is manageable again with unchanged container and data')
+        report.check('package uninstall with running DCT', 'pass', 'Removal rejected before changing integration; workload identity, data and security unchanged')
+        lifecycle.cleanup(report)
+        assert live.resources() == original, 'Original guest inventory changed'
+        if original:
+            report.check('empty-cluster uninstall', 'not_tested', 'Other guests exist; no unrelated workload is removed')
+        else:
+            command(['dpkg', '--remove', 'proxmox-betterdockers'])
+            assert cluster.run(args.node, ['test', '-e', '/usr/sbin/dct']).returncode == 1
+            assert cluster.run(args.node, ['test', '-e', '/usr/share/perl5/PVE/API2/BetterDocker.pm']).returncode == 1
+            report.check('empty-cluster package uninstall', 'pass', 'Integration removed only after the owned DCT and its reservations were deleted')
+        command(install)
+        assert cluster.run(args.node, ['test', '-e', '/usr/sbin/dct']).returncode == 0
+        assert json.loads(command([helper, 'identity']).stdout) == runtime
+        report.check('extension reinstall after removal', 'pass', 'Runtime identity retained; guest CLI restored')
     except BaseException as error:
         report.check('package lifecycle', 'fail', str(error)[-2000:])
         raise

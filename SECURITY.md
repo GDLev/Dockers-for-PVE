@@ -34,7 +34,7 @@ Deployment editors can read imported source and environment variables. Console a
 
 Node administrators control runtime installation and conversion, security policy, aggregate budget exemptions, host networking and storage, and custom AppArmor profiles. Only `root@pam` can manage guest hooks. Docker sockets, the runtime account, host-root SSH, and host configuration remain administrator interfaces. Giving someone these interfaces bypasses guest ACL isolation.
 
-Uninstalling the extension retains Docker workloads, data, and required host maintenance. Uninstallation is not data erasure or revocation of existing Docker access.
+BetterDockers must be installed on every cluster node to protect the shared guest ID namespace. Removal is blocked while any DCT metadata or disk ID reservation remains anywhere in the cluster. Uninstallation retains Docker, runtime configuration and required host maintenance. It does not erase external data or revoke unrelated Docker access.
 
 ## Hardened policy
 

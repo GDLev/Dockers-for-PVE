@@ -15,6 +15,7 @@ Docker runs on the PVE host. A DCT can contain several services under one guest 
 - Proxmox VE 9.1 or 9.2 on Debian 13. Other PVE versions are not supported.
 - Root access to each installation node and internet access for dependencies and images.
 - Docker Engine with Compose 5.6.0 or newer.
+- Install BetterDockers on every cluster node before creating DCTs, including nodes that will not run Docker guests. All nodes must reserve the same guest IDs. Install it on new nodes before adding workloads.
 - A Linux bridge and available addresses for the DCT endpoints.
 - Rootless mode also requires cgroup v2, delegated CPU/memory/PID controllers, rootless Docker binaries, and unused `10.240.0.0/16` and `169.254.240.0/30` ranges.
 
@@ -45,7 +46,7 @@ For an unattended installation after verification:
 bash install.sh install --runtime=rootless --yes
 ```
 
-Add `--nodes=pve1,pve2` to select nodes or `--no-restart` to defer service reload. [CONTRIBUTING.md](CONTRIBUTING.md) covers development checkouts, package installation and signing.
+Add `--nodes=pve1,pve2` to select all cluster nodes on first installation, or `--no-restart` to defer service reload. Later updates and repairs can target individual installed nodes. [CONTRIBUTING.md](CONTRIBUTING.md) covers development checkouts, package installation and signing.
 
 ## Update and repair
 
@@ -61,7 +62,7 @@ Do not change runtime mode during an update. Offline conversion has separate pre
 
 ## Uninstall
 
-Remove DCT HA registrations and replication jobs first. Run the reviewed installer and choose Uninstall, or run:
+Back up and remove all DCTs, retained managed disks, DCT HA registrations and replication jobs across the cluster first. Uninstall is blocked while any DCT metadata or guest ID reservation remains, even on another node. Run the reviewed installer and choose Uninstall, or run:
 
 ```bash
 bash /var/lib/betterdocker/installer/source/start.sh uninstall --yes
@@ -69,7 +70,7 @@ bash /var/lib/betterdocker/installer/source/start.sh uninstall --yes
 
 For a DEB installation, use `apt remove proxmox-betterdockers` so the package and its repair triggers are removed too.
 
-Uninstall removes the web/API integration and guest CLI. **Docker, workloads, persistent data, runtime configuration, and required network/firewall maintenance remain.** Removing retained data is a separate, explicit operation. Do not delete runtime directories while workloads use them.
+Uninstall removes the web/API integration and guest CLI. Docker, runtime configuration, remaining files and network/firewall maintenance remain. It does not erase external bind mounts or unrelated Docker workloads. Export DCT backups before deleting guests; their ID protection cannot be removed while they exist.
 
 ## Use the CLI and API
 
