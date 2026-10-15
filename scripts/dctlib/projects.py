@@ -500,6 +500,11 @@ def detail(identifier, node):
     deployment = read_json(directory / 'request.json')
     from .security_errors import remember_environment
     remember_environment(deployment.get('environment', ''))
+    runtime_path = directory / 'compose.runtime.json'
+    if runtime_path.exists():
+        runtime = read_json(runtime_path)
+        for service in runtime.get('services', {}).values():
+            remember_environment(service.get('environment'))
     return dict(info, deployment=deployment, digest=configuration_digest(directory, deployment, info.get('protection', False), info.get('tags', ''), {key: info[key] for key in ('onboot', 'startup', 'template', 'hookscript') if info.get(key)}))
 
 
