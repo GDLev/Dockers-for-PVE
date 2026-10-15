@@ -76,6 +76,8 @@ def main():
         new = next(m['Name'] for m in replacement['Mounts'] if m['Destination'] == '/new')
         report.update(existing_volume=old, new_volume=new)
         save()
+        # Reused data must survive even without another container holding it.
+        docker('rm', original['Id'])
         with tempfile.TemporaryDirectory(prefix='bd-anon-recovery-', dir='/var/lib/betterdocker') as folder:
             previous = worker.ROOT
             worker.ROOT = Path(folder)
