@@ -115,6 +115,8 @@ def cleanup(path):
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode and 'No retained PVE disks' not in result.stderr:
             raise RuntimeError(result.stderr.strip())
+    for archive in state.get('archives', []):
+        api('delete', f"/nodes/{archive['node']}/storage/{archive['storage']}/content/" + archive['volid'])
     for user in state['users']:
         api('delete', '/access/users/' + user)
     for role in state['roles']:
@@ -221,7 +223,7 @@ def main():
             raise AssertionError('Expected a failed task')
     source = 'services:\n  app:\n    image: busybox:1.37\n    command: ["sh", "-c", "trap \'exit 0\' TERM; while :; do sleep 1 & wait $$!; done"]\n    volumes: [data:/data]\nvolumes:\n  data: {}\n'
     def deployment(name, address):
-        return dict(name=name, mode='compose', compose=source, bridge='vmbr0', address=address, cidr=address + '/20')
+        return dict(name=name, mode='compose', compose=source, bridge='vmbr0', address=address, cidr=address + '/' + str(env.prefix()))
     save()
     try:
         for suffix in ('a', 'b'):
@@ -331,15 +333,19 @@ def main():
         api('set', base(primary) + '/config', hookscript=hook)
         power(primary, 'start'); power(primary, 'shutdown')
         print('PASS hook order, fatal pre-start, warning stop hooks and killed-worker recovery', flush=True)
-        task(api('create', base(primary) + '/clone', deployment={'name': stem + '-clone', 'bridge': 'vmbr0', 'cidr': args.clone_address + '/20'}, pool=b))
+        task(api('create', base(primary) + '/clone', deployment={'name': stem + '-clone', 'bridge': 'vmbr0', 'cidr': args.clone_address + '/' + str(env.prefix())}, pool=b))
         cloned = guest(stem + '-clone')
         assert api('get', base(cloned) + '/config')['hookscript'] == hook
         assert any(item['vmid'] == cloned['vmid'] for item in api('get', '/pools', poolid=b)[0]['members'])
+        backup_path = f'/nodes/{node}/storage/{args.backup_storage}/content'
+        previous = {row['volid'] for row in api('get', backup_path, content='backup', vmid=primary['vmid'])}
         task(api('create', f'/nodes/{node}/vzdump', vmid=primary['vmid'], storage=args.backup_storage, mode='stop'))
-        backups = api('get', f'/nodes/{node}/storage/{args.backup_storage}/content', content='backup', vmid=primary['vmid'])
-        archive = max(backups, key=lambda item: item.get('ctime', 0))['volid']
+        created = [row for row in api('get', backup_path, content='backup', vmid=primary['vmid']) if row['volid'] not in previous]
+        assert len(created) == 1, 'Cannot identify the backup created by this fixture'
+        archive = created[0]['volid']
+        state.setdefault('archives', []).append({'node': node, 'storage': args.backup_storage, 'volid': archive}); save()
         task(api('create', f'/nodes/{node}/docker', archive=archive, storage='local-lvm', pool=b,
-                 deployment={'name': stem + '-restore', 'bridge': 'vmbr0', 'cidr': args.restore_address + '/20'}))
+                 deployment={'name': stem + '-restore', 'bridge': 'vmbr0', 'cidr': args.restore_address + '/' + str(env.prefix())}))
         restored = guest(stem + '-restore')
         assert api('get', base(restored) + '/config')['hookscript'] == hook
         assert any(item['vmid'] == restored['vmid'] for item in api('get', '/pools', poolid=b)[0]['members'])

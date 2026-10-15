@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 4 acceptance on disposable DCTs; retain the manifest for GUI and cleanup."""
+"""Check native guest operations and retain owned fixtures for GUI and cleanup."""
 import live_environment as env
 import argparse
 import json
@@ -22,9 +22,13 @@ def remote(node,command):
     return subprocess.run(command if node==worker.current_node() else ssh_command(node)+[shlex.join(command)],capture_output=True,text=True,check=True)
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--cleanup',action='store_true');args=parser.parse_args()
-    state=json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'name':'native-'+uuid.uuid4().hex[:8]}
-    def save(): MANIFEST.write_text(json.dumps(state));MANIFEST.chmod(0o600)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--cleanup', action='store_true')
+    parser.add_argument('--manifest', type=Path, default=MANIFEST)
+    args = parser.parse_args()
+    manifest = args.manifest
+    state=json.loads(manifest.read_text()) if manifest.exists() else {'name':'native-'+uuid.uuid4().hex[:8]}
+    def save(): manifest.write_text(json.dumps(state));manifest.chmod(0o600)
     save()
     def info(): return next(i for i in worker.summaries() if i['name']==state['name'])
     def base():
@@ -37,7 +41,9 @@ def main():
         for resource,key in [('users','user'),('roles','role')]:
             if state.get(key): api('delete','/access/'+resource+'/'+state[key])
         if state.get('pool'):api('delete','/pools',poolid=state['pool'])
-        MANIFEST.unlink();print('PASS fixture cleanup',flush=True);return
+        for archive in state.get('archives',[]):
+            api('delete',f"/nodes/{archive['node']}/storage/{archive['storage']}/content/"+archive['volid'])
+        manifest.unlink();print('PASS fixture cleanup',flush=True);return
     if not any(i['name']==state['name'] for i in worker.summaries()):
         state['pool']=state['name'];save();api('create','/pools',poolid=state['pool'])
         deployment={'name':state['name'],'mode':'compose','compose':'services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, "trap \'\' TERM; while :; do sleep 1; done"]\n',
