@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Verify Stage 1 authorization on disposable rootful and rootless DCTs.\n\nRun on {env.node('primary')} after deployment. A manifest supports explicit cleanup after interruption.\nNo extension code is installed on PBS.\n"
+'Verify Stage 1 authorization on disposable rootful and rootless DCTs.\n\nRun on <node> after deployment. A manifest supports explicit cleanup after interruption.\nNo extension code is installed on PBS.\n'
+import live_environment as env
 import argparse
 import json
 from pathlib import Path

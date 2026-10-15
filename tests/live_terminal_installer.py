@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Installer acceptance on the named disposable PVE cluster, using real PTYs.\n\nRun on {env.node('primary')} with --source=<deployed checkout>. Never contacts PBS.\nLogs preserve the terminal transcript. No guest configuration is changed.\n"
+'Installer acceptance on the named disposable PVE cluster, using real PTYs.\n\nRun on <node> with --source=<deployed checkout>. Never contacts PBS.\nLogs preserve the terminal transcript. No guest configuration is changed.\n'
+import live_environment as env
 import argparse
 import atexit
 import fcntl

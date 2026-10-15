@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Native HA relocation and fenced recovery of the rootless cluster fixture.\n\nThe fence test force-reboots the approved, evacuated {env.node('secondary')}. A temporary\ncorosync delay keeps it out of quorum long enough for native CRM recovery.\n--cleanup removes that owned delay and HA rule even after interruption.\n"
+'Native HA relocation and fenced recovery of the rootless cluster fixture.\n\nThe fence test force-reboots the approved, evacuated <node>. A temporary\ncorosync delay keeps it out of quorum long enough for native CRM recovery.\n--cleanup removes that owned delay and HA rule even after interruption.\n'
+import live_environment as env
 import argparse
 import json
 import subprocess

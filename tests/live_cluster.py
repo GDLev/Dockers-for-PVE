@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Disposable migration and endpoint checks on the three-node test PVE cluster.\n\nRun on {env.node('primary')} after deployment. The manifest records only test guests.\nUse --cleanup to remove them after a failed or interrupted run.\n"
+'Disposable migration and endpoint checks on the three-node test PVE cluster.\n\nRun on <node> after deployment. The manifest records only test guests.\nUse --cleanup to remove them after a failed or interrupted run.\n'
+import live_environment as env
 import argparse
 import ipaddress
 import json

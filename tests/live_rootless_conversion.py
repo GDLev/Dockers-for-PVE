@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Offline conversion, resume and rollback on the explicitly borrowed {env.node('secondary')}.\n\nRun after the cluster/data fixtures are removed and the empty conversion has\nbeen rolled back. Interruptions happen in child processes, leaving real journals.\n"
+'Offline conversion, resume and rollback on the explicitly borrowed <node>.\n\nRun after the cluster/data fixtures are removed and the empty conversion has\nbeen rolled back. Interruptions happen in child processes, leaving real journals.\n'
+import live_environment as env
 import argparse
 import json
 from pathlib import Path

@@ -1,6 +1,6 @@
-import live_environment as env
 #!/usr/bin/env python3
-f"Package lifecycle on the disposable PVE cluster. Never install on PBS.\n\nRun on {env.node('primary')} after live_native_management.py. A saved manifest and --restore\nrecover the temporarily detached HA/replication configuration after interruption.\n"
+'Package lifecycle on the disposable PVE cluster. Never install on PBS.\n\nRun on <node> after live_native_management.py. A saved manifest and --restore\nrecover the temporarily detached HA/replication configuration after interruption.\n'
+import live_environment as env
 import argparse
 import json
 from pathlib import Path
