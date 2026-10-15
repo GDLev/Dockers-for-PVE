@@ -633,11 +633,11 @@ def snapshot_apply(identifier, node, name, check_only=False):
         target = Path(entry['source'])
         node_runtime.data_directory(target)
         with node_runtime.anchored(target) as fd:
-            for name in os.listdir(fd):
-                if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
-                    shutil.rmtree(name, dir_fd=fd)
+            for entry_name in os.listdir(fd):
+                if stat.S_ISDIR(os.stat(entry_name, dir_fd=fd, follow_symlinks=False).st_mode):
+                    shutil.rmtree(entry_name, dir_fd=fd)
                 else:
-                    os.unlink(name, dir_fd=fd)
+                    os.unlink(entry_name, dir_fd=fd)
         node_runtime.restore_data(folder / entry['copy'], target, runner=worker.run)
     for filename in ('request.json', 'compose.source.yaml', '.env', 'compose.runtime.json', 'images.json', 'service-defaults.json', 'settings.json', 'pending.json', 'pending-network.json', 'notes.txt'):
         source, target = configs / filename, project / filename
