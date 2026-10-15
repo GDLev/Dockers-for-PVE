@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from acceptance_report import Report
+import live_environment as env
 import live_guest_lifecycle as lifecycle
 import live_security_acceptance as live
 
@@ -16,6 +17,7 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--report', required=True, type=Path)
     args = parser.parse_args()
+    env.require_node(args.node)
     if args.report.exists():
         raise ValueError('Journal already exists; inspect registered fixtures before retrying')
     report = Report(args.report, args.revision, {Path(__file__).name: hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})

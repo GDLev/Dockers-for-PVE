@@ -50,3 +50,8 @@ class LiveEnvironment(unittest.TestCase):
             env.address(256)
         with self.assertRaises(ValueError):
             env.address(-1)
+
+    def test_explicit_targets_must_be_configured_test_nodes(self):
+        self.assertEqual(env.require_node('pve3'), 'pve3')
+        with self.assertRaisesRegex(ValueError, 'configured test node'):
+            env.require_node('production')
