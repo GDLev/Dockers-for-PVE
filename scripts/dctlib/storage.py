@@ -225,6 +225,7 @@ def project_pve_storage(identifier, node, size_mib, digest, storage):
                         if definition.get('external') or definition.get('driver_opts') or volume.get('Driver') != 'local' or volume.get('Options') or (volume.get('Labels') or {}).get('com.docker.compose.project') != 'bd-' + identifier or users - owned:
                             raise ValueError('External or shared volumes cannot be migrated')
                         path = Path(volume['Mountpoint'])
+                        node_runtime.check_volume_path(path, name)
                     else:
                         raise ValueError('Unsupported writable mount')
                     sources[kind + ':' + source] = path
@@ -447,6 +448,7 @@ def project_storage_limit(identifier, node, size_mib, digest=None, storage=''):
                     if volume.get('Driver') != 'local' or volume.get('Options') or volume.get('Labels', {}).get('com.docker.compose.project') != 'bd-' + identifier:
                         raise ValueError('Only local volumes owned by this Compose project can be migrated')
                     path = Path(volume['Mountpoint'])
+                    node_runtime.check_volume_path(path, volume_name)
                     users = worker.capture(['docker', 'ps', '--no-trunc', '-aq', '--filter', 'volume=' + volume_name]).split()
                     owned = {item['id'] for item in worker.container_records(identifier)}
                     if any(item not in owned for item in users):

@@ -147,6 +147,15 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'outside'):
                 runtime.check_volume_path('/etc', 'bd-owned')
 
+    def test_volume_name_is_one_component_before_joining_runtime_storage(self):
+        with patch.object(Path, 'is_symlink', return_value=False):
+            for name in ('/fixture', '../fixture', 'a/b', '.', '', None):
+                path = Path(ROOTLESS.data) / 'volumes' / str(name) / '_data'
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'name'):
+                    runtime.check_volume_path(path, name, ROOTLESS)
+            runtime.check_volume_path(Path(ROOTLESS.data) / 'volumes/good-volume/_data',
+                                      'good-volume', ROOTLESS)
+
     def test_requested_limits_fail_when_controllers_are_unavailable(self):
         with patch.object(Path, 'is_file', return_value=False):
             with self.assertRaisesRegex(ValueError, 'not delegated'):

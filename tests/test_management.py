@@ -79,6 +79,42 @@ class ManagementTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'cannot be bypassed'):
                 worker.apply_storage(config, ID)
 
+    def test_rootless_data_disk_rejects_volume_path_before_copy_or_allocation(self):
+        from test_runtime import ROOTLESS
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            directory = base / ID
+            directory.mkdir()
+            outside = base / 'unrelated'
+            outside.mkdir()
+            (outside / 'marker').write_text('unchanged')
+            name = 'bd-' + ID + '_data'
+            config = {'services': {'app': {'volumes': [{'type': 'volume', 'source': 'data', 'target': '/data'}]}},
+                      'volumes': {'data': {'name': name}}}
+            worker.write_json(directory / 'compose.runtime.json', config)
+            def capture(command, **kwargs):
+                if command[:3] == ['docker', 'volume', 'inspect']:
+                    return json.dumps([{'Driver': 'local', 'Options': None,
+                                        'Labels': {'com.docker.compose.project': 'bd-' + ID},
+                                        'Mountpoint': str(outside)}])
+                if command[:2] == ['docker', 'ps']:
+                    return ''
+                raise AssertionError('Unexpected operation before volume path validation: ' + str(command[:2]))
+            with patch.object(worker, 'ROOT', base), patch.object(worker, 'locked'), \
+                    patch.object(worker, 'detail', return_value={}), \
+                    patch.object(worker, 'storage_config', return_value={}), \
+                    patch.object(worker, 'container_records', return_value=[]), \
+                    patch.object(worker.node_runtime, 'load', return_value=ROOTLESS), \
+                    patch.object(worker, 'capture', side_effect=capture), \
+                    patch.object(worker, 'run') as run, patch.object(worker, 'pve_storage') as storage:
+                for target in ('', 'local-lvm'):
+                    with self.subTest(storage=target), self.assertRaisesRegex(ValueError, 'outside'):
+                        worker.project_storage_limit(ID, 'pve', 256, storage=target)
+                run.assert_not_called()
+                storage.assert_not_called()
+            self.assertEqual((outside / 'marker').read_text(), 'unchanged')
+            self.assertFalse((directory / 'storage.ext4').exists())
+
     def test_data_disk_is_grow_only(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'locked'), patch.object(worker, 'detail'), patch.object(worker, 'container_records', return_value=[]), patch.object(worker, 'storage_config', return_value={'size_mib': 512}), patch.object(worker, 'run') as run:
             for size in (256, 512):
