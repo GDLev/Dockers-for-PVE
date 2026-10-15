@@ -28,6 +28,7 @@ def main():
                 shutil.copy2(path, source / name)
         key = directory / 'disposable-test-key.pem'
         subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:3072', '-out', str(key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['openssl', 'pkey', '-in', str(key), '-pubout', '-out', str(source / 'packaging/release-key.pem')], check=True)
         subprocess.run(['bash', str(source / 'packaging/build-deb.sh')], check=True)
         subprocess.run(['bash', str(source / 'packaging/build-release.sh')], check=True)
         subprocess.run(['python3', str(source / 'packaging/sign-release.py'), '--key', str(key)], check=True)
@@ -36,6 +37,26 @@ def main():
         metadata = release.read_manifest(dist / 'RELEASE.json', dist / 'RELEASE.sig', dist / 'release-key.pem', release.fingerprint(dist / 'release-key.pem'), version)
         for name in metadata['artifacts']:
             release.verify_artifact(metadata, dist / name, name)
+        assets = directory / 'release-assets'; assets.mkdir()
+        for name in [*metadata['artifacts'], 'RELEASE.json', 'RELEASE.sig', 'release-key.pem', 'SHA256SUMS']:
+            shutil.copy2(dist / name, assets / name)
+        promote = ['python3', str(source / 'packaging/verify-release.py'), str(assets), '--build', str(dist)]
+        subprocess.run(promote, check=True)
+        for path in (assets / next(name for name in metadata['artifacts'] if name.endswith('.deb')),
+                     dist / ('betterdockers-' + version + '.tar.gz'), assets / 'SHA256SUMS', source / 'README.md'):
+            original = path.read_bytes()
+            try:
+                path.write_bytes(original + b'changed')
+                assert subprocess.run(promote, capture_output=True).returncode, 'Changed release input was accepted: ' + path.name
+            finally:
+                path.write_bytes(original)
+        signature = assets / 'RELEASE.sig'; original = signature.read_bytes()
+        try:
+            signature.unlink()
+            assert subprocess.run(promote, capture_output=True).returncode, 'Unsigned release accepted'
+        finally:
+            signature.write_bytes(original)
+        print('PASS release promotion rejects changed assets, CI bytes, checksums, source and missing signatures')
         archive = directory / 'archive'; archive.mkdir()
         subprocess.run(['tar', '-xzf', str(dist / ('betterdockers-' + version + '.tar.gz')), '-C', str(archive)], check=True)
         release.verify_tree(archive / ('betterdockers-' + version), metadata)

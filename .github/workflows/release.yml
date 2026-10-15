@@ -1,0 +1,52 @@
+name: Publish prerelease
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Validate run for the frozen main commit
+        required: true
+        type: string
+      release_id:
+        description: Draft prerelease containing the accepted signed assets
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: prerelease-publication
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify existing draft and accepted build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: python3 packaging/publish-release.py --run-id "$RUN_ID" --release-id "$RELEASE_ID"
+  publish:
+    needs: verify
+    if: vars.RELEASE_PUBLICATION_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Reverify and publish without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: python3 packaging/publish-release.py --run-id "$RUN_ID" --release-id "$RELEASE_ID" --publish
