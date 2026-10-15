@@ -44,6 +44,7 @@ def main():
         if not path.is_file():
             raise ValueError('Missing signed artifact: ' + str(path))
     report = Report(args.report, args.revision, {Path(__file__).name: hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
+    report.data['working_tree'] = True
     cluster = installer.Cluster()
     original = live.resources()
     item = report.plan_guest(args.node, int(live.api('get', '/cluster/nextid')), 'package-check-' + report.data['run'][:8])
@@ -63,13 +64,19 @@ def main():
         assert containers(args.node) == before, 'Container identity/state/start time changed'
         identity = json.loads(command([helper, 'identity']).stdout)
         assert identity == runtime, 'Runtime identity changed'
+        inspected = json.loads(command([helper, 'docker', 'inspect', cid]).stdout)[0]
+        assert 'ALL' in inspected['HostConfig']['CapDrop']
+        assert 'no-new-privileges:true' in inspected['HostConfig']['SecurityOpt']
+        assert inspected['AppArmorProfile'] in (('', 'unconfined') if runtime['mode'] == 'rootless' else ('betterdocker-default',))
         assert command([helper, 'docker', 'exec', cid, 'cat', '/data/marker']).stdout == report.data['run']
         assert command([helper, 'docker', 'exec', cid, 'cat', '/layer-marker']).stdout == report.data['run']
     signed = False
     try:
         live.task(live.api('create', '/nodes/' + args.node + '/docker', deployment=dict(vmid=item['vmid'], name=item['name'],
-            mode='compose', compose=json.dumps(compose), bridge='vmbr0', ipv4mode='none'), start=1))
+            mode='compose', compose=json.dumps(compose), bridge='vmbr0', ipv4mode='none'), start=0))
         guest = lifecycle.own(report, item); assert guest
+        live.task(live.api('set', live.base(guest) + '/security-policy', mode='hardened', digest=live.api('get', live.base(guest) + '/management')['digest']))
+        live.power(guest, 'start')
         cid = live.container(guest, 'app')['Id']
         command([helper, 'docker', 'exec', cid, 'sh', '-c', 'printf %s "$1" >/data/marker; printf %s "$1" >/layer-marker', 'sh', report.data['run']])
         before = containers(args.node)
