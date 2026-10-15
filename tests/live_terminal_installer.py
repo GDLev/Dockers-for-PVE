@@ -19,7 +19,7 @@ import termios
 import uuid
 
 from live_firewall import remote
-from live_rootless_package import containers
+from live_package_lifecycle import containers
 
 NODES = (env.node('primary'), env.node('secondary'), env.node('rootless'))
 PENDING = '/var/lib/betterdocker/installer/pending-restart.json'
