@@ -43,6 +43,7 @@ def main():
         subprocess.run(['dpkg-deb', '--extract', str(dist / ('proxmox-betterdockers_' + version + '_all.deb')), str(package)], check=True)
         release.verify_tree(package / 'opt/betterdocker', metadata, ('assets', 'frontend', 'backend', 'scripts', 'systemd', 'install.sh', 'start.sh'))
         documentation = package / 'usr/share/doc/proxmox-betterdockers'
+        assert (documentation / 'copyright').read_bytes().endswith((source / 'LICENSE').read_bytes()), 'DEB must include the project license'
         for name in ('README.md', 'API_DOCS.md', 'CONTRIBUTING.md', 'SECURITY.md', 'RELEASE_NOTES.md'):
             if release.digest(documentation / name) != metadata['source'][name]:
                 raise AssertionError('Packaged documentation differs from signed source: ' + name)

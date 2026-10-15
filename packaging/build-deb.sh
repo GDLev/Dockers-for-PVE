@@ -14,6 +14,13 @@ mkdir -p "$BUILD_DIR/usr/share/doc/proxmox-betterdockers"
 for document in README.md API_DOCS.md CONTRIBUTING.md SECURITY.md RELEASE_NOTES.md; do
     cp "$SOURCE_DIR/$document" "$BUILD_DIR/usr/share/doc/proxmox-betterdockers/"
 done
+cat > "$BUILD_DIR/usr/share/doc/proxmox-betterdockers/copyright" <<'COPYRIGHT'
+Proxmox BetterDockers
+Copyright 2026 GDLev and contributors
+Licensed under the GNU Affero General Public License, version 3 or later.
+
+COPYRIGHT
+cat "$SOURCE_DIR/LICENSE" >> "$BUILD_DIR/usr/share/doc/proxmox-betterdockers/copyright"
 find "$BUILD_DIR/opt/betterdocker" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$BUILD_DIR/opt/betterdocker" -name .DS_Store -delete
 find "$BUILD_DIR/opt/betterdocker" -name '*.pyc' -delete
