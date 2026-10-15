@@ -20,7 +20,7 @@ MESSAGES = {
     'check': 'Check compatibility',
     'install_description': 'Install dependencies, Docker and the PVE extension. Existing runtime modes are preserved.',
     'repair_description': 'Restore extension files and registration. Missing dependencies require Install / Update.',
-    'uninstall_description': 'Remove the PVE integration. Docker, workloads, data and network/firewall maintenance remain. Remove DCT HA resources and replication jobs first.',
+    'uninstall_description': 'Remove the PVE integration only after removing all cluster DCTs, retained disks, HA resources and replication jobs. Docker and runtime configuration remain.',
     'finish_description': 'Reload PVE services after an interrupted or deferred installation.',
     'rootful_description': 'Docker runs as root. Docker AppArmor and writable-layer quotas are available when supported by the host. Containers share a privileged daemon.',
     'rootless_description': 'Docker runs as the betterdocker user. PVE host operations still need root. Requires cgroup v2 and compatible rootless binaries. Container AppArmor and writable-layer quotas are unavailable.',
