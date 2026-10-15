@@ -114,6 +114,28 @@ class SwapTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'integrity'):
                 secure_io.read_json(path)
 
+    def test_failed_control_commit_restores_original_signed_disk_journal(self):
+        from dctlib import secure_io
+        key = self.root / 'recovery.key'
+        secure_io.atomic_text(key, 'test-only-key')
+        path = self.directory / 'disk-transaction.json'
+        before = {'phase': 'preparing', 'key': 'mp1'}
+        write = swap.durable_write
+        def interrupted(target, value):
+            if target.name == 'pending.json':
+                raise OSError('Interrupted control commit')
+            return write(target, value)
+        with patch.object(secure_io, 'KEY', key):
+            worker.write_json(path, before)
+            original = path.read_bytes()
+            with patch.object(swap, 'durable_write', side_effect=interrupted):
+                with self.assertRaisesRegex(OSError, 'Interrupted control commit'):
+                    swap.execute({'id': ID}, '*', [], self.config, {}, {}, {},
+                                 updates={'disk-transaction.json': json.dumps(dict(before, phase='committed'))})
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(secure_io.read_json(path), before)
+            self.assertFalse((self.directory / swap.JOURNAL).exists())
+
     def test_second_replica_failure_restores_originals_and_pending_changes(self):
         self.fail_at = 2
         with self.assertRaisesRegex(ValueError, 'Injected'):
