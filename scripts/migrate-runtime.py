@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Explicit offline node runtime conversion with retained source data and rollback."""
-from dctlib.secure_io import read_json
+from dctlib.secure_io import read_json, read_text
 import argparse
 import contextlib
 import fcntl
@@ -17,9 +17,11 @@ import host
 from dctlib import projects as worker
 import runtime
 import runtime_install
+import security_install
 import transfer
 
 ROOT = Path('/var/lib/betterdocker/runtime-migrations')
+PROFILE = Path('/var/lib/betterdocker/installer/source/assets/betterdocker.apparmor')
 SERVICES = ('betterdocker-refresh.timer', 'betterdocker-integration.timer',
             'betterdocker-firewall.service', 'betterdocker-lifecycle.service')
 
@@ -33,6 +35,14 @@ def save(path, value):
     os.chmod(path, 0o600)
 
 
+def rootful_profile():
+    try:
+        read_text(PROFILE, maximum=1024 * 1024)
+    except (OSError, ValueError) as error:
+        raise ValueError('Rootful conversion requires the installed security profile; repair installation first') from error
+    return PROFILE
+
+
 def inventory(target):
     source = runtime.load()
     if target == source.mode:
@@ -41,6 +51,8 @@ def inventory(target):
     blockers = []
     try:
         runtime_install.preflight(target)
+        if target == 'rootful':
+            rootful_profile()
         destination = Path(runtime_install.HOME) / 'docker'
         if target == 'rootful':
             config = Path('/etc/docker/daemon.json')
@@ -121,6 +133,8 @@ def resume_maintenance(active):
 
 def select_target(mode):
     current = runtime.load()
+    if mode == 'rootful':
+        security_install.initialize(mode, rootful_profile())
     if current.mode == mode:
         runtime_install.initialize(mode)
         if mode == 'rootful':
