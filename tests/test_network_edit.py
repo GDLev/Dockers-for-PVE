@@ -146,7 +146,7 @@ class NetworkEditTests(unittest.TestCase):
         stack = ExitStack()
         for name in ('check_sdn_bridge', 'check_address', 'remove_network', 'ensure_address', 'rebind_runtime', 'reconcile_network_runtime'):
             stack.enter_context(patch.object(worker, name))
-        stack.enter_context(patch.object(worker, 'bridge_addresses', return_value=([], [ipaddress.IPv4Network('10.0.0.0/20')])))
+        stack.enter_context(patch.object(worker, 'bridge_addresses', return_value=([], [ipaddress.IPv4Network('192.0.0.0/20')])))
         stack.enter_context(patch.object(worker, 'capture', return_value='[{"mtu":1500}]'))
         return stack
 
