@@ -98,6 +98,28 @@ class NetworkIsolation(unittest.TestCase):
         with patch.object(w,'capture',return_value='[{"Driver":"local","Options":{"device":"ordinary-host-path"}}]'),self.assertRaises(ValueError):n.rootless_container(body)
         with patch.object(w,'capture',return_value='[{"Driver":"local","Options":null}]'):n.rootless_container(body)
 
+    def test_rootless_new_anonymous_volume_uses_only_default_local_storage(self):
+        mount = {'Type': 'volume', 'Source': '', 'Target': '/anonymous'}
+        body = {'Labels': {'betterdocker.id': ID}, 'HostConfig': {'Mounts': [mount]}}
+        with patch.object(w, 'capture') as inspect:
+            n.rootless_container(body)
+            mount['VolumeOptions'] = {'DriverConfig': {'Name': 'local', 'Options': {}}}
+            n.rootless_container(body)
+            inspect.assert_not_called()
+            for source in ('', 'existing-volume'):
+                mount['Source'] = source
+                for driver in ({'Name': 'external'}, {'Name': 'local', 'Options': {'device': 'fixture'}}):
+                    mount['VolumeOptions'] = {'DriverConfig': driver}
+                    with self.assertRaisesRegex(ValueError, 'driver'):
+                        n.rootless_container(body)
+            mount.pop('VolumeOptions')
+            body['HostConfig']['VolumeDriver'] = 'external'
+            with self.assertRaisesRegex(ValueError, 'driver'):
+                n.rootless_container(body)
+            inspect.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'driver'):
+            n.rootless_resources({'services': {'app': {'volume_driver': 'external'}}})
+
     def test_private_source_guards_precede_same_guest_bypass(self):
         guard={ID:{'br-fixture':{'ips':['10.240.1.2'],'macs':[MAC]}}}
         rules=f.render([info()],config(),{ID:['br-fixture']},guards=guard)
