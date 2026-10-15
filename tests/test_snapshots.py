@@ -1,5 +1,6 @@
 """Snapshot ownership, integrity, per-instance restoration and LXC operation semantics."""
 import json
+import shutil
 import subprocess
 from pathlib import Path
 import tempfile
@@ -16,11 +17,14 @@ class SnapshotTests(unittest.TestCase):
             worker.run(['docker', 'image', 'rm', 'snapshot'], check=False, capture_output=True)
             self.assertFalse(run.call_args.kwargs['check'])
 
-    def test_snapshot_restores_notes_and_environment_from_actual_configuration_files(self):
+    def test_snapshot_restores_configuration_data_and_selected_tree_position(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / 'projects'
             project = root / ID
             project.mkdir(parents=True)
+            data = project / 'data'
+            data.mkdir()
+            (data / 'value').write_text('original data')
             (project / 'notes.txt').write_text('Original notes')
             (project / '.env').write_text('SECRET=original')
             (project / 'request.json').write_text('{}')
@@ -30,8 +34,10 @@ class SnapshotTests(unittest.TestCase):
             worker.write_json(project / 'compose.runtime.json', {'services': {'app': {'image': 'busybox'}}})
             worker.write_json(project / 'pending-network.json', {'net0': {'mtu': 1400}})
             info = dict(id=ID, node='pve', vmid=101, address='10.0.0.1', name='test', status='stopped')
-            container = dict(Id='old', Name='/app', Config={'Image': 'busybox', 'Labels': {'com.docker.compose.service': 'app'}}, HostConfig={}, Mounts=[], NetworkSettings={})
+            container = dict(Id='old', Name='/app', Config={'Image': 'busybox', 'Labels': {'com.docker.compose.service': 'app'}}, HostConfig={}, Mounts=[{'Type': 'bind', 'Source': str(data), 'Destination': '/data', 'RW': True}], NetworkSettings={})
             def capture(args):
+                if args[0] == 'du':
+                    return '64\t' + str(data)
                 if args[0] == 'findmnt':
                     return json.dumps({'filesystems': []})
                 if args[:3] == ['docker', 'image', 'inspect']:
@@ -44,14 +50,20 @@ class SnapshotTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, stdout='Flag --pause has been deprecated\nsha256:snapshot\n')
                 if args[:3] == ['docker', 'image', 'save']:
                     Path(args[args.index('-o') + 1]).write_bytes(b'archive')
-            with patch.object(worker, 'ROOT', root), patch.object(worker, 'METADATA', Path(temporary) / 'metadata'), patch.object(worker, 'detail', return_value=info), patch.object(worker, 'snapshot_containers', return_value=[container]), patch.object(worker, 'capture', side_effect=capture), patch.object(worker, 'run', side_effect=run), patch.object(worker, 'docker_engine', return_value={'Id': 'new'}), patch.object(worker, 'refresh'):
+            def copy_data(source, destination, **kwargs):
+                shutil.copytree(source, destination, dirs_exist_ok=True)
+            with patch('runtime.copy_data', side_effect=copy_data), patch('runtime.restore_data', side_effect=copy_data), patch.object(worker, 'ROOT', root), patch.object(worker, 'METADATA', Path(temporary) / 'metadata'), patch.object(worker, 'detail', return_value=info), patch.object(worker, 'snapshot_containers', return_value=[container]), patch.object(worker, 'capture', side_effect=capture), patch.object(worker, 'run', side_effect=run), patch.object(worker, 'docker_engine', return_value={'Id': 'new'}), patch.object(worker, 'refresh'):
                 worker.snapshot_capture(ID, 'pve', 'before')
                 saved = json.loads((worker.snapshot_root(ID) / 'before' / 'containers.json').read_text())
                 self.assertEqual(saved[0]['SnapshotImage'], 'sha256:snapshot')
                 (project / 'notes.txt').write_text('Changed notes')
                 (project / '.env').write_text('SECRET=changed')
                 worker.write_json(project / 'pending-network.json', {'net0': {'mtu': 1500}})
+                (data / 'value').write_text('changed data')
                 worker.snapshot_apply(ID, 'pve', 'before')
+                self.assertEqual((data / 'value').read_text(), 'original data')
+                self.assertEqual(worker.read_json(project / 'snapshot-restored.json')['name'], 'before')
+                self.assertEqual(worker.snapshot_list(ID, 'pve')[-1]['parent'], 'before')
                 self.assertEqual((project / 'notes.txt').read_text(), 'Original notes')
                 self.assertEqual((project / '.env').read_text(), 'SECRET=original')
                 self.assertEqual(json.loads((project / 'pending-network.json').read_text()), {'net0': {'mtu': 1400}})
