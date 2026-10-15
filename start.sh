@@ -332,8 +332,8 @@ if [[ -f /etc/apparmor.d/usr.sbin.dhclient ]] && command -v apparmor_parser >/de
 fi
 stage runtime
 bash /usr/local/lib/betterdocker/docker-install.sh "$RUNTIME_MODE"
-python3 /usr/local/lib/betterdocker/runtime_install.py initialize --runtime="$RUNTIME_MODE"
 python3 /usr/local/lib/betterdocker/security_install.py "$RUNTIME_MODE" "$PROJECT_DIR/assets/betterdocker.apparmor"
+python3 /usr/local/lib/betterdocker/runtime_install.py initialize --runtime="$RUNTIME_MODE"
 # Refresh existing mount definitions too; repair must fix their boot ordering.
 python3 - <<'PY'
 import sys
