@@ -57,7 +57,15 @@ def cleanup():
     call('ip', 'netns', 'del', NS, check=False)
     call('ip', 'link', 'del', 'bd67host', check=False)
     call('ip', 'link', 'del', BRIDGE, check=False)
-    if 'cluster_enabled' in saved:
+    if 'cluster_options' in saved:
+        before = saved['cluster_options']
+        keys = ('enable', 'policy_in', 'policy_out')
+        values = {key: before[key] for key in keys if key in before}
+        missing = [key for key in keys if key not in before]
+        if missing:
+            values['delete'] = ','.join(missing)
+        api('set', '/cluster/firewall/options', **values)
+    elif 'cluster_enabled' in saved:
         api('set', '/cluster/firewall/options', enable=saved['cluster_enabled'])
     STATE.unlink()
 
@@ -67,7 +75,7 @@ def run():
     assert call('ip', 'link', 'show', BRIDGE, check=False).returncode != 0
     original_routes = json.loads(call('ip', '-j', 'route', 'show', 'default').stdout)
     name = 'endpoint-families-' + uuid.uuid4().hex[:8]
-    saved = {'name': name, 'guests': [], 'cluster_enabled': int(api('get', '/cluster/firewall/options').get('enable', 0))}; STATE.write_text(json.dumps(saved))
+    saved = {'name': name, 'guests': [], 'cluster_options': api('get', '/cluster/firewall/options')}; STATE.write_text(json.dumps(saved))
     call('ip', 'link', 'add', BRIDGE, 'type', 'bridge', 'vlan_filtering', '1')
     call('ip', 'link', 'set', BRIDGE, 'up')
     call('ip', 'address', 'add', '172.31.67.1/24', 'dev', BRIDGE)
@@ -96,7 +104,7 @@ def run():
     wait_for(lambda: fetch('fd67:bd::10').stdout.strip() == 'endpoint-ok')
     assert json.loads(call('ip', '-j', 'route', 'show', 'default').stdout) == original_routes
     print('PASS tagged IPv4 and IPv6 TCP traffic; node management routes unchanged', flush=True)
-    api('set', '/cluster/firewall/options', enable=1)
+    api('set', '/cluster/firewall/options', enable=1, policy_in='ACCEPT', policy_out='ACCEPT')
     api('set', endpoint(identifier) + '/firewall/options', enable=1, policy_in='DROP', policy_out='ACCEPT')
     net(identifier, net='net1', firewall=1)
     power(identifier, 'reboot')
