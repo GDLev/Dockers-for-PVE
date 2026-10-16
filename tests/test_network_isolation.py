@@ -204,7 +204,7 @@ class NetworkIsolation(unittest.TestCase):
     def test_endpoints_do_not_expose_wildcard_host_services(self):
         bindings={ID:[('tcp',8080,'10.240.1.2',80)]}
         rules=controls.render([info()],bindings=bindings)
-        self.assertIn('ip daddr 198.18.0.20 tcp dport 8080 socket wildcard 0 ct mark set ct mark | 0x80000000 accept',rules)
+        self.assertIn('ip daddr 198.18.0.20 tcp dport 8080 socket wildcard 0 ct label set ct label | 127 accept',rules)
         self.assertIn('ip daddr 198.18.0.20 drop',rules)
         self.assertNotIn('dport 8006',rules)
         self.assertNotIn('ip daddr 198.18.0.1 drop',rules)
@@ -226,7 +226,7 @@ class NetworkIsolation(unittest.TestCase):
         published.assert_called_once_with(guest)
         activate.assert_called_once_with([guest], bindings)
         self.assertIn('ip daddr 198.18.0.20 drop', rules)
-        self.assertIn('tcp dport 8080 socket wildcard 0 ct mark set ct mark | 0x80000000 accept', rules)
+        self.assertIn('tcp dport 8080 socket wildcard 0 ct label set ct label | 127 accept', rules)
 
     def test_rootless_private_bridges_are_isolated_across_dcts_without_guest_firewall(self):
         guards = {ID: {bridge: {'ips': ['10.240.1.2'], 'macs': [MAC]} for bridge in ('br-first', 'br-second')}, 'b' * 32: {'br-other': {'ips': ['10.240.2.2'], 'macs': [MAC]}}}
@@ -259,8 +259,8 @@ class NetworkIsolation(unittest.TestCase):
             self.assertLess(rules.index(reply), rules.index(family + ' daddr ' + address + ' drop', rules.index('chain host_endpoint_guard')))
         self.assertNotIn('ct state established,related accept', rules)
         self.assertNotIn('proto-dst 8006', rules)
-        self.assertIn('tcp dport 8443 tcp flags & syn == 0 ct direction original ct state established ct mark & 0x80000000 != 0 accept', rules)
-        self.assertIn('socket wildcard 0 ct mark set ct mark | 0x80000000 accept', rules)
+        self.assertIn('tcp dport 8443 tcp flags & syn == 0 ct direction original ct state established ct label 127 accept', rules)
+        self.assertIn('socket wildcard 0 ct label set ct label | 127 accept', rules)
 
     def test_new_address_remains_closed_until_its_policy_is_ready(self):
         endpoint=info()

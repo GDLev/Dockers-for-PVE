@@ -3,8 +3,8 @@ import ipaddress
 import json
 from .endpoints import resolved
 
-# PVE uses the low 30 connmark bits for VM IDs; preserve those bits.
-SOCKET_VERIFIED_MARK = 0x80000000
+# Keep PVE's complete VMID connmark unchanged.
+SOCKET_VERIFIED_LABEL = 127
 
 
 def render(infos, bindings=None):
@@ -58,12 +58,12 @@ def render(infos, bindings=None):
                         # A declared port must never admit a wildcard node listener.
                         socket_rule = match + ' ' + protocol + ' dport ' + str(port)
                         if protocol == 'tcp':
-                            marker = hex(SOCKET_VERIFIED_MARK)
+                            marker = str(SOCKET_VERIFIED_LABEL)
                             # Request sockets cannot answer the wildcard lookup during
                             # the final handshake ACK. Admit it only after the initial
                             # SYN matched a socket bound to this exact address.
-                            lines.append(socket_rule + ' tcp flags & syn == 0 ct direction original ct state established ct mark & ' + marker + ' != 0 accept')
-                            lines.append(socket_rule + ' socket wildcard 0 ct mark set ct mark | ' + marker + ' accept')
+                            lines.append(socket_rule + ' tcp flags & syn == 0 ct direction original ct state established ct label ' + marker + ' accept')
+                            lines.append(socket_rule + ' socket wildcard 0 ct label set ct label | ' + marker + ' accept')
                         else:
                             lines.append(socket_rule + ' socket wildcard 0 accept')
                         # A node-local client may use its endpoint as the source.
