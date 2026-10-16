@@ -3,6 +3,9 @@ import ipaddress
 import json
 from .endpoints import resolved
 
+# PVE uses the low 30 connmark bits for VM IDs; preserve those bits.
+SOCKET_VERIFIED_MARK = 0x80000000
+
 
 def render(infos, bindings=None):
     endpoints = [endpoint for info in infos if 'interfaces' in info for endpoint in resolved(info).values()]
@@ -53,7 +56,16 @@ def render(infos, bindings=None):
                     if bound == str(parsed):
                         protocol, port = binding[:2]
                         # A declared port must never admit a wildcard node listener.
-                        lines.append(match + ' ' + protocol + ' dport ' + str(port) + ' socket wildcard 0 accept')
+                        socket_rule = match + ' ' + protocol + ' dport ' + str(port)
+                        if protocol == 'tcp':
+                            marker = hex(SOCKET_VERIFIED_MARK)
+                            # Request sockets cannot answer the wildcard lookup during
+                            # the final handshake ACK. Admit it only after the initial
+                            # SYN matched a socket bound to this exact address.
+                            lines.append(socket_rule + ' tcp flags & syn == 0 ct direction original ct state established ct mark & ' + marker + ' != 0 accept')
+                            lines.append(socket_rule + ' socket wildcard 0 ct mark set ct mark | ' + marker + ' accept')
+                        else:
+                            lines.append(socket_rule + ' socket wildcard 0 accept')
                         # A node-local client may use its endpoint as the source.
                         # Admit only replies belonging to this published service.
                         lines.append(match + ' ct direction reply ct state established ' +

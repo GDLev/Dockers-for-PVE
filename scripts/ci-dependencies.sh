@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 [[ $(uname -m) == x86_64 ]] || { echo 'CI Compose pin requires x86_64' >&2; exit 1; }
 apt-get update
-apt-get install -y --no-install-recommends curl ca-certificates openssl python3-venv
+apt-get install -y --no-install-recommends curl ca-certificates openssl python3-venv iproute2 nftables util-linux mount
 if ! command -v docker >/dev/null; then
     apt-get install -y --no-install-recommends docker.io
 fi

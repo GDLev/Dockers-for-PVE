@@ -20,6 +20,8 @@ jobs:
       - run: python3 -m pip install --require-hashes -r requirements-test.txt
       - run: sudo env PATH=/var/lib/betterdocker-ci/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /var/lib/betterdocker-ci/python/bin/python /var/lib/betterdocker-ci/source/tests/check_release_ci.py
       - run: sudo env PATH=/var/lib/betterdocker-ci/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /var/lib/betterdocker-ci/python/bin/python /var/lib/betterdocker-ci/source/tests/check_unit.py
+      - name: Verify endpoint TCP and UDP traffic in isolated namespaces
+        run: sudo env PYTHONPATH=/var/lib/betterdocker-ci/source/scripts /var/lib/betterdocker-ci/python/bin/python /var/lib/betterdocker-ci/source/tests/live_endpoint_guard.py
       - run: bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh
       - run: python3 scripts/build_frontend.py | node --check
       - run: node tests/test_frontend.js
