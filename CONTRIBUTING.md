@@ -35,9 +35,18 @@ node tests/test_frontend.js
 bash -n install.sh start.sh scripts/docker-install.sh packaging/build-deb.sh packaging/build-release.sh
 ```
 
-The required CI checks run on a disposable Linux worker as root inside the job container. `scripts/ci-dependencies.sh` installs dependencies and copies source to a protected, readable directory. Do not run that setup on a PVE node. `tests/check_release_ci.py` fails on skipped required tests. Ordinary unit tests isolate node-control files and mock external services.
+The required CI checks run on a disposable Linux worker as root. `scripts/ci-dependencies.sh` installs dependencies and copies source to a protected, readable directory. Do not run that setup on a PVE node. `tests/check_release_ci.py` fails on skipped required tests. Ordinary unit tests isolate node-control files and mock external services.
 
 GitHub Actions runs the checks on hosted Linux workers with read-only repository permissions. Actions, Compose, and Python dependencies are pinned. Review pin changes against upstream and repeat the checks.
+
+The kernel endpoint check runs on a disposable Linux worker with `iproute2`, `nftables`, and `util-linux`:
+
+```bash
+sudo env PYTHONPATH="$PWD/scripts" python3 tests/live_endpoint_guard.py
+```
+
+It exchanges TCP and UDP data in private network and mount namespaces, checks wildcard listener denial, and closes stopped endpoints. On a PVE node it uses the installed extension.
+
 
 On a supported node or a saved PVE filesystem, run:
 
@@ -129,6 +138,8 @@ Extension files on the PVE node:
 | `/var/lib/betterdocker/installer/`, `/var/backups/betterdocker/` | Private installer logs, cache, and recovery copies |
 
 The installer adds marked sections to native PVE modules and panel assets. Repair and uninstall transform the current files; they do not restore stale package backups.
+
+The endpoint TCP guard reserves conntrack mark bit `0x80000000` for connections verified against an address-specific listener. It preserves PVE's VMID bits. Custom firewall rules must leave this bit available.
 
 DCT files and data:
 
