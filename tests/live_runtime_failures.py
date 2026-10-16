@@ -20,11 +20,20 @@ from live_pools_hooks import api, task, wait_for
 STATE = Path('/root/bd-runtime-failures.json')
 
 
+def resume_runtime(node, saved):
+    if saved.get('socket_active'):
+        remote(node, ['systemctl', 'start', 'docker.socket'], check=True)
+    remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'service', 'start'], check=True)
+    # Wait for the native oneshot before issuing guest operations.
+    remote(node, ['systemctl', 'start', 'betterdocker-lifecycle.service'], check=True)
+    remote(node, ['/usr/local/lib/betterdocker/provision.py', 'daemon-resume'], check=True)
+
+
 def cleanup():
     saved = json.loads(STATE.read_text())
     node, identifier = saved['node'], saved.get('id')
     remote(node, ['systemctl', 'start', 'corosync'], check=True)
-    remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'service', 'start'], check=True)
+    resume_runtime(node, saved)
     if identifier:
         info = next((row for row in w.summaries() if row['id'] == identifier), None)
         if info:
@@ -43,7 +52,11 @@ def run(node, reboot):
     assert not any(row['node'] == node for row in w.summaries()), 'Target must have no DCTs'
     assert not remote(node, ['docker', 'ps', '-aq'], check=True).stdout.strip(), 'Target Docker must be empty'
     name = 'runtime-failure-' + uuid.uuid4().hex[:8]
-    saved = {'node': node, 'name': name}
+    identity = json.loads(remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'identity'], check=True).stdout)
+    socket_loaded = identity['mode'] == 'rootful' and remote(node,
+        ['systemctl', 'show', 'docker.socket', '--property=LoadState', '--value'], check=True).stdout.strip() == 'loaded'
+    socket_active = socket_loaded and remote(node, ['systemctl', 'is-active', '--quiet', 'docker.socket']).returncode == 0
+    saved = {'node': node, 'name': name, 'socket_active': socket_active}
     STATE.write_text(json.dumps(saved))
     identifier = None
     try:
@@ -56,6 +69,8 @@ def run(node, reboot):
         remote(node, ['docker', 'exec', cid, 'sh', '-c', 'echo kept >/marker'], check=True)
         remote(node, ['dct', 'set', str(info['vmid']), '--onboot', '1'], check=True)
         remote(node, ['/usr/local/lib/betterdocker/provision.py', 'daemon-prepare'], check=True)
+        if socket_loaded:
+            remote(node, ['systemctl', 'stop', 'docker.socket'], check=True)
         remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'service', 'stop'], check=True)
         probe = '''import sys,subprocess
 sys.path.insert(0,"/usr/local/lib/betterdocker")
@@ -65,8 +80,7 @@ except (ValueError, OSError, subprocess.SubprocessError): print("unavailable")
 else: raise AssertionError("Unavailable daemon was interpreted as empty")
 '''
         assert remote(node, ['python3', '-c', probe, identifier], check=True).stdout.strip() == 'unavailable'
-        remote(node, ['/usr/local/lib/betterdocker/runtime.py', 'service', 'start'], check=True)
-        remote(node, ['/usr/local/lib/betterdocker/provision.py', 'daemon-resume'], check=True)
+        resume_runtime(node, saved)
         wait_for(lambda: remote(node, ['docker', 'exec', cid, 'cat', '/marker']).stdout.strip() == 'kept', timeout=120)
         print('PASS unavailable daemon is rejected; original instance and files return', flush=True)
         remote(node, ['systemctl', 'stop', 'corosync'], check=True)
