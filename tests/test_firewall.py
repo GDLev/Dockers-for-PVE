@@ -60,6 +60,12 @@ class FirewallTests(unittest.TestCase):
         self.assertIn('oifname "br-b" jump d101in', rules)
         self.assertNotIn('iifname { "br-a" } oifname { "br-b" } return', rules)
         self.assertIn('iifname { "br-a" } oifname { "br-a" } return', rules)
+        ingress = rules.split('chain forward_in {', 1)[1].split('chain output_in {', 1)[0]
+        internal = 'iifname { "br-a" } oifname { "br-a" } return'
+        self.assertIn(internal, ingress)
+        self.assertNotIn('iifname { "br-a" } oifname { "br-b" } return', ingress)
+        self.assertLess(ingress.index('ct original ip daddr 192.0.2.210 jump d100innat'), ingress.index(internal))
+        self.assertLess(ingress.index(internal), ingress.index('oifname "br-a" jump d100in'))
         self.assertIn('ct original ip daddr 192.0.2.210 jump d100innat', rules)
         self.assertIn('ct original ip daddr 192.0.2.210 jump d100innat', rules.split('chain output_in')[1])
         self.assertEqual(rules.count('dnat ip to 172.20.0.2:80'), 2)

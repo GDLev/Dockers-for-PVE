@@ -298,6 +298,7 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False, guar
                 lines.append(f'ct original ip daddr {address} jump {chain}nat')
             for bridge in (bridges.get(info['id'], []) if info.get('net', 'net0') == 'net0' else []):
                 interface = json.dumps(bridge)
+                interfaces = '{ ' + ', '.join(json.dumps(b) for b in bridges.get(info['id'], [])) + ' }'
                 if direction == 'out':
                     guard = (guards or {}).get(info['id'], {}).get(bridge, {})
                     for enabled, field, values in ((policies[info['vmid']]['options'].get('ipfilter'), 'ip saddr', guard.get('ips')),
@@ -306,14 +307,14 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False, guar
                             lines.append(f'iifname {interface} ' + (field + ' != { ' + ', '.join(values) + ' } ' if values else '') + 'drop')
                     lines.append(f'iifname {interface} meta nfproto ipv6 drop')
                     if hook == 'forward':
-                        owned = bridges.get(info['id'], [])
-                        interfaces = '{ ' + ', '.join(json.dumps(b) for b in owned) + ' }'
                         lines.append(f'iifname {{ {interface} }} oifname {interfaces} return')
                     lines.append(f'iifname {interface} jump {chain}')
                 elif hook != 'input':
                     lines.append(f'oifname {interface} meta nfproto ipv6 drop')
                     if address:
                         lines.append(f'oifname {interface} ct original ip daddr {address} jump {chain}nat')
+                    if hook == 'forward':
+                        lines.append(f'iifname {interfaces} oifname {{ {interface} }} return')
                     lines.append(f'oifname {interface} jump {chain}')
             if direction == 'in' and hook in ('input', 'output') and address:
                 lines.append(f'ip daddr {address} jump {chain}')

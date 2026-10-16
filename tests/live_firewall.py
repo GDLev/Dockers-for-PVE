@@ -248,7 +248,8 @@ def main():
     guests = [next(i for i in worker.summaries() if i['id'] == identifier) for identifier in state['guests'][:2]]
     a, b = guests
     api('set', '/cluster/firewall/options', enable=1, policy_in='ACCEPT', policy_out='ACCEPT')
-    time.sleep(4)
+    wait_for(lambda: all(api('get', base(info) + '/firewall/options').get('status') == 'active'
+                        for info in guests), timeout=30)
     for info in guests:
         status = api('get', base(info) + '/firewall/options')
         assert status['status'] == 'active', status
