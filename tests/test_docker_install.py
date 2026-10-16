@@ -17,6 +17,10 @@ class ComposeCompatibility(unittest.TestCase):
             docker = directory / 'docker'
             docker.write_text('#!/bin/sh\nif [ "$1 $2 $3" = "compose version --short" ]; then printf "%s\\n" "$BD_TEST_VERSION"; fi\n')
             docker.chmod(0o755)
+            for name, output in (('dockerd', 'Docker version 29.9.1, build fixture'), ('containerd', 'containerd containerd.io v2.4.2 fixture')):
+                helper = directory / name
+                helper.write_text("#!/bin/sh\nprintf '%s\\n' '" + output + "'\n")
+                helper.chmod(0o755)
             for name in ('dockerd-rootless.sh', 'apt-get', 'systemctl'):
                 helper = directory / name
                 helper.write_text('#!/bin/sh\necho UNEXPECTED_HOST_CHANGE >&2\nexit 99\n')
