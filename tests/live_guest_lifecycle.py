@@ -71,6 +71,9 @@ def cleanup(report):
                 if snap['name'] != 'current':
                     live.task(live.api('create', live.base(info) + '/snapshot', action='delete', snapname=snap['name']))
             live.task(live.api('delete', live.base(info), **{'destroy-owned-data': 1}))
+            acl_path = '/vms/' + str(item['vmid'])
+            assert not any(row['path'] == acl_path or row['path'].startswith(acl_path + '/')
+                           for row in live.api('get', '/access/acl')), 'Deleted guest retained native ACLs'
         assert own(report, item) is None
         item['removed'] = True; report.save()
     for backup in report.data.get('backups', []):

@@ -56,14 +56,12 @@ sub register_api {
                 }
             }
             my $ha_agent = ($rpcenv->{type} // '') eq 'ha';
-            my $vmid = PVE::API2::BetterDocker::task_id($param->{id}, $param->{node});
             (my $task_action = $action) =~ s/-//g;
             return $rpcenv->fork_worker('betterdocker' . $task_action, PVE::API2::BetterDocker::task_id($param->{id}, $param->{node}), $rpcenv->get_user(), sub {
                 if ($ha_agent) {
                     PVE::Tools::run_command(['/usr/local/lib/betterdocker/ha.py', 'power', $param->{id}, $param->{node}, $action, $param->{timeout} // 60]);
                 } else {
                     PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, $action, $param->{timeout} // 60, $param->{'overrule-shutdown'} ? 1 : 0]);
-                    PVE::AccessControl::remove_vm_access($vmid) if $action eq 'delete';
                 }
             });
         },
@@ -89,7 +87,6 @@ sub register_api {
             my $vmid = PVE::API2::BetterDocker::task_id($param->{id}, $param->{node});
             return $rpcenv->fork_worker('betterdockerdelete', $vmid, $rpcenv->get_user(), sub {
                 PVE::Tools::run_command([$helper, 'action', $param->{id}, $param->{node}, 'delete', 60, 0, $param->{'destroy-owned-data'} ? 1 : 0]);
-                PVE::AccessControl::remove_vm_access($vmid);
             });
         },
     });

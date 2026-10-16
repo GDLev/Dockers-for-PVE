@@ -792,6 +792,11 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
                 storage_unmount(identifier)
                 unit = capture(['systemd-escape', '--path', '--suffix=mount', str(directory / 'storage-data')]).strip()
                 run(['systemctl', 'disable', unit], check=False, capture_output=True)
+            if info.get('vmid'):
+                # Keep the guest ID occupied until native ACL and pool cleanup completes.
+                run(['perl', '-MPVE::AccessControl', '-e',
+                     'PVE::Cluster::cfs_update(); PVE::AccessControl::remove_vm_access($ARGV[0]);',
+                     str(info['vmid'])], capture_output=True)
             if destroy_data:
                 remove_owned_data(identifier, owned_volumes)
             if storage_config(identifier).get('volid'):
