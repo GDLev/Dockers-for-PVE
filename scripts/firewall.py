@@ -296,9 +296,13 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False, guar
                 # OUTPUT DNAT can reroute after this hook; match the original
                 # endpoint even when oifname still describes the local route.
                 lines.append(f'ct original ip daddr {address} jump {chain}nat')
-            for bridge in (bridges.get(info['id'], []) if info.get('net', 'net0') == 'net0' else []):
+            owned = bridges.get(info['id'], []) if info.get('net', 'net0') == 'net0' else []
+            interfaces = '{ ' + ', '.join(json.dumps(b) for b in owned) + ' }'
+            if direction == 'in' and hook == 'forward':
+                for bridge in owned:
+                    lines.append(f'iifname {{ {json.dumps(bridge)} }} oifname {interfaces} return')
+            for bridge in owned:
                 interface = json.dumps(bridge)
-                interfaces = '{ ' + ', '.join(json.dumps(b) for b in bridges.get(info['id'], [])) + ' }'
                 if direction == 'out':
                     guard = (guards or {}).get(info['id'], {}).get(bridge, {})
                     for enabled, field, values in ((policies[info['vmid']]['options'].get('ipfilter'), 'ip saddr', guard.get('ips')),
@@ -313,8 +317,6 @@ def render(infos, config, bridges, bindings=None, routed=None, inner=False, guar
                     lines.append(f'oifname {interface} meta nfproto ipv6 drop')
                     if address:
                         lines.append(f'oifname {interface} ct original ip daddr {address} jump {chain}nat')
-                    if hook == 'forward':
-                        lines.append(f'iifname {interfaces} oifname {{ {interface} }} return')
                     lines.append(f'oifname {interface} jump {chain}')
             if direction == 'in' and hook in ('input', 'output') and address:
                 lines.append(f'ip daddr {address} jump {chain}')
