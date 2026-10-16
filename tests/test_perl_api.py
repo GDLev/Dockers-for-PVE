@@ -317,6 +317,11 @@ no warnings 'redefine';
 *PVE::API2::BetterDocker::ha_managed = sub { 0 };
 *PVE::HA::Config::get_service_status = sub { return { managed => 0 }; };
 *PVE::API2::BetterDocker::summaries = sub { [{ id => 'a' x 32, vmid => $ARGV[0], node => 'pve', name => 'web', status => 'running', address => '192.0.2.50' }] };
+*PVE::API2::BetterDocker::read_guest = sub {
+    my ($id, $node) = @_;
+    return undef unless $id eq 'a' x 32 && $node eq 'pve';
+    return {id => $id, node => $node, vmid => $ARGV[0]};
+};
 PVE::API2::BetterDocker::hook_resources();
 my $result = $PVE::API2::Cluster::info->{code}->({});
 die 'numeric ID missing' unless $result->[0]->{vmid} == 101;
