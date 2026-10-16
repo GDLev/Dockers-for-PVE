@@ -136,6 +136,33 @@ class DataTests(unittest.TestCase):
         self.assertTrue((worker.METADATA / 'ids/100.json').exists())
         self.assertEqual(marker.read_text(), 'keep')
 
+    def test_create_publishes_actual_status_before_its_operation_finishes(self):
+        import contextlib
+        import shutil
+        import subprocess
+        from dctlib import hardening
+        nodes = self.root / 'pve-nodes'; nodes.mkdir()
+        for start, states, replicas, expected in ((False, ['created'], 1, 'stopped'),
+                                                 (True, ['running'], 1, 'running'),
+                                                 (True, ['running', 'exited'], 2, 'partial')):
+            with self.subTest(start=start, states=states), contextlib.ExitStack() as controls:
+                shutil.rmtree(worker.ROOT / ID, ignore_errors=True)
+                (worker.METADATA / (ID + '.json')).unlink(missing_ok=True)
+                controls.enter_context(patch.object(worker, 'PVE_NODES', nodes))
+                controls.enter_context(patch.object(worker, 'current_node', return_value='pve'))
+                controls.enter_context(patch.object(hardening, 'mode', return_value='standard'))
+                controls.enter_context(patch.object(worker.project_limits, 'initialize'))
+                controls.enter_context(patch.object(worker, 'prepare', return_value={'services': {'app': {'deploy': {'replicas': replicas}}}}))
+                controls.enter_context(patch.object(worker, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')))
+                controls.enter_context(patch.object(worker, 'container_records', return_value=[{'id': str(i) * 64, 'state': state} for i, state in enumerate(states, 1)]))
+                for name in ('network_preflight', 'ensure_address', 'rebind_runtime', 'prepare_firewall',
+                             'finish_network_start', 'guest_hook', 'expect_guest_hook'):
+                    controls.enter_context(patch.object(worker, name))
+                with worker.operation(ID, 'create'):
+                    worker.create({'name': 'owned', 'bridge': 'vmbr0', 'address': '0.0.0.0'}, 'pve', ID, start=start)
+                    self.assertTrue(worker.operation_state(ID)['active'])
+                    self.assertEqual(json.loads((worker.METADATA / (ID + '.json')).read_text())['status'], expected)
+
     def test_attached_and_foreign_disks_never_reach_free(self):
         (worker.METADATA / (ID + '.json')).write_text('{"node":"pve"}')
         with patch.object(worker, 'detail', return_value={}), patch.object(worker, 'storage_config', return_value={'volid': 'local:current', 'unused': ['local:old']}), patch.object(worker, 'pve_storage') as free:
