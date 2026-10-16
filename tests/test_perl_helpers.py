@@ -1,5 +1,6 @@
 """Authenticated PVE requests execute helper arguments under Perl taint mode."""
 import re
+import os
 import json
 import tempfile
 from pathlib import Path
@@ -47,7 +48,7 @@ our $executed=0; my $helper='/usr/local/lib/betterdocker/replica.py';
             path = Path(folder) / ('a' * 32 + '.json')
             path.write_text(json.dumps({'id': 'a' * 32, 'node': 'pve', 'vmid': 123, 'runtime_mode': 'rootless'}))
             program = r"""
-use strict;use warnings;use JSON::PP qw(decode_json);use Scalar::Util;
+use strict;use warnings;use JSON::PP qw(decode_json);use Scalar::Util;use Errno qw(ENOENT);
 package JSON;sub new { JSON::PP->new }
 package main;
 my $directory=shift @ARGV;$directory =~ /\A([A-Za-z0-9_\/.-]+)\z/ or die; $directory=$1;
@@ -77,3 +78,28 @@ print 'PASS';
             missing = subprocess.run(['perl', '-T', '-e', program, folder, 'a' * 32], capture_output=True, text=True)
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn('Docker project does not exist', missing.stderr)
+
+    def test_metadata_read_errors_are_not_reported_as_missing_ownership(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        function = re.search(r'^sub read_guest \{.*?^\}', source, re.M | re.S).group()
+        function = function.replace('/etc/pve/betterdocker/', '$directory/')
+        with tempfile.TemporaryDirectory() as folder:
+            os.chmod(folder, 0o755)
+            path = Path(folder) / ('a' * 32 + '.json')
+            path.write_text(json.dumps({'id': 'a' * 32, 'node': 'pve', 'vmid': 123}))
+            path.chmod(0)
+            program = r"""
+use strict;use warnings;use JSON::PP qw(decode_json);use Errno qw(ENOENT);
+my $directory=shift @ARGV;
+$directory =~ /\A([A-Za-z0-9_\/.-]+)\z/ or die; $directory=$1;
+FUNCTION
+print defined(read_guest($ARGV[0],'pve')) ? 'FOUND' : 'MISSING';
+""".replace('FUNCTION', function)
+            identity = dict(user=65534, group=65534, extra_groups=[]) if os.geteuid() == 0 else {}
+            try:
+                result = subprocess.run(['perl', '-T', '-e', program, folder, 'a' * 32],
+                                        capture_output=True, text=True, **identity)
+                self.assertNotEqual(result.returncode, 0, 'Unreadable metadata was treated as absent')
+                self.assertIn('Cannot read DCT metadata', result.stderr)
+            finally:
+                path.chmod(0o600)
