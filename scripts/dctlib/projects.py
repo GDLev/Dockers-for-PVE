@@ -733,6 +733,7 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
         owned_volumes = owned_data_plan(identifier, info) if operation == 'delete' and destroy_data else []
         recover_guest_hook(info)
         if operation == 'start' and records and len(records) == info.get('expected') and all(item['state'] == 'running' for item in records):
+            sync_guest_runtime_state(info)
             return
         stopping = operation in ('stop', 'shutdown', 'force-stop', 'restart', 'reboot')
         starting = operation in ('start', 'restart', 'reboot')
@@ -820,6 +821,8 @@ def action(identifier, node, operation, timeout=60, destroy_data=False):
                 info.pop('network_resume', None)
                 info['status'] = 'stopped'
                 write_json(METADATA / (identifier + '.json'), info)
+            else:
+                sync_guest_runtime_state(info)
             refresh(node)
 
 
@@ -1044,6 +1047,7 @@ def service_action(identifier, node, service, verb, timeout=60):
         if verb in ('start', 'restart', 'reboot'):
             finish_network_start(info)
             restore_restart_policy(identifier, service)
+        sync_guest_runtime_state(info)
         refresh(node)
 
 

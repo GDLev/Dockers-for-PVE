@@ -111,11 +111,13 @@ class PowerTests(unittest.TestCase):
             directory.mkdir()
             (directory / 'compose.runtime.json').write_text('{"services":{"app":{},"other":{}}}')
             containers = [dict(RUNNING, service='app'), dict(RUNNING, id='c' * 64, service='other')]
-            with patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'locked'), \
-                 patch.object(worker, 'detail', return_value={}), patch.object(worker, 'container_records', return_value=containers), \
+            with patch.object(worker, 'ROOT', Path(folder)), patch.object(worker, 'METADATA', Path(folder) / 'metadata'), patch.object(worker, 'locked'), \
+                 patch.object(worker, 'detail', return_value={'id': ID, 'expected': 2}), patch.object(worker, 'container_records', return_value=containers), \
                  patch.object(worker, 'refresh'), patch.object(worker, 'run') as run:
+                run.side_effect = lambda *_args, **_kwargs: containers[0].update(state='exited')
                 worker.service_action(ID, 'pve', 'app', 'force-stop')
                 self.assertEqual(run.call_args.args[0], ['docker', 'kill', RUNNING['id']])
+                self.assertEqual(worker.read_json(worker.METADATA / (ID + '.json'))['status'], 'partial')
 
     def test_start_keeps_existing_container_after_live_resource_changes(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), \

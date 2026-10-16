@@ -323,6 +323,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
                 worker.guest_hook(info, 'post-start')
             else:
                 worker.run(worker.compose_base(directory, identifier) + ['up', '--no-start'], timeout=1800)
+            worker.sync_guest_runtime_state(info)
             worker.refresh(node)
         except Exception:
             info['status'] = 'error'
