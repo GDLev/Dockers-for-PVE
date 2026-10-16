@@ -17,6 +17,7 @@ use PVE::JSONSchema;
 use PVE::BetterDocker::Firewall;
 use POSIX qw(LONG_MAX);
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
+use Errno qw(ENOENT);
 
 my $helper = '/usr/local/lib/betterdocker/provision.py';
 my $node = { type => 'string', format => 'pve-node' };
@@ -110,7 +111,11 @@ sub read_guest {
     my ($identifier, $node) = @_;
     die "Invalid Docker project ID\n" unless defined($identifier) && $identifier =~ /\A([0-9a-f]{32})\z/;
     $identifier = $1;
-    open(my $fh, '<', "/etc/pve/betterdocker/$identifier.json") or return undef;
+    my $fh;
+    if (!open($fh, '<', "/etc/pve/betterdocker/$identifier.json")) {
+        return undef if $! == ENOENT;
+        die "Cannot read DCT metadata: $!\n";
+    }
     local $/;
     my $info = eval { decode_json(<$fh>) };
     close $fh;
