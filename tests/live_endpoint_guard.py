@@ -80,6 +80,17 @@ finally:s.close()
         def exchanged(address, port, protocol='tcp'):
             return command('ip', 'netns', 'exec', 'bd-guard-client', sys.executable, '-c', probe,
                            address, str(port), protocol).strip() == 'open'
+        # Model PVE's VMID connmark and verify it survives endpoint admission.
+        marks = '''table inet betterdocker_guard_fixture {
+chain native_vmid { type filter hook input priority -30; policy accept;
+meta l4proto tcp ct direction original ct state new ct mark set 0x12345
+}
+chain preserve_vmid { type filter hook input priority -10; policy accept;
+tcp dport 8080 ct mark != 0x12345 drop
+}
+}
+'''
+        subprocess.run(['nft', '-f', '-'], input=marks, text=True, check=True, capture_output=True)
         for endpoint in ('198.18.0.20', 'fd00::20'):
             assert exchanged(endpoint, 8006) and exchanged(endpoint, 8080), 'Fixture transport failed before policy'
         subprocess.run(['nft', '-f', '-'], input=policies['active'], text=True, check=True, capture_output=True)
@@ -96,7 +107,7 @@ finally:s.close()
         for endpoint in ('198.18.0.20', 'fd00::20'):
             assert not exchanged(endpoint, 8080), 'Stopped TCP publication admitted'
             assert not exchanged(endpoint, 5353, 'udp'), 'Stopped UDP publication admitted'
-        print('PASS complete IPv4/IPv6 TCP and UDP exchanges, wildcard host denial and stopped endpoint isolation')
+        print('PASS complete IPv4/IPv6 TCP and UDP exchanges, wildcard host denial, preserved VMID connmark and stopped endpoint isolation')
     finally:
         for server in servers:
             server.close()
@@ -127,4 +138,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            print(error.stderr, file=sys.stderr)
+        raise

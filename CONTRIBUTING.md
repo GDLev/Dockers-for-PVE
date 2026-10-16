@@ -139,7 +139,7 @@ Extension files on the PVE node:
 
 The installer adds marked sections to native PVE modules and panel assets. Repair and uninstall transform the current files; they do not restore stale package backups.
 
-The endpoint TCP guard reserves conntrack mark bit `0x80000000` for connections verified against an address-specific listener. It preserves PVE's VMID bits. Custom firewall rules must leave this bit available.
+The endpoint TCP guard uses conntrack label bit 127 for connections verified against an address-specific listener. It leaves PVE's VMID connmark unchanged. Custom firewall rules must leave this label bit available.
 
 DCT files and data:
 
