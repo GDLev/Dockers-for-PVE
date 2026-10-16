@@ -97,6 +97,45 @@ class DataTests(unittest.TestCase):
             management.assert_not_called()
             self.assertTrue((worker.ROOT / ID / 'snapshot-transaction.json').exists())
 
+    def test_delete_keeps_guest_id_reserved_until_native_access_cleanup(self):
+        import subprocess
+        info = {'id': ID, 'node': 'pve', 'vmid': 100, 'name': 'owned', 'status': 'stopped'}
+        metadata = worker.METADATA / (ID + '.json'); metadata.write_text(json.dumps(info))
+        reservation = worker.METADATA / 'ids/100.json'
+        cleanups = []
+        def run(args, **kwargs):
+            if args[0] == 'perl' and any('remove_vm_access' in word for word in args):
+                self.assertTrue(metadata.exists())
+                self.assertTrue(reservation.exists())
+                self.assertEqual(args[-1], '100')
+                cleanups.append(True)
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(worker, 'detail', return_value=info), patch.object(worker, 'remove_network'), \
+                patch.object(worker, 'container_records', return_value=[]), patch.object(worker, 'run', side_effect=run):
+            worker.action(ID, 'pve', 'delete')
+        self.assertEqual(cleanups, [True])
+        self.assertFalse(metadata.exists())
+        self.assertFalse(reservation.exists())
+
+    def test_failed_access_cleanup_retains_guest_id_and_owned_data(self):
+        import subprocess
+        info = {'id': ID, 'node': 'pve', 'vmid': 100, 'name': 'owned', 'status': 'stopped'}
+        metadata = worker.METADATA / (ID + '.json'); metadata.write_text(json.dumps(info))
+        marker = worker.ROOT / ID / 'data'; marker.write_text('keep')
+        def run(args, **kwargs):
+            if args[0] == 'perl' and any('remove_vm_access' in word for word in args):
+                raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(worker, 'detail', return_value=info), patch.object(worker, 'remove_network'), \
+                patch.object(worker, 'container_records', return_value=[]), patch.object(worker, 'run', side_effect=run), \
+                patch.object(worker, 'owned_data_plan', return_value=[]), patch.object(worker, 'remove_owned_data') as remove:
+            with self.assertRaises(subprocess.CalledProcessError):
+                worker.action(ID, 'pve', 'delete', destroy_data=True)
+        remove.assert_not_called()
+        self.assertTrue(metadata.exists())
+        self.assertTrue((worker.METADATA / 'ids/100.json').exists())
+        self.assertEqual(marker.read_text(), 'keep')
+
     def test_attached_and_foreign_disks_never_reach_free(self):
         (worker.METADATA / (ID + '.json')).write_text('{"node":"pve"}')
         with patch.object(worker, 'detail', return_value={}), patch.object(worker, 'storage_config', return_value={'volid': 'local:current', 'unused': ['local:old']}), patch.object(worker, 'pve_storage') as free:
