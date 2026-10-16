@@ -11,13 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ComposeCompatibility(unittest.TestCase):
-    def check_version(self, version, mode):
+    def check_version(self, version, mode, engine="29.9.1", containerd="2.4.2"):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)
             docker = directory / 'docker'
             docker.write_text('#!/bin/sh\nif [ "$1 $2 $3" = "compose version --short" ]; then printf "%s\\n" "$BD_TEST_VERSION"; fi\n')
             docker.chmod(0o755)
-            for name, output in (('dockerd', 'Docker version 29.9.1, build fixture'), ('containerd', 'containerd containerd.io v2.4.2 fixture')):
+            for name, output in (('dockerd', 'Docker version ' + engine + ', build fixture'), ('containerd', 'containerd containerd.io v' + containerd + ' fixture')):
                 helper = directory / name
                 helper.write_text("#!/bin/sh\nprintf '%s\\n' '" + output + "'\n")
                 helper.chmod(0o755)
@@ -44,6 +44,14 @@ class ComposeCompatibility(unittest.TestCase):
             for version in ('v5.6.0', '5.6.0', '5.7.1', '6.0.0'):
                 with self.subTest(mode=mode, version=version):
                     self.assertEqual(self.check_version(version, mode).returncode, 0)
+
+    def test_unsupported_runtime_is_refused_without_host_changes(self):
+        for mode in ('rootful', 'rootless'):
+            for engine, containerd in [('29.9.0', '2.4.2'), ('29.9.1', '2.4.1'), ('30.0.0', '2.4.2'), ('29.9.1', '2.5.0')]:
+                with self.subTest(mode=mode, engine=engine, containerd=containerd):
+                    result = self.check_version('5.6.0', mode, engine, containerd)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn('maintenance window', result.stderr)
 
     def test_package_configuration_never_invokes_apt_for_unavailable_engine(self):
         with tempfile.TemporaryDirectory() as folder:
