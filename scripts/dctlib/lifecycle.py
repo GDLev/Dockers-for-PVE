@@ -88,6 +88,8 @@ def daemon_resume(node):
     if not path.exists():
         return
     with worker.locked():
+        if not path.exists():
+            return
         state = read_json(path)
         if state['boot_id'] != (worker.PROC / 'sys/kernel/random/boot_id').read_text().strip():
             # PVE's startall owns boot ordering. Policies are restored by project Start.
