@@ -28,14 +28,16 @@ class NativeIntegrationTests(unittest.TestCase):
             root = Path(folder)
             (root / ID).mkdir()
             (root / ID / 'compose.runtime.json').write_text(json.dumps({'services': {'web': {}}}))
-            with patch.object(worker, 'ROOT', root), patch.object(worker, 'locked'), \
-                 patch.object(worker, 'detail', return_value={}), patch.object(worker, 'run') as run:
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'METADATA', root / 'metadata'), patch.object(worker, 'locked'), \
+                 patch.object(worker, 'detail', return_value={'id': ID}), patch.object(worker, 'run') as run, \
+                 patch.object(worker, 'container_records', return_value=[]):
                 with self.assertRaisesRegex(ValueError, 'Invalid service'):
                     worker.service_action(ID, 'pve', '--privileged', 'start')
                 run.assert_not_called()
                 with patch.object(worker, 'refresh'):
                     worker.service_action(ID, 'pve', 'web', 'stop')
                 self.assertEqual(run.call_args.args[0][-2:], ['stop', 'web'])
+                self.assertEqual(worker.read_json(worker.METADATA / (ID + '.json'))['status'], 'stopped')
 
     def test_operation_excludes_conflicting_requests_and_retains_safe_error(self):
         with tempfile.TemporaryDirectory() as folder:
