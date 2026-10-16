@@ -106,14 +106,25 @@ sub migrate_ids {
     }
 }
 
+sub read_guest {
+    my ($identifier, $node) = @_;
+    die "Invalid Docker project ID\n" unless defined($identifier) && $identifier =~ /\A([0-9a-f]{32})\z/;
+    $identifier = $1;
+    open(my $fh, '<', "/etc/pve/betterdocker/$identifier.json") or return undef;
+    local $/;
+    my $info = eval { decode_json(<$fh>) };
+    close $fh;
+    die "Invalid DCT metadata\n" unless ref($info) eq 'HASH';
+    return undef unless defined($info->{id}) && $info->{id} eq $identifier &&
+        defined($info->{node}) && $info->{node} eq $node;
+    return $info;
+}
+
 sub task_id {
     my ($identifier, $node) = @_;
-    for my $item (@{summaries()}) {
-        if ($item->{id} eq $identifier && $item->{node} eq $node) {
-            return worker_id($item->{vmid} // $identifier);
-        }
-    }
-    die "Docker project does not exist on this node\n";
+    my $info = read_guest($identifier, $node);
+    die "Docker project does not exist on this node\n" unless $info;
+    return worker_id($info->{vmid} // $identifier);
 }
 
 
@@ -465,7 +476,7 @@ sub method_scope {
 sub request_context {
     my ($identifier, $node) = @_;
     return '' unless defined($identifier);
-    my ($info) = grep { $_->{id} eq $identifier && $_->{node} eq $node } @{summaries()};
+    my $info = read_guest($identifier, $node);
     die "DCT ownership changed\n" unless $info;
     return JSON->new->canonical->encode({ id => $identifier, node => $node,
         vmid => $info->{vmid}, runtime_mode => $info->{runtime_mode} });
