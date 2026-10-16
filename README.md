@@ -19,7 +19,7 @@ Docker runs on the PVE host. A DCT can contain several services under one guest 
 - A Linux bridge and available addresses for the DCT endpoints.
 - Rootless mode also requires cgroup v2, delegated CPU/memory/PID controllers, rootless Docker binaries, and unused `10.240.0.0/16` and `169.254.240.0/30` ranges.
 
-The acceptance baseline is PVE 9.2.21, kernel 7.0.14-23-pve, Docker 29.9.1, containerd 2.4.2, and Compose 5.6.0. Acceptance on this baseline is still in progress. PBS backup/restore uses native PVE storage and was checked with PBS 4.2-0. Other combinations have not been verified.
+The acceptance baseline is PVE 9.2.21, kernel 7.0.14-24-pve, Docker 29.9.1, containerd 2.4.2, and Compose 5.6.0. Acceptance on this baseline is still in progress. PBS backup/restore uses native PVE storage and was checked with PBS 4.2-0. Other combinations have not been verified.
 
 Choose the runtime when installing. Updates and repair preserve the node's mode.
 
