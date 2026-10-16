@@ -1,7 +1,7 @@
 # Proxmox BetterDockers
 
 [![Version 0.20.0](https://img.shields.io/badge/version-0.20.0-blue?style=flat-square)](RELEASE_NOTES.md)
-[![Proxmox VE 9.1 and 9.2](https://img.shields.io/badge/Proxmox_VE-9.1_%7C_9.2-E57000?style=flat-square&logo=proxmox&logoColor=white)](#requirements)
+[![Proxmox VE 9.2](https://img.shields.io/badge/Proxmox_VE-9.2-E57000?style=flat-square&logo=proxmox&logoColor=white)](#requirements)
 
 BetterDockers adds Docker projects to the Proxmox VE web interface as **DCT** guests. Deploy Compose files or images, manage services, configure networking and storage, and use PVE tasks, permissions, snapshots, backups, pools, and cluster operations.
 
@@ -12,14 +12,14 @@ Docker runs on the PVE host. A DCT can contain several services under one guest 
 
 ## Requirements
 
-- Proxmox VE 9.1 or 9.2 on Debian 13. Other PVE versions are not supported.
+- Fully updated Proxmox VE 9.2 on Debian 13, with pve-manager 9.2.21 or newer and a running PVE kernel of at least 7.0.14-23-pve. Update PVE and reboot before installation. Other PVE releases are not supported.
 - Root access to each installation node and internet access for dependencies and images.
-- Docker Engine with Compose 5.6.0 or newer.
+- Docker Engine 29.9.1 or newer within 29.x, containerd 2.4.2 or newer within 2.4.x, and Compose 5.6.0 or newer. Older or unverified runtime series are refused.
 - Install BetterDockers on every cluster node before creating DCTs, including nodes that will not run Docker guests. All nodes must reserve the same guest IDs. Install it on a new node before joining a cluster with DCTs, then run Repair after joining to register the node.
 - A Linux bridge and available addresses for the DCT endpoints.
 - Rootless mode also requires cgroup v2, delegated CPU/memory/PID controllers, rootless Docker binaries, and unused `10.240.0.0/16` and `169.254.240.0/30` ranges.
 
-Validation covers PVE 9.1.1 and 9.2.21, Docker 29.8.2 and 29.9.0, and Compose 5.6.0. PBS backup/restore uses native PVE storage and was checked with PBS 4.2-0. Other combinations have not been verified.
+The acceptance baseline is PVE 9.2.21, kernel 7.0.14-23-pve, Docker 29.9.1, containerd 2.4.2, and Compose 5.6.0. Acceptance on this baseline is still in progress. PBS backup/restore uses native PVE storage and was checked with PBS 4.2-0. Other combinations have not been verified.
 
 Choose the runtime when installing. Updates and repair preserve the node's mode.
 

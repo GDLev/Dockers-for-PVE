@@ -82,12 +82,14 @@ if [[ "$MODE" == rootless ]]; then
         install_rootless_packages
     fi
     require_compose
+    python3 "$(dirname -- "${BASH_SOURCE[0]}")/dctlib/requirements.py" binaries
     echo 'Using rootless Docker binaries; the installer configures the dedicated user service.'
     exit 0
 fi
 [[ "$MODE" == rootful ]] || { echo 'Choose rootful or rootless' >&2; exit 2; }
 if command -v docker >/dev/null && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     require_compose
+    python3 "$(dirname -- "${BASH_SOURCE[0]}")/dctlib/requirements.py" binaries
     echo 'Using the existing Docker Engine and Compose.'
     exit 0
 fi
@@ -112,3 +114,4 @@ systemctl enable --now docker
 docker info >/dev/null
 docker compose version
 require_compose
+python3 "$(dirname -- "${BASH_SOURCE[0]}")/dctlib/requirements.py" binaries

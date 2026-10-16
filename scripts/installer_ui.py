@@ -36,7 +36,7 @@ MESSAGES = {
     'fresh': 'not configured',
     'pending': 'reload pending',
     'unavailable': 'unavailable',
-    'unsupported': 'Supported PVE releases: 9.1 and 9.2.',
+    'unsupported': 'Requires fully updated PVE 9.2, pve-manager >= 9.2.21.',
     'runtime': 'Runtime for new installations',
     'targets': 'Choose target nodes',
     'summary': 'Summary',

@@ -49,10 +49,9 @@ else
 fi
 exec 9>/run/lock/betterdocker-install.lock
 flock -n 9 || { echo 'Another BetterDocker installer is running.' >&2; exit 1; }
-VERSION=$(pveversion)
-[[ "$ACTION" == uninstall || "$ACTION" == finish-restart || ${OPERATION:-} == uninstall || "$VERSION" =~ pve-manager/9\.(1|2)\. ]] || {
-    echo "Unsupported version: $VERSION. Supported PVE releases: 9.1 and 9.2." >&2; exit 1;
-}
+if [[ "$ACTION" != uninstall && "$ACTION" != finish-restart && ${OPERATION:-} != uninstall ]]; then
+    python3 "$PROJECT_DIR/scripts/dctlib/requirements.py" host
+fi
 check_uninstall() {
         python3 "$PROJECT_DIR/scripts/installer.py" --check-uninstall
         # The native parser skips unknown resource types when the provider is
@@ -92,6 +91,7 @@ case "$ACTION" in
                 PREFLIGHT_MODE=$(python3 "$PROJECT_DIR/scripts/runtime_install.py" select "${RUNTIME_ARGUMENTS[@]}")
                 if [[ "$OPERATION" == repair ]]; then
                     check_repair_dependencies
+                    python3 "$PROJECT_DIR/scripts/dctlib/requirements.py" binaries
                     command -v docker >/dev/null || { echo 'Docker is missing; choose Install / Update.' >&2; exit 1; }
                     docker compose version >/dev/null
                     python3 "$PROJECT_DIR/scripts/runtime_install.py" preflight --runtime="$PREFLIGHT_MODE"
@@ -133,6 +133,9 @@ case "$ACTION" in
     *) echo 'Usage: bash start.sh [install|repair|uninstall|check]' >&2; exit 2 ;;
 esac
 RUNTIME_MODE=$(python3 "$PROJECT_DIR/scripts/runtime_install.py" select "${RUNTIME_ARGUMENTS[@]}")
+if command -v dockerd >/dev/null; then
+    python3 "$PROJECT_DIR/scripts/dctlib/requirements.py" binaries
+fi
 if [[ "$ACTION" == install ]]; then
     stage dependencies
     echo 'Updating the package index and installing BetterDocker dependencies.'
@@ -341,6 +344,7 @@ stage runtime
 bash /usr/local/lib/betterdocker/docker-install.sh "$RUNTIME_MODE"
 python3 /usr/local/lib/betterdocker/security_install.py "$RUNTIME_MODE" "$PROJECT_DIR/assets/betterdocker.apparmor"
 python3 /usr/local/lib/betterdocker/runtime_install.py initialize --runtime="$RUNTIME_MODE"
+PYTHONPATH=/usr/local/lib/betterdocker python3 /usr/local/lib/betterdocker/dctlib/requirements.py daemon
 # Refresh existing mount definitions too; repair must fix their boot ordering.
 python3 - <<'PY'
 import sys

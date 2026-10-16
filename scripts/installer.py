@@ -23,6 +23,7 @@ import uuid
 
 from installer_ui import Cancelled, Choice, MESSAGES, Terminal
 from dctlib import integration
+from dctlib.requirements import supported_pve
 
 SOURCE = Path(__file__).resolve().parent.parent
 CACHE = Path('/var/lib/betterdocker/installer')
@@ -336,7 +337,7 @@ check_version(metadata, sys.argv[3] == '1', manifest_digest=digest(sys.argv[1]))
 
 
 def supported(node, action):
-    return not node['error'] and (action in ('uninstall', 'finish') or bool(re.match(r'pve-manager/9\.(1|2)\.', node['version'])))
+    return not node['error'] and (action in ('uninstall', 'finish') or supported_pve(node['version']))
 
 
 def modes_for(nodes, requested=None, fresh_only=False):

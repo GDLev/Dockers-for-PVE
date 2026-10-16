@@ -29,7 +29,7 @@ Package: proxmox-betterdockers
 Version: @VERSION@
 Architecture: all
 Maintainer: BetterDockers contributors
-Depends: pve-manager (>= 9.1), pve-manager (<< 9.3), python3, python3-yaml, openssl, apparmor, e2fsprogs, util-linux, rsync, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, ndisc6, pve-xtermjs, docker-ce | docker.io, docker-compose-plugin (>= 5.6.0) | docker-compose-v2 (>= 5.6.0), uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
+Depends: pve-manager (>= 9.2.21), pve-manager (<< 9.3), python3, python3-yaml, openssl, apparmor, e2fsprogs, util-linux, rsync, coreutils, nftables, iptables, curl, iputils-arping, isc-dhcp-client, ndisc6, pve-xtermjs, docker-ce (>= 5:29.9.1) | docker.io (>= 29.9.1), containerd.io (>= 2.4.2) | containerd (>= 2.4.2), docker-compose-plugin (>= 5.6.0) | docker-compose-v2 (>= 5.6.0), uidmap, dbus-user-session, docker-ce-rootless-extras | rootlesskit, debconf
 Recommends: docker-ce-rootless-extras
 Description: Native Proxmox VE interface for host Docker Compose projects
 CONTROL
