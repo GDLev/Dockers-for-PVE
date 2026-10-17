@@ -4,7 +4,7 @@ Ext.define('PVE.betterdocker.SecurityEdit', {
         const me = this, values = Object.assign({}, me.service.settings, me.service.pending);
         me.title = translate('Edit') + ': ' + translate('Security') + ' - ' + me.service.name;
         me.method = 'PUT';
-        me.items = [{ xtype: 'inputpanel', items: [
+        me.items = [{ xtype: 'inputpanel', cls: 'bd-deployment-form', items: [
             field('user', 'User', values.user || '', { emptyText: translate('Image default'), maxLength: 129 }),
             { xtype: 'proxmoxcheckbox', name: 'read_only', fieldLabel: translate('Read-only filesystem'), value: Boolean(values.read_only), uncheckedValue: 0 },
             field('cap_drop', 'Dropped capabilities', (values.cap_drop || []).join(', '), { emptyText: 'NET_RAW, SYS_ADMIN' }),
@@ -42,7 +42,7 @@ Ext.define('PVE.betterdocker.PolicyEdit', {
             if (me.policyData.running) { return translate('Stop the DCT before changing security policy'); }
             return mode === 'hardened' && me.policyData.incompatible?.length ? me.policyData.incompatible.map(Ext.htmlEncode).join('<br>') : true;
         };
-        me.items = [{ xtype: 'inputpanel', items: [{ xtype: 'combobox', name: 'mode', fieldLabel: translate('Security policy'),
+        me.items = [{ xtype: 'inputpanel', cls: 'bd-deployment-form', items: [{ xtype: 'combobox', name: 'mode', fieldLabel: translate('Security policy'),
             editable: false, queryMode: 'local', disabled: true, allowBlank: false,
             validator: mode => me.policyMessage(mode),
             store: [['standard', translate('Standard')], ['hardened', translate('Hardened')]], value: me.policy }] }];

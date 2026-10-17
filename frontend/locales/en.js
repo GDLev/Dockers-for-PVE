@@ -4,6 +4,12 @@
     PVE.betterdockerLocales = PVE.betterdockerLocales || {};
     PVE.betterdockerLocales.en = {
         messages: {
+            "Disks": "Disks",
+            "CPU": "CPU",
+            "Memory": "Memory",
+            "Disk size (GiB)": "Disk size (GiB)",
+            "Mount point": "Mount point",
+            "Invalid mount point": "Invalid mount point",
             "Preview images": "Preview images",
             "Roll back the recovery snapshot": "Roll back the recovery snapshot",
             "Security": "Security",

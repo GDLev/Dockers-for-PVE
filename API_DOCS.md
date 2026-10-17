@@ -1,6 +1,6 @@
 # HTTP API
 
-BetterDockers extends the PVE API on port 8006. Use HTTPS with the node's trusted certificate and an ordinary PVE API token. Tokens need the same guest, pool and storage permissions as the web interface. With privilege separation enabled, both the user and token must have those permissions.
+Dockers for Proxmox VE extends the PVE API on port 8006. Use HTTPS with the node's trusted certificate and an ordinary PVE API token. Tokens need the same guest, pool and storage permissions as the web interface. With privilege separation enabled, both the user and token must have those permissions.
 
 ```bash
 export PVE_URL=https://pve.example:8006
@@ -19,6 +19,7 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | GET | `/nodes/<node>/docker` | List visible DCTs on a node. |
 | GET | `/nodes/<node>/docker?diagnostics=1` | Administrator diagnostics, including the node's `runtime` and `runtime_health`. Returns an array with one diagnostic object. |
 | POST | `/nodes/<node>/docker` | Create a DCT; send `deployment` as a JSON-encoded string and optional `pool` and `start`. Omitted `start` starts the DCT immediately. |
+| PUT | `/nodes/<node>/docker` | Preview the JSON-encoded `deployment` without creating a guest. Set `resources_only=1` to read service limits before choosing a network; network access is still checked on creation. |
 | GET | `G/management` | Status, services, capabilities and configuration digest. |
 | GET / PUT | `G/config` | Notes, tags, protection, startup and hook configuration. |
 | GET / PUT | `G/network` | Endpoint settings, pending changes and firewall flag. PUT `revert=1` with `digest` to discard pending network changes. |
@@ -40,6 +41,10 @@ Responses use PVE's `{"data": ...}` envelope. The table below uses `G=/nodes/<no
 | GET | `G/rrddata?timeframe=hour&cf=AVERAGE` | Native PVE RRD history. Ranges: hour, day, week, month, year, decade. |
 | DELETE | `G/volumes/<vmid>?volume=<volid>` | Remove one unused or retained DCT disk. |
 | DELETE | `G` | Remove the DCT. Set `destroy-owned-data=1` to remove its owned data; otherwise retain it. Protection and HA restrictions apply. |
+
+Creation also accepts optional `resources` in the deployment object, keyed by Compose service name, with `cpus`, `cpuunits`, `memory`, `swap`, and `disk` overrides. Memory, swap, and writable-layer disk limits use MiB. Omitted values keep the Compose settings. Limits apply per replica. Writable-layer quotas require a supported runtime. Use the settings routes for later changes.
+
+To allocate a managed data disk before the first start, add `data_disk: {"storage":"local-lvm","size_mib":8192}` to the deployment object. Compose must define private writable named volumes or project data directories. For image deployments, include `"target":"/data"` to choose the application mount point. Allocation requires `Datastore.AllocateSpace`. A failed disk setup leaves the guest stopped for recovery.
 
 ## Start a guest and follow its task
 

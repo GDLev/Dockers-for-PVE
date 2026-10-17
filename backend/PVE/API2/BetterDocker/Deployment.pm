@@ -33,6 +33,13 @@ sub register_api {
             }
             return PVE::API2::BetterDocker::restore_backup($param) if $param->{archive};
             die "newid and storage are restore options\n" if defined($param->{newid}) || defined($param->{storage});
+            my $data = decode_json($param->{deployment});
+            if (ref($data->{data_disk}) eq 'HASH') {
+                my $storage = $data->{data_disk}->{storage};
+                die "Select a PVE storage\n" unless defined($storage) && $storage =~ /\A[A-Za-z][A-Za-z0-9_-]*\z/;
+                my $rpc = PVE::RPCEnvironment::get();
+                $rpc->check($rpc->get_user(), '/storage/' . $storage, ['Datastore.AllocateSpace']);
+            }
             my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
             chmod 0600, $path;
             print $fh $param->{deployment}; close $fh;
@@ -43,7 +50,6 @@ sub register_api {
             my $rpcenv = PVE::RPCEnvironment::get();
             my $identifier = PVE::API2::BetterDocker::output(['new-id']); chomp $identifier;
             $identifier = PVE::API2::BetterDocker::worker_id($identifier);
-            my $data = decode_json($param->{deployment});
             my $vmid = eval { PVE::API2::BetterDocker::reserve_guest_id($identifier, $param->{node}, $data->{vmid}); };
             if (my $err = $@) { unlink $path; die $err; }
             my $upid = eval { $rpcenv->fork_worker('betterdockercreate', $vmid, $rpcenv->get_user(), sub {
@@ -92,13 +98,14 @@ sub register_api {
         name => 'preview', path => '', method => 'PUT', protected => 1, proxyto => 'node',
         description => 'Validate Compose and preview non-secret deployment details.',
         parameters => { additionalProperties => 0, properties => { node => $node, pool => { type => 'string', format => 'pve-poolid', optional => 1 },
-            deployment => { type => 'string', maxLength => 262144 }, id => { %$id, optional => 1 } } },
+            deployment => { type => 'string', maxLength => 262144 }, id => { %$id, optional => 1 },
+            resources_only => { type => 'boolean', optional => 1, default => 0 } } },
         returns => { type => 'array', items => { type => 'object' } },
         code => sub {
             my ($p) = @_;
             my ($fh, $path) = tempfile('betterdocker-XXXXXX', DIR => '/run', UNLINK => 0);
             chmod 0600, $path; print $fh $p->{deployment}; close $fh;
-            my $result = eval { decode_json(PVE::API2::BetterDocker::output(['preview', $path, defined($p->{id}) ? $p->{id} : ()])); };
+            my $result = eval { decode_json(PVE::API2::BetterDocker::output(['preview', $path, $p->{id} // '', $p->{resources_only} ? 'resources' : 'full'])); };
             my $err = $@; unlink $path; die $err if $err;
             return $result;
         },

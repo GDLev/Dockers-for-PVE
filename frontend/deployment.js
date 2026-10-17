@@ -4,6 +4,7 @@ const deployment = values => {
         hwaddr: values.hwaddr || '', mtu: values.mtu || '', firewall: Number(values.firewall) === 1 ? 1 : 0 };
     if (values.vmid) { common.vmid = Number(values.vmid); }
     if (values.interfaces) { common.interfaces = values.interfaces; }
+    if (values.data_disk) { common.data_disk = values.data_disk; }
     return Object.assign(common, values.mode === 'compose' ? { compose: values.compose } :
         { image: values.image, ports: values.ports || '' });
 };
@@ -31,8 +32,9 @@ Ext.define('PVE.betterdocker.CreateWizard', {
         const defaults = me.deployment || {};
         if (typeof window.innerHeight === 'number') { if (typeof me.height === 'number') { me.height = Math.min(me.height, window.innerHeight - 40); } me.width = Math.min(me.width, window.innerWidth - 40); }
         if (me.projectId) { me.title = 'Edit Docker deployment'; }
+        const resourcePanels = me.projectId ? [] : creationResourcePanels(me);
         me.items = [{
-            xtype: 'inputpanel', title: translate('General'), onlineHelp: 'chapter_system_administration',
+            xtype: 'inputpanel', cls: 'bd-deployment-form', title: translate('General'), onlineHelp: 'chapter_system_administration',
             column1: [
                 field('nodename', 'Node', me.nodename || Proxmox.NodeName, { xtype: 'pveNodeSelector', allowBlank: false, readOnly: Boolean(me.projectId),
                     listeners: { change: function (_, value) {
@@ -40,7 +42,7 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                         const bridge = wizard && wizard.down('[name=bridge]');
                         if (bridge) { bridge.setNodename(value); }
                     } } }),
-                field('vmid', 'DCT ID', defaults.vmid || me.vmid || '', { xtype: 'pveGuestIDSelector',
+                field('vmid', 'DCT ID', defaults.vmid || me.vmid || '', { xtype: 'pveBetterDockerGuestIDSelector',
                     guestType: 'docker', loadNextFreeID: !defaults.vmid && !me.vmid && !me.projectId,
                     validateExists: me.projectId ? undefined : false, allowBlank: false, readOnly: Boolean(me.projectId) }),
                 field('name', 'Project name', defaults.name || '', { allowBlank: false, readOnly: Boolean(me.projectId),
@@ -55,7 +57,7 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                     listeners: { change: updateMode, afterrender: updateMode } }),
             ],
         }, {
-            xtype: 'inputpanel', title: translate('Deployment'), onlineHelp: 'chapter_system_administration', scrollable: true,
+            xtype: 'inputpanel', cls: 'bd-deployment-form', title: translate('Deployment'), onlineHelp: 'chapter_system_administration', scrollable: true,
             items: [
                 { xtype: 'container', itemId: 'composeFields', layout: 'anchor', items: [
                     field('compose', 'Compose YAML', defaults.compose || '', { xtype: 'pveBetterDockerCodeArea', height: 230, allowBlank: false, maxLength: 240000,
@@ -72,8 +74,8 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                 field('environment', '.env', defaults.environment || '', { xtype: 'pveBetterDockerCodeArea', height: 65, maxLength: 16000 }),
                 importFile('Load .env', 'environment', 16000),
             ],
-        }, {
-            xtype: 'inputpanel', title: translate('Network'), onlineHelp: 'chapter_system_administration',
+        }, ...resourcePanels, {
+            xtype: 'inputpanel', cls: 'bd-deployment-form', title: translate('Network'), onlineHelp: 'chapter_system_administration',
             column1: [
                 field('bridge', 'Bridge', defaults.bridge || 'vmbr0', { xtype: 'pveBetterDockerBridgeSelector',
                     nodename: me.nodename || Proxmox.NodeName, bridgeType: 'any_bridge', allowBlank: false, readOnly: Boolean(me.projectId) }),
@@ -118,6 +120,7 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                     ['Firewall', Proxmox.Utils.format_boolean(Number(values.firewall) === 1)],
                 ];
                 if (values.pool) { data.push(['Resource Pool', values.pool]); }
+                if (!me.projectId) { data.push(...creationResourceReview(me)); }
                 if (values.mode === 'image') { data.push(['Image', values.image], ['Published ports', values.ports || translate('None')]); }
                 else { data.push(['Published ports', translate('Read from Compose YAML')]); }
                 // Compose and .env may contain secrets; keep them out of the review grid.
@@ -131,11 +134,20 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                 // The create endpoint validates before allocating a VMID or starting its task.
                 request({ url: '/nodes/' + encodeURIComponent(values.nodename) + '/docker' + (wizard.projectId ? '/' + wizard.projectId : ''),
                     method: wizard.projectId ? 'PUT' : 'POST',
-                    params: Object.assign({ deployment: JSON.stringify(deployment(Object.assign({}, values, me.projectId && defaults.interfaces ? { interfaces: defaults.interfaces } : {}))) }, !wizard.projectId ? { start: Number(values.start) === 1 ? 1 : 0, ...(values.pool ? { pool: values.pool } : {}) } : {}), waitMsgTarget: wizard,
+                    params: Object.assign({ deployment: JSON.stringify(Object.assign(deployment(Object.assign({}, values, me.projectId && defaults.interfaces ? { interfaces: defaults.interfaces } : {})), me.projectId ? {} : me.creationOptions())) }, !wizard.projectId ? { start: Number(values.start) === 1 ? 1 : 0, ...(values.pool ? { pool: values.pool } : {}) } : {}), waitMsgTarget: wizard,
                     success: response => { task(response); wizard.close(); } });
             },
         }];
         me.callParent();
+        if (!me.projectId) {
+            me.query('field').filter(input => ['nodename', 'pool', 'mode', 'compose', 'image', 'ports', 'environment'].includes(input.name)).forEach(input => {
+                input.on('change', () => {
+                    me.creationPlanToken = null;
+                    me.creationPlanKey = null;
+                    me.down('[name=creation_ready]')?.setValue('');
+                });
+            });
+        }
         const helpButton = me.down('#help');
         if (helpButton) { helpButton.setHandler(help); }
         [['next', 'Next'], ['back', 'Back'], ['submit', me.projectId ? 'Apply' : 'Finish']].forEach(([id, text]) => {
@@ -151,7 +163,7 @@ Ext.define('PVE.betterdocker.DeploymentEdit', {
         if (typeof window.innerHeight === 'number') { if (typeof me.height === 'number') { me.height = Math.min(me.height, window.innerHeight - 40); } me.width = Math.min(me.width, window.innerWidth - 40); }
         me.title = translate('Edit deployment') + ': DCT ' + me.vmid;
         me.url = '/nodes/' + encodeURIComponent(me.nodename) + '/docker/' + me.projectId;
-        me.items = [{ xtype: 'inputpanel', items: [
+        me.items = [{ xtype: 'inputpanel', cls: 'bd-deployment-form', items: [
             field('mode', 'Deploy from', defaults.mode, { xtype: 'combobox', editable: false, queryMode: 'local',
                 store: [['compose', 'Docker Compose'], ['image', 'Docker image']], listeners: { change: updateMode, afterrender: updateMode } }),
             { xtype: 'container', itemId: 'composeFields', layout: 'anchor', items: [

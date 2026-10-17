@@ -256,6 +256,16 @@ const applyGuestAction = (button, action) => {
 };
 // Use the installed toolkit's renderer, model and DiffStore, as the LXC grids do.
 PVE.Utils.volume_is_dct_backup = data => /(?:^|:)backup\/(?:vzdump-docker-|host\/dct-[1-9][0-9]{2,8}\/)/.test(data?.volid || '');
+Ext.define('PVE.betterdocker.GuestIDSelector', {
+    extend: 'PVE.form.GuestIDSelector', alias: 'widget.pveBetterDockerGuestIDSelector',
+    setRawValue: function (value) {
+        const result = this.callParent(arguments);
+        // The native next-ID loader sets only the raw value after initial validation.
+        if (this.rendered && this.loadNextFreeID) { this.checkChange(); }
+        return result;
+    },
+});
+
 Ext.define('PVE.betterdocker.Table', {
     extend: 'Ext.grid.Panel', alias: 'widget.pveBetterDockerTable',
     stateful: true, viewConfig: { preserveScrollOnRefresh: true, loadMask: false },

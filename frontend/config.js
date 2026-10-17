@@ -214,7 +214,7 @@ Ext.define('PVE.betterdocker.Config', {
                     title: translate('Edit data disk'), url: url + '/storage-limit', method: 'PUT', fieldDefaults: { labelWidth: 120 },
                     onlineHelp: 'chapter_system_administration', listeners: { afterrender: configureHelp },
                     showTaskViewer: true,
-                    items: [{ xtype: 'inputpanel', items: [
+                    items: [{ xtype: 'inputpanel', cls: 'bd-deployment-form', items: [
                         { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Storage'), nodename: info.node,
                             storageContent: 'rootdir', value: current.storage?.storage || undefined, allowBlank: Boolean(existing),
                             listeners: { afterrender: selector => {
@@ -262,7 +262,7 @@ Ext.define('PVE.betterdocker.Config', {
                     const digest = current.digest;
                     const win = Ext.create('Proxmox.window.Edit', {
                         subject: gettext('Hookscript'), url: url + '/config', method: 'PUT',
-                        items: [{ xtype: 'inputpanel', items: [
+                        items: [{ xtype: 'inputpanel', cls: 'bd-deployment-form', items: [
                             { xtype: 'pveStorageSelector', name: 'storage', nodename: info.node,
                                 storageContent: 'snippets', fieldLabel: gettext('Storage'), submitValue: false,
                                 allowBlank: false, value: current.hookscript?.split(':')[0],
@@ -309,7 +309,7 @@ Ext.define('PVE.betterdocker.Config', {
                     Object.assign({ xtype: 'numberfield', minValue: 0, maxValue: maximum, allowDecimals: false, allowBlank: false }, extra));
                 let fields = group === 'resources' ? [
                     numeric('memory', 'Memory (MiB)', 1048576, { step: 32 }), numeric('swap', 'Swap (MiB)', 1048576, { minValue: -1, step: 32 }),
-                    numeric('cpus', 'CPU limit', 8192, { allowDecimals: true, decimalPrecision: 3, step: 1 }),
+                    numeric('cpus', 'CPU limit', 8192, { emptyText: '1', allowDecimals: true, decimalPrecision: 3, step: 1 }),
                     numeric('disk', 'Container disk (MiB)', 1048576, { disabled: !current.storage?.rootfs?.supported }),
                     numeric('cpuunits', 'CPU units', 262144), numeric('pids', 'PID limit', 4194304),
                 ] : group === 'dns' ? [
@@ -333,8 +333,8 @@ Ext.define('PVE.betterdocker.Config', {
                 const fieldScope = { memory: 'memory', swap: 'memory', cpus: 'cpu', cpuunits: 'cpu', pids: 'options', disk: 'disk', dns: 'network', dns_search: 'network', restart: 'options' };
                 fields = fields.filter(item => !item.name || can(fieldScope[item.name]));
                 const cpu = group === 'resources' && fields.some(item => item.name === 'cpus');
-                const input = cpu ? { xtype: 'inputpanel', column1: fields.filter(item => item.name !== 'cpuunits'), column2: [],
-                    advancedColumn2: fields.filter(item => item.name === 'cpuunits') } : { xtype: 'inputpanel', items: fields };
+                const input = cpu ? { xtype: 'inputpanel', cls: 'bd-deployment-form', column1: fields.filter(item => item.name !== 'cpuunits'), column2: [],
+                    advancedColumn1: fields.filter(item => item.name === 'cpuunits') } : { xtype: 'inputpanel', cls: 'bd-deployment-form', items: fields };
                 const subject = group === 'resources' ? selectedKey === 'Memory' || selectedKey === 'Swap' ? 'Memory' : cpu ? 'CPU' : selectedKey : { dns: 'DNS', options: 'Options' }[group];
                 const win = Ext.create('Proxmox.window.Edit', { title: translate('Edit') + ': ' + translate(subject) + ' - ' + active.name,
                     url: url + '/settings', method: 'PUT', showReset: true, fieldDefaults: { labelWidth: group === 'resources' ? 120 : 100 },

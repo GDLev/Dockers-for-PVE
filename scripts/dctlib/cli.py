@@ -127,7 +127,8 @@ def main():
     elif args.operation == 'logs':
         print(projects.project_logs(*values), end='')
     elif args.operation == 'preview':
-        print(json.dumps(projects.preview(projects.read_json(Path(values[0])), values[1] if len(values) > 1 else None)))
+        print(json.dumps(projects.preview(projects.read_json(Path(values[0])), values[1] if len(values) > 1 and values[1] else None,
+                                          resources_only=len(values) > 2 and values[2] == 'resources')))
     elif args.operation == 'tags':
         print(json.dumps(projects.project_tags(*values)))
     elif args.operation == 'service-action':

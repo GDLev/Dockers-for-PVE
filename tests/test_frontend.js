@@ -60,14 +60,14 @@ vm.runInNewContext(frontendSource, context);
 const wizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(wizard);
 assert(wizard.initialized);
-assert.deepEqual(Array.from(wizard.items, item => item.title), ['General', 'Deployment', 'Network', 'Confirm']);
+assert.deepEqual(Array.from(wizard.items, item => item.title), ['General', 'Deployment', 'Disks', 'CPU', 'Memory', 'Network', 'Confirm']);
 const fields = [...wizard.items[0].column1, ...wizard.items[0].column2, ...wizard.items[1].items];
 assert.equal(fields.find(field => field.name === 'mode').value, 'compose');
 assert.equal(fields.find(field => field.itemId === 'imageFields').hidden, true);
 assert.equal(fields.find(field => field.itemId === 'imageFields').items[0].disabled, true);
 assert(!JSON.stringify(wizard.items).includes('ostemplate'));
 assert(!JSON.stringify(wizard.items).includes('pveLxc'));
-const network = wizard.items[2];
+const network = wizard.items.find(item => item.title === 'Network');
 assert.equal(network.column1.find(field => field.name === 'bridge').fieldLabel, 'Bridge');
 assert(network.column1.find(field => field.name === 'hwaddr'));
 assert(network.advancedColumn1.find(field => field.name === 'mtu'));
@@ -392,12 +392,102 @@ for (const [operation, label] of Object.entries({ create: 'Create', start: 'Star
 assert(!context.taskDescriptions.betterdocker('', 'a'.repeat(32)).includes('a'.repeat(32)));
 assert(!context.taskDescriptions.betterdockerconsole('', 'a'.repeat(32)).includes('a'.repeat(32)));
 const guestID = wizard.items[0].column1.find(item => item.name === 'vmid');
-assert.equal(guestID.xtype, 'pveGuestIDSelector');
+assert.equal(guestID.xtype, 'pveBetterDockerGuestIDSelector');
 assert.equal(guestID.guestType, 'docker');
 assert.equal(guestID.loadNextFreeID, true);
 assert.equal(guestID.validateExists, false);
 assert.equal(guestID.allowBlank, false);
+const guestIDSelector = definitions['PVE.betterdocker.GuestIDSelector'];
+assert.equal(guestIDSelector.extend, 'PVE.form.GuestIDSelector');
+for (const [rendered, loadNextFreeID] of [[false, true], [true, true], [true, false]]) {
+    const field = { rendered, loadNextFreeID, rawValue: '', invalid: true, changes: 0,
+        callParent(args) { this.rawValue = String(args[0]); return this.rawValue; },
+        checkChange() { this.changes++; this.invalid = this.rawValue === ''; } };
+    assert.equal(guestIDSelector.setRawValue.call(field, 100), '100');
+    assert.equal(field.changes, Number(rendered && loadNextFreeID));
+    if (rendered && loadNextFreeID) { assert.equal(field.invalid, false); }
+}
 console.log('Readable DCT task descriptions and numeric ID wizard passed');
+
+// Creation reads Compose defaults once, keeps service edits separate, and sends
+// resource/disk options in the same create request.
+{
+    const savedAPI = context.Proxmox.Utils.API2Request, calls = [];
+    context.Proxmox.Utils.API2Request = options => calls.push(options);
+    const values = { nodename: 'pve', name: 'initial-limits', mode: 'compose', compose: 'services: {}', bridge: 'vmbr0', ipv4mode: 'dhcp' };
+    const panels = new Map();
+    let invalidateResources;
+    const resourceWizard = { callParent, query: () => [{ name: 'compose', on(event, callback) { invalidateResources = callback; } }],
+        getValues: () => ({ ...values }), down: id => panels.get(id) || null };
+    definitions['PVE.betterdocker.CreateWizard'].initComponent.call(resourceWizard);
+    function panelFrom(config) {
+        const panel = { ...config, loadingResources: false };
+        const inputs = [...config.column1, ...config.column2, ...(config.advancedColumn1 || []), ...(config.advancedColumn2 || [])].map(config => ({
+            ...config, currentValue: config.value ?? false, storeRows: [],
+            up: () => panel, getValue() { return this.currentValue; },
+            setValue(value) { const old = this.currentValue; this.currentValue = value; if (old !== value) { this.listeners?.change?.(this, value); } },
+            setDisabled(value) { this.disabled = value; }, setHidden(value) { this.hidden = value; },
+            setEmptyText(value) { this.emptyText = value; }, setNodename(value) { this.nodename = value; },
+            getStore() { return { loadData: rows => { this.storeRows = rows; } }; },
+        }));
+        panel.query = () => inputs.filter(input => input.creationResource);
+        panel.down = selector => {
+            const [, key, value] = selector.match(/\[(\w+)=(.+)\]/);
+            return inputs.find(input => input[key] === value);
+        };
+        panels.set('#' + config.itemId, panel); return panel;
+    }
+    assert.equal(Object.getPrototypeOf(resourceWizard.creationResources), null, 'service names cannot inherit Object prototype entries');
+    const disks = panelFrom(resourceWizard.items[2]), cpu = panelFrom(resourceWizard.items[3]), memory = panelFrom(resourceWizard.items[4]);
+    disks.listeners.show(disks);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].params.resources_only, 1);
+    assert.equal(JSON.parse(calls[0].params.deployment).ipv4mode, 'none', 'resource preview does not require completing Network first');
+    const plan = [{ service: 'web', resources: { cpus: 1, memory: 128, swap: 64 }, rootfs_quota: false },
+        { service: 'db', resources: { cpus: 2, memory: 256, swap: 0 }, rootfs_quota: false }];
+    calls[0].success({ result: { data: plan } });
+    assert.equal(disks.down('[name=creation_ready]').getValue(), 'ready');
+    assert(disks.down('[creationResource=disk]').disabled);
+    cpu.listeners.show(cpu);
+    assert.equal(cpu.down('[creationResource=cpus]').getValue(), 1);
+    cpu.down('[creationResource=cpus]').setValue(.75);
+    memory.listeners.show(memory);
+    assert.equal(memory.down('[creationResource=memory]').getValue(), 128);
+    memory.down('[creationResource=memory]').setValue(96);
+    memory.down('[itemId=creationService]').setValue('db');
+    assert.equal(memory.down('[creationResource=memory]').getValue(), 256);
+    memory.down('[creationResource=memory]').setValue(192);
+    assert.deepEqual(JSON.parse(JSON.stringify(resourceWizard.creationOptions())), { resources: { web: { cpus: .75, memory: 96 }, db: { memory: 192 } } });
+    disks.down('[name=creation_disk_enabled]').setValue(true);
+    disks.down('[name=creation_storage]').setValue('local-lvm');
+    assert.equal(resourceWizard.creationOptions().data_disk.size_mib, 8192);
+    assert.equal(calls.length, 1, 'moving between resource tabs reuses unchanged preview');
+    values.mode = 'image'; values.image = 'busybox';
+    disks.listeners.show(disks);
+    invalidateResources();
+    calls[1].success({ result: { data: [{ service: 'app', resources: { cpus: 1, memory: 512, swap: 0 }, rootfs_quota: false }] } });
+    assert.equal(disks.down('[name=creation_ready]').getValue(), '', 'late preview cannot accept a source edited during its request');
+    disks.listeners.show(disks);
+    calls[2].success({ result: { data: [{ service: 'app', resources: { cpus: 1, memory: 512, swap: 0 }, rootfs_quota: false }] } });
+    assert.equal(Object.getPrototypeOf(resourceWizard.creationResources), null);
+    assert.equal(Object.keys(resourceWizard.creationOptions().resources || {}).length, 0, 'new source cannot inherit stale service overrides');
+    assert.equal(disks.down('[name=creation_target]').hidden, false);
+    assert.equal(resourceWizard.creationOptions().data_disk.target, '/data');
+    values.image = 'alpine';
+    disks.listeners.show(disks);
+    calls[3].success({ result: { data: [{ service: 'app', resources: { cpus: 0, memory: 0, swap: 0 },
+        resource_defaults: ['cpus', 'memory', 'swap'], rootfs_quota: false }] } });
+    cpu.listeners.show(cpu); memory.listeners.show(memory);
+    assert.equal(cpu.down('[creationResource=cpus]').getValue(), 1);
+    assert.equal(memory.down('[creationResource=memory]').getValue(), 512);
+    assert.equal(memory.down('[creationResource=swap]').getValue(), 512);
+    assert.deepEqual(JSON.parse(JSON.stringify(resourceWizard.creationOptions().resources)), { app: { cpus: 1, memory: 512, swap: 512 } });
+    cpu.down('[creationResource=cpus]').setValue(0);
+    assert.equal(resourceWizard.creationOptions().resources.app.cpus, undefined, 'explicit unlimited replaces the creation default');
+    context.Proxmox.Utils.API2Request = savedAPI;
+}
+console.log('Creation resources preserve Compose defaults, isolate services, refresh source changes and include managed disk options');
+
 
 configPanel.pveSelNode.data.status = 'running';
 for (const [handler, operation] of [
@@ -553,7 +643,7 @@ context.gettext = value => ({ Summary: 'Podsumowanie', Network: 'Sieć' })[value
 vm.runInNewContext(frontendSource, context);
 const polishWizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(polishWizard);
-assert.deepEqual(Array.from(polishWizard.items, item => item.title), ['Główne', 'Wdrożenie', 'Sieć', 'Potwierdź']);
+assert.deepEqual(Array.from(polishWizard.items, item => item.title), ['Główne', 'Wdrożenie', 'Dyski', 'CPU', 'Pamięć', 'Sieć', 'Potwierdź']);
 const polishPanel = { pveSelNode: { data: { id: 'docker/' + 'a'.repeat(32), node: 'pve', name: 'web', vmid: 103 } }, callParent, on() {}, down() { return null; } };
 definitions['PVE.betterdocker.Config'].initComponent.call(polishPanel);
 assert.equal(polishPanel.title, "DCT 103 (web) na węźle 'pve'");
@@ -611,7 +701,7 @@ locales.pl.messages.Deployment = savedPolishDeployment;
 context.gettext = value => value === 'Summary' ? 'Zusammenfassung' : value;
 const otherLanguageWizard = { callParent, down: () => null, query: () => [] };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(otherLanguageWizard);
-assert.deepEqual(Array.from(otherLanguageWizard.items, item => item.title), ['General', 'Deployment', 'Network', 'Confirm']);
+assert.deepEqual(Array.from(otherLanguageWizard.items, item => item.title), ['General', 'Deployment', 'Disks', 'CPU', 'Memory', 'Network', 'Confirm']);
 console.log('Separate language catalogs, native translation priority and English fallback passed');
 
 // Missing capacities must not turn measured usage into zero or a false percentage.
@@ -1072,7 +1162,7 @@ assert.equal(capturedEditors.length, beforeDeniedEdit, 'CPU privilege must not o
 resourceRows.listeners.itemdblclick(null, { get: () => 'CPU limit' });
 const cpuInput = capturedEditors.at(-1).items[0];
 assert.equal(cpuInput.column1.map(item => item.name).join(','), 'cpus');
-assert.equal(cpuInput.advancedColumn2.map(item => item.name).join(','), 'cpuunits');
+assert.equal(cpuInput.advancedColumn1.map(item => item.name).join(','), 'cpuunits');
 assert.equal(capturedEditors.at(-1).fieldDefaults.labelWidth, 120);
 assert.equal(capturedEditors.at(-1).width, undefined, 'native two-column sizing owns CPU width');
 const notesView = { canEdit: false, callParent() { throw new Error('read-only Notes editor opened'); } };
@@ -1578,8 +1668,8 @@ let wizardValid = true, wizardClosed = 0, reviewValues;
 const formValues = { nodename: 'pve', vmid: 122, name: 'forms-test', mode: 'compose', bridge: 'vmbr0',
     ipv4mode: 'dhcp', firewall: '0', mtu: 1400, start: '0', pool: 'test',
     compose: 'services: {app: {image: busybox, environment: {TOKEN: secret-value}}}', environment: 'TOKEN=secret-value' };
-const formWizard = { callParent, getValues: () => ({ ...formValues }), close() { wizardClosed++; },
-    down(id) { return id === 'form' ? { getForm: () => ({ isValid: () => wizardValid }) } :
+const formWizard = { callParent, query: () => [], getValues: () => ({ ...formValues }), close() { wizardClosed++; },
+    down(id) { return id === '#creationDisks' ? null : id === 'form' ? { getForm: () => ({ isValid: () => wizardValid }) } :
         id === '#help' ? { setHandler() {} } : { setText(text) { wizardLabels[id] = text; } }; } };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(formWizard);
 assert.equal(wizardLabels['#submit'], 'Finish');
@@ -1641,7 +1731,7 @@ context.Ext.Msg.alert = (title, message) => acceptanceAlerts.push({ title, messa
 context.Ext.create = (name, options) => {
     const events = {}, values = { memory: 128, swap: 0, dns: '1.1.1.1', dns_search: 'example.test', restart: 'no' };
     const input = options.items[0], names = [...(input.items || []), ...(input.column1 || []),
-        ...(input.column2 || []), ...(input.advancedColumn2 || [])].filter(item => item.name).map(item => item.name);
+        ...(input.column2 || []), ...(input.advancedColumn1 || []), ...(input.advancedColumn2 || [])].filter(item => item.name).map(item => item.name);
     const form = { isValid: () => true, isDirty: () => true,
         getValues: () => Object.fromEntries(names.map(name => [name, values[name]])) };
     const win = Object.assign({ values, formPanel: { getForm: () => form },

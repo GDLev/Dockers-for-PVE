@@ -6,7 +6,7 @@ Ext.define('PVE.betterdocker.Migrate', {
         me.title = translate('Migrate') + ' DCT ' + PVE.Utils.getFormattedGuestIdentifier(me.vmid, me.vmname);
         me.submitText = translate('Migrate');
         me.url = '/api2/extjs/nodes/' + encodeURIComponent(me.nodename) + '/docker/' + me.projectId + '/migrate';
-        me.items = [{ xtype: 'inputpanel', items: [
+        me.items = [{ xtype: 'inputpanel', cls: 'bd-deployment-form', items: [
             { xtype: 'pveNodeSelector', name: 'target', fieldLabel: translate('Target node'), allowBlank: false,
                 disallowedNodes: [me.nodename], onlineValidator: true },
             { xtype: 'pveStorageSelector', name: 'storage', fieldLabel: translate('Target Storage'), storageContent: 'rootdir',
@@ -38,9 +38,9 @@ Ext.define('PVE.betterdocker.StateRestore', {
             PVE.Utils.getFormattedGuestIdentifier(me.vmid, me.guestname) : translate('Restore') + ': DCT';
         me.url = '/api2/extjs/nodes/' + encodeURIComponent(me.nodename) + '/docker' +
             (clone ? '/' + me.projectId + '/clone' : '');
-        me.items = [{ xtype: 'inputpanel',
+        me.items = [{ xtype: 'inputpanel', cls: 'bd-deployment-form',
             column1: [
-                { xtype: 'pveGuestIDSelector', name: 'newid', fieldLabel: translate('DCT ID'), guestType: 'docker',
+                { xtype: 'pveBetterDockerGuestIDSelector', name: 'newid', fieldLabel: translate('DCT ID'), guestType: 'docker',
                     loadNextFreeID: true, allowBlank: false },
                 field('name', 'Name', me.guestname || '', { allowBlank: false, maxLength: 63 }),
                 { xtype: 'pveStorageSelector', name: 'storage', nodename: me.nodename, fieldLabel: translate('Storage'),
