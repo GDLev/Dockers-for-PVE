@@ -226,6 +226,19 @@ definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, sum
 assert.equal(summaryFields['#memoryValue'].usage, 0.25);
 assert.equal(summaryFields['#cpuValue'].usage, 0.25);
 assert(summaryFields.title.includes('Uptime: 60'));
+assert.equal(summaryFields['#ipValue'].text, '192.0.2.32');
+for (const [ipv4mode, status, address, expected] of [
+    ['none', 'running', '', ''],
+    ['static', 'running', '', ''],
+    [undefined, 'running', '', ''],
+    ['dhcp', 'running', '', 'Waiting for DHCP'],
+    ['dhcp', 'stopped', '', ''],
+    ['dhcp', 'running', '192.0.2.32', '192.0.2.32'],
+    ['none', 'running', '', ''],
+]) {
+    definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, { ...summaryData, ipv4mode, status, address });
+    assert.equal(summaryFields['#ipValue'].text, expected, `Summary IP for ${ipv4mode}/${status}/${address}`);
+}
 definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, { ...summaryData, ha: { managed: 1, state: 'started' } });
 assert.equal(summaryFields['#haValue'].text, 'started');
 definitions['PVE.betterdocker.Summary'].updateSnapshot.call(renderedSummary, { ...summaryData, ha_recovery: { source: 'other' }, metrics: {} });

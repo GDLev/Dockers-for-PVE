@@ -60,7 +60,8 @@ Ext.define('PVE.betterdocker.Summary', {
             me.down('#' + key + 'Value').setPrintBar(key !== 'disk' && available && maximum > 0);
             update(key + 'Value', text, available && maximum > 0 ? Math.min(1, used / maximum) : 0);
         });
-        update('ipValue', Ext.htmlEncode(data.address || translate('Waiting for DHCP')));
+        const waitingForDHCP = data.ipv4mode === 'dhcp' && data.status === 'running';
+        update('ipValue', Ext.htmlEncode(data.address || (waitingForDHCP ? translate('Waiting for DHCP') : '')));
     },
     initComponent: function () {
         const me = this;
