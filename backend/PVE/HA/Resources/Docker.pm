@@ -19,7 +19,7 @@ sub config {
         or die "DCT $vmid does not exist\n";
     my $id = $entry->{id};
     die "Invalid DCT identifier\n" unless $id =~ /\A([0-9a-f]{32})\z/;
-    return decode_json(PVE::Tools::file_get_contents("/etc/pve/betterdocker/$1.json"));
+    return decode_json(PVE::Cluster::get_config("betterdocker/$1.json"));
 }
 sub config_file { my $info = $_[0]->config($_[1]); return "/etc/pve/betterdocker/$info->{id}.json"; }
 sub exists {
@@ -124,10 +124,10 @@ sub hook {
         # Called exclusively by the native CRM after successful fencing.
         PVE::Cluster::cfs_lock_file('datacenter.cfg', 10, sub {
             my $path = "/etc/pve/betterdocker/$info->{id}.json";
-            my $current = decode_json(PVE::Tools::file_get_contents($path));
+            my $current = decode_json(PVE::Cluster::get_config("betterdocker/$info->{id}.json"));
             die "HA source ownership changed\n" unless $current->{node} eq $source;
             my $ownerpath = "/etc/pve/betterdocker/ids/$info->{vmid}.json";
-            my $owner = decode_json(PVE::Tools::file_get_contents($ownerpath));
+            my $owner = decode_json(PVE::Cluster::get_config("betterdocker/ids/$info->{vmid}.json"));
             die "HA reservation changed\n" unless $owner->{id} eq $info->{id} && $owner->{node} eq $source;
             $current->{ha_recovery} = { source => $source, token => PVE::Tools::file_get_contents('/proc/sys/kernel/random/uuid') };
             $current->{node} = $target;

@@ -28,6 +28,11 @@ if (defined($p->{operation_fd})) {
 }
 sub read_json {
     my ($path) = @_;
+    if ($path =~ m!\A/etc/pve/(betterdocker/(?:[0-9a-f]{32}|ids/[1-9][0-9]{2,8})\.json)\z!) {
+        my $text = PVE::Cluster::get_config($1);
+        die "$path: metadata does not exist\n" unless defined($text);
+        return decode_json($text);
+    }
     open(my $fh, '<', $path) or die "$path: $!\n";
     return decode_json(<$fh>);
 }
@@ -54,8 +59,9 @@ if (defined($p->{metadata})) {
     my $owner = read_json("/etc/pve/betterdocker/ids/" . read_json("$metadata/$id.json")->{vmid} . '.json');
     die "Transfer ownership changed\n" unless $owner->{id} eq $id;
 }
-my $exists = -f "$metadata/$id.json";
-my $info = read_json($exists ? "$metadata/$id.json" : "$base/storage.json");
+my $public = $metadata eq '/etc/pve/betterdocker' ? PVE::Cluster::get_config("betterdocker/$id.json") : undef;
+my $exists = $metadata eq '/etc/pve/betterdocker' ? defined($public) : -f "$metadata/$id.json";
+my $info = defined($public) ? decode_json($public) : read_json($exists ? "$metadata/$id.json" : "$base/storage.json");
 # A migrated guest can leave a local owned disk behind. Only explicit cleanup may use its local state.
 if ($exists && $info->{node} ne PVE::INotify::nodename() && $p->{action} =~ /\Afree(?:-check)?\z/) {
     my $local = read_json("$base/storage.json");

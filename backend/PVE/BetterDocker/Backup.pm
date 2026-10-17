@@ -5,6 +5,7 @@ use warnings;
 use JSON qw(decode_json);
 use POSIX qw(strftime);
 use PVE::Storage;
+use PVE::Cluster;
 use PVE::APIClient::LWP;
 use PVE::AccessControl;
 use PVE::Storage::PBSPlugin;
@@ -39,10 +40,7 @@ sub inventory {
     if (opendir(my $dh, $directory)) {
         while (my $file = readdir($dh)) {
             next unless $file =~ /\A([0-9a-f]{32}\.json)\z/;
-            my $path = "$directory/$1";
-            open(my $fh, '<', $path) or die "Cannot read DCT inventory: $!\n";
-            local $/;
-            my $info = decode_json(<$fh>);
+            my $info = decode_json(PVE::Cluster::get_config("betterdocker/$1"));
             next unless ($info->{vmid} // '') =~ /\A([1-9][0-9]{2,8})\z/;
             my $vmid = $1;
             die "Guest ID collision for DCT $vmid\n" if $result->{ids}->{$vmid};

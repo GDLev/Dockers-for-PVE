@@ -38,7 +38,7 @@ sub load_config {
     my $id = $entry->{id};
     die "Invalid DCT identifier\n" unless $id =~ /\A([0-9a-f]{32})\z/;
     $id = $1;
-    my $info = decode_json(PVE::Tools::file_get_contents("/etc/pve/betterdocker/$id.json"));
+    my $info = decode_json(PVE::Cluster::get_config("betterdocker/$id.json"));
     die "DCT ownership changed\n" if defined($node) && $info->{node} ne $node;
     die "DCT migration is in progress\n" if $info->{migration};
     return $info;

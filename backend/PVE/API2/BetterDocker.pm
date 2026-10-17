@@ -17,7 +17,6 @@ use PVE::JSONSchema;
 use PVE::BetterDocker::Firewall;
 use POSIX qw(LONG_MAX);
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
-use Errno qw(ENOENT);
 
 my $helper = '/usr/local/lib/betterdocker/provision.py';
 my $node = { type => 'string', format => 'pve-node' };
@@ -72,10 +71,7 @@ sub summaries {
             next unless $file =~ /\A([0-9a-f]{32}\.json)\z/;
             $file = $1;
             eval {
-                open(my $fh, '<', "$directory/$file") or die $!;
-                local $/;
-                my $info = decode_json(<$fh>);
-                close $fh;
+                my $info = decode_json(PVE::Cluster::get_config("betterdocker/$file"));
                 push @items, $info;
             };
         }
@@ -111,14 +107,10 @@ sub read_guest {
     my ($identifier, $node) = @_;
     die "Invalid Docker project ID\n" unless defined($identifier) && $identifier =~ /\A([0-9a-f]{32})\z/;
     $identifier = $1;
-    my $fh;
-    if (!open($fh, '<', "/etc/pve/betterdocker/$identifier.json")) {
-        return undef if $! == ENOENT;
-        die "Cannot read DCT metadata: $!\n";
-    }
-    local $/;
-    my $info = eval { decode_json(<$fh>) };
-    close $fh;
+    my $text = eval { PVE::Cluster::get_config("betterdocker/$identifier.json") };
+    die "Cannot read DCT metadata: $@" if $@;
+    return undef unless defined($text);
+    my $info = eval { decode_json($text) };
     die "Invalid DCT metadata\n" unless ref($info) eq 'HASH';
     return undef unless defined($info->{id}) && $info->{id} eq $identifier &&
         defined($info->{node}) && $info->{node} eq $node;
@@ -179,11 +171,9 @@ sub storage_guest_owner {
     my ($vmid) = @_;
     return undef unless defined($vmid) && $vmid =~ /\A([1-9][0-9]{2,8})\z/;
     $vmid = $1;
-    my $path = "/etc/pve/betterdocker/ids/$vmid.json";
-    return undef unless -f $path;
-    open(my $fh, '<', $path) or die "Cannot read DCT disk owner: $!\n";
-    local $/;
-    my $owner = decode_json(<$fh>);
+    my $text = PVE::Cluster::get_config("betterdocker/ids/$vmid.json");
+    return undef unless defined($text);
+    my $owner = decode_json($text);
     die "Invalid DCT disk owner\n" unless $owner->{id} =~ /\A[0-9a-f]{32}\z/;
     $owner->{vmid} = int($vmid);
     return $owner;

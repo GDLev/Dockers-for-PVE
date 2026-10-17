@@ -52,6 +52,11 @@ use strict;use warnings;use JSON::PP qw(decode_json);use Scalar::Util;use Errno 
 package JSON;sub new { JSON::PP->new }
 package main;
 my $directory=shift @ARGV;$directory =~ /\A([A-Za-z0-9_\/.-]+)\z/ or die; $directory=$1;
+sub PVE::Cluster::get_config {
+ $_[0] =~ /\Abetterdocker\/([0-9a-f]{32}\.json)\z/ or die 'Invalid IPC path';
+ open(my $fh,'<',"$directory/$1") or do { return undef if $! == ENOENT; die $!; };
+ local $/;return <$fh>;
+}
 our $inventory_reads=0;sub summaries { $inventory_reads++; [] }
 FUNCTIONS
 my $id=$ARGV[0];my $vmid=task_id($id,'pve');
@@ -92,6 +97,11 @@ print 'PASS';
 use strict;use warnings;use JSON::PP qw(decode_json);use Errno qw(ENOENT);
 my $directory=shift @ARGV;
 $directory =~ /\A([A-Za-z0-9_\/.-]+)\z/ or die; $directory=$1;
+sub PVE::Cluster::get_config {
+ $_[0] =~ /\Abetterdocker\/([0-9a-f]{32}\.json)\z/ or die 'Invalid IPC path';
+ open(my $fh,'<',"$directory/$1") or die $!;
+ local $/;return <$fh>;
+}
 FUNCTION
 print defined(read_guest($ARGV[0],'pve')) ? 'FOUND' : 'MISSING';
 """.replace('FUNCTION', function)
@@ -103,3 +113,32 @@ print defined(read_guest($ARGV[0],'pve')) ? 'FOUND' : 'MISSING';
                 self.assertIn('Cannot read DCT metadata', result.stderr)
             finally:
                 path.chmod(0o600)
+
+    def test_cluster_ipc_preserves_ownership_checks_and_real_absence(self):
+        source = (ROOT / 'backend/PVE/API2/BetterDocker.pm').read_text()
+        function = re.search(r'^sub read_guest \{.*?^\}', source, re.M | re.S).group()
+        function = function.replace('/etc/pve/betterdocker/', '$directory/')
+        with tempfile.TemporaryDirectory() as folder:
+            program = r'''
+use strict;use warnings;use JSON::PP qw(decode_json);use Errno qw(ENOENT);
+package PVE::Cluster;
+sub get_config {
+ die 'Unexpected IPC path' unless $_[0] eq 'betterdocker/'.('a' x 32).'.json';
+ return $main::content;
+}
+package main;
+my $directory=shift @ARGV;
+$directory =~ /\A([A-Za-z0-9_\/.-]+)\z/ or die; $directory=$1;
+our $content='{"id":"'.('a' x 32).'","node":"pve","vmid":123}';
+FUNCTION
+die 'Existing metadata missing' unless read_guest('a' x 32,'pve')->{vmid}==123;
+die 'Wrong node authorized' if defined(read_guest('a' x 32,'other'));
+$content='{"id":"'.('b' x 32).'","node":"pve","vmid":123}';
+die 'Wrong guest authorized' if defined(read_guest('a' x 32,'pve'));
+$content=undef;
+die 'Missing metadata authorized' if defined(read_guest('a' x 32,'pve'));
+print 'PASS';
+'''.replace('FUNCTION', function)
+            result = subprocess.run(['perl', '-T', '-e', program, folder], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'PASS')
