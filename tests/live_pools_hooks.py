@@ -7,6 +7,7 @@ is installed. --keep leaves only these named fixtures for final GUI inspection;
 """
 import live_environment as env
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -318,13 +319,21 @@ def main():
         task(http('DELETE', base(failed_guest), headers=headers))
         assert not any(item['vmid'] == failed_guest['vmid'] for item in api('get', '/pools', poolid=a)[0]['members'])
         print('PASS failed first Start retains pool ownership and permits delegated cleanup', flush=True)
-        # Simulate a killed worker and script, without killing PVE services.
+        # The surviving hook retains the operation lock until it exits.
         Path(state['hang']).touch()
         command = ['/usr/local/lib/betterdocker/provision.py', 'action', primary['id'], node, 'start']
         with open('/root/' + stem + '-interruption.log', 'w') as log:
             process = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True)
             wait_for(lambda: Path(state['entered']).exists(), timeout=20)
             os.killpg(process.pid, signal.SIGKILL); process.wait()
+        def operation_idle():
+            with (worker.ROOT.parent / 'operations' / (primary['id'] + '.lock')).open() as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return False
+                return True
+        wait_for(operation_idle, timeout=150)
         Path(state['hang']).unlink()
         before = len(phases(primary))
         failed(api('create', base(primary) + '/action', action='start'), 'interrupted')
