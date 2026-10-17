@@ -1,5 +1,5 @@
 The archives in tests/fixtures/native/ contain Proxmox VE source files used to
-check integration with native PVE layouts. They are not installed by BetterDockers.
+check integration with native PVE layouts. They are not installed by Dockers for Proxmox VE.
 
 Copyright (C) 2010-2026 Proxmox Server Solutions GmbH
 Licensed under the GNU Affero General Public License, version 3 or later.

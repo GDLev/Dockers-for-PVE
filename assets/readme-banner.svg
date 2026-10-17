@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="139" viewBox="0 57.5 960 139" role="img" aria-labelledby="title desc">
+  <title id="title">Dockers for Proxmox VE</title>
+  <desc id="desc">cool logo</desc>
+  <style>
+    .name { fill: #20252c; }
+    .label { fill: #626b76; }
+    @media (prefers-color-scheme: dark) {
+      .name { fill: #f4f5f7; }
+      .label { fill: #a9b1bc; }
+    }
+  </style>
+  <g fill="none" stroke="#e87922" stroke-width="4" stroke-linejoin="round">
+    <path d="M105 118h104v62H105zM120 132v34m15-34v34m15-34v34m15-34v34m15-34v34m15-34v34"/>
+    <path d="M130 60h104v58H130zM145 74v30m15-30v30m15-30v30m15-30v30m15-30v30m15-30v30"/>
+    <path d="M90 194h144" stroke-linecap="round"/>
+  </g>
+  <text class="label" x="274" y="184" font-family="Arial, Helvetica, sans-serif" font-size="23" letter-spacing="1">for Proxmox VE</text>
+  <text class="name" x="267" y="142" font-family="Arial, Helvetica, sans-serif" font-size="108" font-weight="700" letter-spacing="-3">Dockers<tspan fill="#e87922">.</tspan></text>
+</svg>

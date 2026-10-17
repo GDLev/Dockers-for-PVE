@@ -22,7 +22,7 @@ Ext.define('PVE.betterdocker.NetworkEdit', {
         const me = this;
         me.interfaceName = me.interfaceName || 'net0';
         me.isCreate = Boolean(me.isCreate);
-        me.items = [{ xtype: 'inputpanel',
+        me.items = [{ xtype: 'inputpanel', cls: 'bd-deployment-form',
             column1: [
                 { xtype: 'displayfield', fieldLabel: translate('Name'), value: me.interfaceName },
                 field('hwaddr', 'MAC address', '', { vtype: 'MacAddress', emptyText: 'auto' }),

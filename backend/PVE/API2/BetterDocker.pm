@@ -529,7 +529,7 @@ sub register_docker_method {
         local $ENV{BETTERDOCKER_CONFIG_KEYS} = $caps->{configure} ? '*' : join(',', @keys);
         local $ENV{BETTERDOCKER_TASK_SYS_MODIFY} = ($user eq 'root@pam' ||
             $rpc->check($user, "/nodes/$param->{node}", ['Sys.Modify'], 1)) ? '1' : '0';
-        if ($name =~ /^(create|clone|preview)$/ || $name eq 'set_network') {
+        if (($name =~ /^(create|clone|preview)$/ || $name eq 'set_network') && !($name eq 'preview' && $param->{resources_only})) {
             my $deployment = $param->{deployment} ? decode_json($param->{deployment}) : $param;
             if (my $bridge = $deployment->{bridge}) {
                 die "Invalid bridge\n" unless $bridge =~ /\A([a-zA-Z0-9_.-]{1,15})\z/;

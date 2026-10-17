@@ -5,6 +5,12 @@
     PVE.betterdockerLocales.pl = {
         isActive: () => typeof gettext === 'function' && gettext('Summary') === 'Podsumowanie',
         messages: {
+            "Disks": "Dyski",
+            "CPU": "CPU",
+            "Memory": "Pamięć",
+            "Disk size (GiB)": "Rozmiar dysku (GiB)",
+            "Mount point": "Punkt montowania",
+            "Invalid mount point": "Nieprawidłowy punkt montowania",
             "Preview images": "Podgląd obrazów",
             "Roll back the recovery snapshot": "Przywróć migawkę odzyskiwania",
             "Security": "Zabezpieczenia",
@@ -107,7 +113,7 @@
             "GUI override": "Nadpisane w GUI",
             "Docker default": "Domyślne Docker",
             "CPU limit": "Limit CPU",
-            "CPU units": "Waga CPU",
+            "CPU units": "Jednostki CPU",
             "PID limit": "Limit PID",
             "DNS servers": "Serwery DNS",
             "Search domains": "Domeny wyszukiwania",

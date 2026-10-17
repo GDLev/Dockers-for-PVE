@@ -20,7 +20,7 @@ from .operation_capacity import bounded
 def validate(data):
     if not isinstance(data, dict):
         raise ValueError('Deployment must be an object')
-    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid', 'firewall', 'interfaces'}
+    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid', 'firewall', 'interfaces', 'resources', 'data_disk'}
     if set(data) - allowed:
         raise ValueError('Unknown deployment setting')
     if 'interfaces' in data:
@@ -37,6 +37,29 @@ def validate(data):
     mode = data.get('mode', 'compose')
     if mode not in ('compose', 'image'):
         raise ValueError('Choose Docker Compose or Docker image')
+    resources = data.get('resources', {})
+    if not isinstance(resources, dict) or len(resources) > 128:
+        raise ValueError('Invalid initial service resources')
+    for service, changes in resources.items():
+        if not isinstance(service, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,128}', service) or not isinstance(changes, dict) or set(changes) - {'cpus', 'cpuunits', 'memory', 'swap', 'disk'}:
+            raise ValueError('Invalid initial service resources')
+        # Validate swap together with inherited memory after parsing Compose.
+        worker.validate_settings(dict(changes, memory=changes.get('memory', 1)))
+    if 'data_disk' in data:
+        disk = data['data_disk']
+        if not isinstance(disk, dict) or set(disk) - {'storage', 'size_mib', 'target'}:
+            raise ValueError('Invalid initial data disk')
+        if not isinstance(disk.get('storage'), str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*', disk['storage']):
+            raise ValueError('Select a PVE storage')
+        if type(disk.get('size_mib')) is not int or not 256 <= disk['size_mib'] <= 1048576:
+            raise ValueError('Data disk must be between 256 and 1048576 MiB')
+        if mode == 'image':
+            if not isinstance(disk.get('target', '/data'), str):
+                raise ValueError('Invalid application mount point')
+            from .disks import validate as validate_disk
+            validate_disk(dict(disk, target=disk.get('target', '/data')))
+        elif 'target' in disk:
+            raise ValueError('Compose data disk uses the mounts defined in YAML')
     if mode == 'compose':
         yaml = data.get('compose', '')
         if not isinstance(yaml, str) or not yaml.strip() or len(yaml.encode()) > 240000:
@@ -101,10 +124,14 @@ def parse_ports(text):
 
 
 def image_compose(data):
-    return json.dumps({'services': {'app': {
+    config = {'services': {'app': {
         'image': data['image'], 'restart': 'unless-stopped',
         'ports': worker.parse_ports(data.get('ports', '')), 'env_file': ['.env'],
-    }}})
+    }}}
+    if data.get('data_disk'):
+        config['volumes'] = {'data': {}}
+        config['services']['app']['volumes'] = [{'type': 'volume', 'source': 'data', 'target': data['data_disk'].get('target', '/data')}]
+    return json.dumps(config)
 
 
 def bind_ports(config, address, identifier, endpoints=None):
@@ -239,7 +266,27 @@ def prepare(data, identifier, directory, project_directory=None, use_images=True
     policy = hardening.mode(project_directory, creating=not (project_directory / 'request.json').exists())
     if policy == 'hardened':
         hardening.defaults(config)
-    worker.apply_settings(config, worker.load_settings(project_directory) if settings is None else settings)
+    selected_settings = dict(worker.load_settings(project_directory) if settings is None else settings)
+    for name, changes in data.get('resources', {}).items():
+        if name not in config['services']:
+            raise ValueError('Unknown Compose service: ' + name)
+        if changes.get('disk') and not worker.rootfs_quota_support()['supported']:
+            raise ValueError('Writable-layer quotas are not supported by this runtime')
+        selected_settings[name] = worker.validate_settings({**worker.service_values(config['services'][name]), **selected_settings.get(name, {}), **changes})
+    worker.apply_settings(config, selected_settings)
+    if data.get('data_disk'):
+        writable = [mount for service in config['services'].values() for mount in service.get('volumes', [])
+                    if not mount.get('read_only') and mount.get('type') != 'tmpfs']
+        if not writable:
+            raise ValueError('A data disk requires a writable named volume or project directory')
+        for mount in writable:
+            source = mount.get('source', '')
+            if mount.get('type') == 'volume':
+                definition = config.get('volumes', {}).get(source, {})
+                if not source or definition.get('external') or definition.get('driver_opts') or definition.get('driver', 'local') != 'local' or definition.get('name', 'bd-' + identifier + '_' + source) != 'bd-' + identifier + '_' + source:
+                    raise ValueError('A data disk requires private local named volumes')
+            elif mount.get('type') != 'bind' or not Path(source).is_relative_to(project_directory) or Path(source) == project_directory:
+                raise ValueError('A data disk requires private project data directories')
     from .images import overrides
     if use_images:
         overrides(config, project_directory)
@@ -289,11 +336,13 @@ def create(data, node, identifier=None, hookscript=None, start=True):
             worker.project_limits.initialize(directory)
             worker.write_json(directory / hardening.FILE, {'mode': policy})
             config = worker.prepare(dict(data, address=data.get('address') or '0.0.0.0'), identifier, directory)
+            if data.get('resources'):
+                worker.write_json(directory / 'settings.json', {name: worker.service_values(config['services'][name]) for name in data['resources']})
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             raise
         (directory / 'snapshot-restored.json').unlink(missing_ok=True)
-        worker.write_json(directory / 'request.json', data)
+        worker.write_json(directory / 'request.json', {key: value for key, value in data.items() if key != 'resources'})
         info = {'id': identifier, 'vmid': vmid, 'node': node, 'name': data['name'], 'bridge': data['bridge'],
                 'address': data['address'], 'status': 'creating', 'created': int(time.time()),
                 'expected': sum(service.get('deploy', {}).get('replicas', 1) for service in config['services'].values()),
@@ -314,7 +363,7 @@ def create(data, node, identifier=None, hookscript=None, start=True):
             worker.write_json(worker.METADATA / (identifier + '.json'), info)
             worker.rebind_runtime(directory, info['address'])
             worker.write_json(worker.METADATA / (identifier + '.json'), info)
-            if start:
+            if start and not data.get('data_disk'):
                 worker.guest_hook(info, 'pre-start')
                 worker.expect_guest_hook(info, 'post-start')
                 worker.prepare_firewall(info)
@@ -330,6 +379,15 @@ def create(data, node, identifier=None, hookscript=None, start=True):
             worker.write_json(worker.METADATA / (identifier + '.json'), info)
             print(f'Project {identifier} retained for diagnosis; open its Docker screen.', file=sys.stderr)
             raise
+    if data.get('data_disk'):
+        try:
+            worker.project_storage_limit(identifier, node, data['data_disk']['size_mib'], storage=data['data_disk']['storage'])
+            if start:
+                worker.action(identifier, node, 'start')
+        except Exception:
+            info['status'] = 'error'
+            worker.write_json(worker.METADATA / (identifier + '.json'), info)
+            raise
     print(f"Created {data['name']} at {info['address']}")
 
 
@@ -341,6 +399,14 @@ def update(identifier, node, data, digest=None):
         if data.get('vmid') and data['vmid'] != existing.get('vmid'):
             raise ValueError('DCT ID cannot be changed during deployment edits')
         previous = existing['deployment']
+        if data.get('resources'):
+            raise ValueError('Use Resources to edit existing service limits')
+        if previous.get('data_disk'):
+            if 'data_disk' in data and data['data_disk'] != previous['data_disk']:
+                raise ValueError('Use Resources to edit the managed data disk')
+            data['data_disk'] = previous['data_disk']
+        elif 'data_disk' in data:
+            raise ValueError('Use Resources to add a managed data disk')
         if 'interfaces' in previous:
             if 'interfaces' in data and data['interfaces'] != previous['interfaces']:
                 raise ValueError('Use the network editor to change interfaces')
@@ -410,14 +476,26 @@ def restore(node):
 
 
 @bounded
-def preview(data, identifier=None):
+def preview(data, identifier=None, resources_only=False):
     identifier = worker.project_id(identifier) if identifier else uuid.uuid4().hex
+    if resources_only:
+        data = {key: value for key, value in data.items() if key not in ('interfaces', 'cidr', 'hwaddr', 'mtu', 'firewall')}
+        # Keep published ports unresolved, as in ordinary DHCP preflight; no address is allocated.
+        data.update(bridge='vmbr0', ipv4mode='dhcp', address='')
     with tempfile.TemporaryDirectory(prefix='betterdocker-preview-') as folder:
         config = worker.prepare(dict(worker.validate(data), address=data.get('address') or '0.0.0.0'), identifier,
                          Path(folder), project_directory=worker.ROOT / identifier)
         # Deliberately return only a plan, never expanded env values or secrets.
+        quota = worker.rootfs_quota_support()
         return [{'service': name, 'image': service.get('image', ''),
                  'replicas': service.get('deploy', {}).get('replicas', 1),
+                 'resources': {key: value for key, value in worker.service_values(service).items() if key in ('cpus', 'cpuunits', 'memory', 'swap', 'disk')},
+                 'resource_defaults': [key for key, specified in (
+                     ('cpus', any(key in service for key in ('cpus', 'cpu_quota', 'cpu_period')) or 'cpus' in service.get('deploy', {}).get('resources', {}).get('limits', {})),
+                     ('memory', 'mem_limit' in service or 'memory' in service.get('deploy', {}).get('resources', {}).get('limits', {})),
+                     ('swap', 'memswap_limit' in service or 'mem_limit' in service or 'memory' in service.get('deploy', {}).get('resources', {}).get('limits', {})),
+                 ) if not specified],
+                 'rootfs_quota': bool(quota['supported']),
                  'ports': service.get('ports', []),
                  'mounts': [{'type': m.get('type'), 'target': m.get('target'),
                              'read_only': m.get('read_only', False)} for m in service.get('volumes', [])]}

@@ -5,7 +5,7 @@ Ext.define('PVE.betterdocker.DiskEdit', {
         const sizeMiB = disk.size_mib || 1024, sizeGiB = Math.ceil(sizeMiB / 1024 * 1000) / 1000;
         me.title = translate(me.isCreate ? 'Add' : 'Edit') + ': ' + translate('Mount Point') + ' (' + me.diskName + ')';
         me.method = 'PUT';
-        me.items = [{ xtype: 'inputpanel', column1: [
+        me.items = [{ xtype: 'inputpanel', cls: 'bd-deployment-form', column1: [
             field('service', 'Service', disk.service || me.services[0]?.name || '', { xtype: 'combobox', queryMode: 'local', editable: false,
                 store: me.services.map(service => [service.name, service.name]), allowBlank: false }),
             field('target', 'Path', disk.target || '', { allowBlank: false }),

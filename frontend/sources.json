@@ -3,6 +3,7 @@
   "actions.js",
   "network.js",
   "transfer.js",
+  "create-resources.js",
   "deployment.js",
   "storage.js",
   "console.js",
