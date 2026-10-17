@@ -2,6 +2,7 @@
 import json
 import contextlib
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -143,6 +144,50 @@ class ReleaseAuthentication(unittest.TestCase):
         args = installer.parser().parse_args(['repair', '--yes'])
         self.assertFalse(args.development_source)
         self.assertFalse(args.allow_downgrade)
+
+    def test_streamed_bootstrap_executes_only_the_authenticated_installer(self):
+        bootstrap = (ROOT / 'install.sh').read_text()
+        section = bootstrap[bootstrap.index('    local metadata_url='):bootstrap.index('    echo "Downloading Proxmox BetterDockers')]
+        binaries = self.root / 'bin'
+        binaries.mkdir()
+        curl = binaries / 'curl'
+        curl.write_text('#!' + sys.executable + '\n' +
+                        'import os, pathlib, shutil, sys\n' +
+                        'args=sys.argv[1:]; name=next(a for a in args if a.startswith("https://")).rsplit("/",1)[1]\n' +
+                        'source={"RELEASE.json":".release.json","RELEASE.sig":".release.sig","install.sh":"install.sh"}[name]\n' +
+                        'shutil.copyfile(pathlib.Path(os.environ["BD_TEST_ASSETS"])/source,args[args.index("--output")+1])\n')
+        curl.chmod(0o755)
+        executed = self.root / 'executed'
+        installer_file = self.root / 'install.sh'
+        installer_file.write_text('printf "%s\\n" "$@" > "$BD_TEST_EXECUTED"\n')
+        self.metadata['artifacts']['install.sh'] = release.digest(installer_file)
+        working = self.root / 'download'
+        working.mkdir()
+        shell = ('set -euo pipefail\nmain() {\n' +
+                 'local project_dir=' + shlex.quote(str(working)) + '\n' +
+                 'local release_version=0.20.0 release_url=https://example.invalid/release\n' +
+                 'local trusted_key=' + shlex.quote(str(self.public)) + '\n' + section +
+                 '\necho "Unverified stream continued" >&2; return 99\n}\nmain "$@"\n')
+        environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ['PATH'],
+                           BD_TEST_ASSETS=str(self.root), BD_TEST_EXECUTED=str(executed))
+        environment.pop('BETTERDOCKER_RELEASE_URL', None)
+        for case in ('valid', 'changed installer', 'bad signature'):
+            with self.subTest(case=case):
+                installer_file.write_text('printf "%s\\n" "$@" > "$BD_TEST_EXECUTED"\n')
+                self.sign()
+                executed.unlink(missing_ok=True)
+                if case == 'changed installer':
+                    installer_file.write_text(installer_file.read_text() + 'echo changed\n')
+                elif case == 'bad signature':
+                    (self.root / release.SIGNATURE).write_bytes(b'not a signature')
+                result = subprocess.run(['bash', '-s', '--', 'repair', '--yes'], input=shell,
+                                        env=environment, text=True, capture_output=True, timeout=20)
+                if case == 'valid':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(executed.read_text().splitlines(), ['repair', '--yes'])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(executed.exists(), 'Unauthenticated installer must never execute')
 
     def test_signed_node_preparation_checks_before_transfer(self):
         runner = installer.Runner(unittest.mock.Mock(), unittest.mock.Mock())

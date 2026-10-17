@@ -93,7 +93,7 @@ function creationResourcePanels(wizard) {
                 allowDecimals: true, decimalPrecision: 2, allowBlank: false, disabled: true, submitValue: false }),
             field('creation_target', 'Mount point', '/data', { allowBlank: false, disabled: true, hidden: true, submitValue: false,
                 validator: value => value.startsWith('/') && value !== '/' && !value.split('/').includes('..') || translate('Invalid mount point') }),
-        ], column2: [selector()], advancedColumn2: [resource('disk', 'Container disk (MiB)', 1048576, { disabled: true })],
+        ], column2: [selector()], advancedColumn1: [resource('disk', 'Container disk (MiB)', 1048576, { disabled: true })],
         listeners: { show: loadPlan },
     }, {
         xtype: 'inputpanel', cls: 'bd-deployment-form', itemId: 'creationCPU', title: translate('CPU'), onlineHelp: 'chapter_system_administration',

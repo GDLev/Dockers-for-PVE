@@ -45,8 +45,15 @@ TRUST
             "$metadata_url/$file" --output "$project_dir/$file" </dev/null
     done
     openssl dgst -sha256 -verify "$trusted_key" -signature "$project_dir/RELEASE.sig" "$project_dir/RELEASE.json" >/dev/null
+    local installer_path="${BASH_SOURCE[0]:-}" streamed=0
+    if [[ ! -f "$installer_path" ]]; then
+        streamed=1
+        installer_path="$project_dir/install.sh"
+        curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 --max-filesize 4194304 \
+            "$metadata_url/install.sh" --output "$installer_path" </dev/null
+    fi
     local expected_sha
-    expected_sha=$(python3 - "$project_dir/RELEASE.json" "$release_version" "${BASH_SOURCE[0]}" <<'METADATA'
+    expected_sha=$(python3 - "$project_dir/RELEASE.json" "$release_version" "$installer_path" <<'METADATA'
 import hashlib, json, pathlib, re, sys
 path, expected, installer = sys.argv[1:]
 def pairs(items):
@@ -66,6 +73,10 @@ if not re.fullmatch('[0-9a-f]{64}', sha): raise SystemExit('Invalid signed archi
 print(sha)
 METADATA
 )
+    if (( streamed )); then
+        bash "$installer_path" "$@" </dev/null
+        return
+    fi
     echo "Downloading Proxmox BetterDockers $release_version."
     curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 \
         "${BETTERDOCKER_SOURCE_URL:-$release_url/$archive_name}" --max-filesize 134217728 \

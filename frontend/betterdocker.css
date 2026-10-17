@@ -66,8 +66,3 @@
     white-space: pre;
     overflow: auto;
 }
-.bd-deployment-form hr {
-    border: 0;
-    border-top: 1px solid rgba(128, 128, 128, 0.45);
-    height: 0;
-}

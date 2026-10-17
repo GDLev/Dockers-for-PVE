@@ -1,7 +1,7 @@
 # Security
 
 > [!WARNING]
-> Dockers for Proxmox VE is development software for small, non-critical installations, preferably on a single node. It is not recommended for commercial deployments or hostile multi-tenant hosting.
+> Dockers for Proxmox VE is development software for small, non-critical installations. It is not recommended for commercial deployments or hostile multi-tenant hosting.
 
 ## Report a vulnerability
 
@@ -89,7 +89,7 @@ chmod 0644 /etc/betterdocker/release-key.sha256
 )
 ```
 
-Stop if any command fails. Do not run the installer after a failed verification. Then follow the [installation instructions](README.md#install-the-prerelease).
+Stop if any command fails. Do not run the installer after a failed verification. Then follow the [installation instructions](README.md#installation).
 
 For a confirmed release vulnerability, identify the affected versions, publish an advisory with the impact and mitigation, and withdraw affected downloads and installation instructions. Prepare and test a replacement release under a new version. Do not overwrite a published version with different bytes. Keep the advisory and affected hashes available so administrators can identify their installations.
 

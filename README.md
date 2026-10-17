@@ -11,6 +11,8 @@
 
 Dockers for Proxmox VE brings Docker projects into the Proxmox VE web interface as **DCT** guests. Each guest has its own ID and can run a single image or a Compose stack. Docker runs directly on the PVE host, using either a rootful or rootless runtime.
 
+https://github.com/user-attachments/assets/e3c720eb-65ea-4d72-9507-beb8227b2b9d
+
 ## Support
 
 Support development on Ko-fi.
@@ -60,20 +62,22 @@ PVE still manages networking, storage, and permissions as root in both modes. Ro
 
 ## Installation
 
-Download `install.sh` and its verification files from [Releases](https://github.com/GDLev/Proxmox-BetterDockers/releases). [Verify the download](SECURITY.md#verify-a-release), then run the installer as root on your PVE node:
+Set up [release verification](SECURITY.md#verify-a-release), then run as root on your PVE node:
 
 ```bash
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/GDLev/Proxmox-BetterDockers/v0.20.0/install.sh | bash
 ```
+
+You can also download and verify `install.sh` from [Releases](https://github.com/GDLev/Proxmox-BetterDockers/releases), then run `bash install.sh`.
 
 Choose **Install / Update**, select the target nodes and runtime mode, and follow the prompts. Use Space to select nodes and Enter to continue. After installation, press Enter to reload the PVE panel and API services. Cluster installations use PVE's existing SSH access between nodes.
 
 Refresh PVE with Ctrl+Shift+R. Dockers for Proxmox VE is now ready to use.
 
-For unattended installation, run the verified installer with:
+For unattended installation, run:
 
 ```bash
-bash install.sh install --runtime=rootless --yes
+curl -fsSL https://raw.githubusercontent.com/GDLev/Proxmox-BetterDockers/v0.20.0/install.sh | bash -s -- install --runtime=rootless --yes
 ```
 
 Add `--nodes=pve1,pve2` to select all cluster nodes on first installation, or `--no-restart` to defer service reload. Later updates and repairs can target individual installed nodes. For DEB installation, see [package installation](CONTRIBUTING.md#build-and-sign).
