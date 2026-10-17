@@ -72,7 +72,7 @@ def run(action):
         state['fence'] = dict(boot=remote(env.node('secondary'), ['cat', '/proc/sys/kernel/random/boot_id'], check=True).stdout.strip())
         save()
         remote(env.node('secondary'), ['mkdir', '-p', str(Path(DROPIN).parent)], check=True)
-        remote(env.node('secondary'), ['tee', DROPIN], input='[Service]\nExecStartPre=/bin/sleep 300\n', check=True)
+        remote(env.node('secondary'), ['tee', DROPIN], input='[Service]\nTimeoutStartSec=420\nExecStartPre=/bin/sleep 300\n', check=True)
         remote(env.node('secondary'), ['systemctl', 'daemon-reload'], check=True)
         try:
             remote(env.node('secondary'), ['reboot', '-f'], timeout=15)
