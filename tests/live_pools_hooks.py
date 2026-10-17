@@ -106,7 +106,7 @@ def cleanup(path):
         api('set', base + '/config', delete='hookscript')
         task(api('create', base + '/action', action='force-stop'))
         api('set', '/access/acl', path='/vms/' + str(info['vmid']), roles=state['roles'][0], users=state['users'][0]) if state['users'] and state['roles'] else None
-        task(api('delete', base))
+        task(api('delete', base, **{'destroy-owned-data': 1}))
         acl_path = '/vms/' + str(info['vmid'])
         assert not any(item['path'] == acl_path or item['path'].startswith(acl_path + '/') for item in api('get', '/access/acl'))
         assert not any(member.get('vmid') == info['vmid'] for pool in state['pools'] for member in api('get', '/pools', poolid=pool)[0]['members'])
