@@ -11,7 +11,7 @@ class InventoryTests(unittest.TestCase):
     def test_scoped_inventory_consumers_share_one_dispatcher(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for module in ('Storage', 'APIClient/LWP', 'AccessControl', 'Storage/PBSPlugin', 'API2/Storage/PruneBackups'):
+            for module in ('Cluster', 'Storage', 'APIClient/LWP', 'AccessControl', 'Storage/PBSPlugin', 'API2/Storage/PruneBackups'):
                 path = root / ('PVE/' + module + '.pm'); path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('package PVE::' + module.replace('/', '::') + '; 1;')
             path = root / 'JSON.pm'
