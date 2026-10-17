@@ -254,11 +254,11 @@ my ($id,$source,$target,$token) = @ARGV; local $/; my $next=decode_json(<STDIN>)
 die "Invalid transfer identity\n" unless $id =~ /\A[0-9a-f]{32}\z/ && $token =~ /\A[0-9a-f]{32}\z/;
 PVE::Cluster::cfs_lock_file('datacenter.cfg', 10, sub {
     my $path="/etc/pve/betterdocker/$id.json";
-    my $current=decode_json(PVE::Tools::file_get_contents($path));
+    my $current=decode_json(PVE::Cluster::get_config("betterdocker/$id.json"));
     die "Migration ownership changed\n" unless $current->{node} eq $source && $current->{migration} eq $token;
     die "Invalid destination metadata\n" unless $next->{id} eq $id && $next->{node} eq $target && $next->{vmid} == $current->{vmid};
     my $reservation="/etc/pve/betterdocker/ids/$current->{vmid}.json";
-    my $owner=decode_json(PVE::Tools::file_get_contents($reservation));
+    my $owner=decode_json(PVE::Cluster::get_config("betterdocker/ids/$current->{vmid}.json"));
     die "Guest reservation changed\n" unless $owner->{id} eq $id && $owner->{node} eq $source;
     $owner->{node}=$target;
     PVE::Tools::file_set_contents($reservation, encode_json($owner));
@@ -304,10 +304,10 @@ def recover(token):
         # A killed commit can leave the reservation changed before metadata changed.
         program = r"""use PVE::Cluster; use PVE::Tools; use JSON qw(decode_json encode_json);
 my($id,$node,$token)=@ARGV; PVE::Cluster::cfs_lock_file('datacenter.cfg',10,sub {
-my $path="/etc/pve/betterdocker/$id.json"; my $info=decode_json(PVE::Tools::file_get_contents($path));
+my $path="/etc/pve/betterdocker/$id.json"; my $info=decode_json(PVE::Cluster::get_config("betterdocker/$id.json"));
 die "Migration ownership changed\n" unless $info->{node} eq $node && $info->{migration} eq $token;
 my $reservation="/etc/pve/betterdocker/ids/$info->{vmid}.json";
-my $owner=decode_json(PVE::Tools::file_get_contents($reservation)); die "Reservation changed\n" unless $owner->{id} eq $id;
+my $owner=decode_json(PVE::Cluster::get_config("betterdocker/ids/$info->{vmid}.json")); die "Reservation changed\n" unless $owner->{id} eq $id;
 $owner->{node}=$node; PVE::Tools::file_set_contents($reservation,encode_json($owner));
 }); die $@ if $@;"""
         worker.run(['perl','-e',program,identifier,info['node'],token])

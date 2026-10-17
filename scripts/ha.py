@@ -136,9 +136,9 @@ def publish(identifier, token, value):
     program = r'''use PVE::Cluster; use PVE::Tools; use JSON;
 my($id,$token)=@ARGV; local $/; my $next=decode_json(<STDIN>);
 PVE::Cluster::cfs_lock_file('datacenter.cfg',10,sub {
-my $path="/etc/pve/betterdocker/$id.json"; my $old=decode_json(PVE::Tools::file_get_contents($path));
+my $path="/etc/pve/betterdocker/$id.json"; my $old=decode_json(PVE::Cluster::get_config("betterdocker/$id.json"));
 die "HA recovery ownership changed\n" unless $old->{ha_recovery}->{token} eq $token && $old->{node} eq $next->{node} && $old->{vmid} == $next->{vmid};
-my $owner=decode_json(PVE::Tools::file_get_contents("/etc/pve/betterdocker/ids/$old->{vmid}.json"));
+my $owner=decode_json(PVE::Cluster::get_config("betterdocker/ids/$old->{vmid}.json"));
 die "HA reservation changed\n" unless $owner->{id} eq $id && $owner->{node} eq $next->{node} && $next->{id} eq $id;
 PVE::Tools::file_set_contents($path,encode_json($next));
 }); die $@ if $@;'''

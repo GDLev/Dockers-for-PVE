@@ -202,13 +202,13 @@ def main():
             state['guests'].append(info['id']); save()
         return info
     def base(info):
-        owner = json.loads((worker.METADATA / (info['id'] + '.json')).read_text())['node']
+        owner = worker.read_json(worker.METADATA / (info['id'] + '.json'))['node']
         return f'/nodes/{owner}/docker/{info["id"]}'
     def power(info, action, headers=None):
         upid = http('POST', base(info) + '/action', {'action': action, 'timeout': 15}, headers=headers) if headers else api('create', base(info) + '/action', action=action, timeout=15)
         task(upid)
     def phases(info):
-        owner = json.loads((worker.METADATA / (info['id'] + '.json')).read_text())['node']
+        owner = worker.read_json(worker.METADATA / (info['id'] + '.json'))['node']
         if owner != node:
             data = subprocess.check_output(transfer.ssh_command(owner) + [shlex.join(['cat', state['log']])], text=True)
         else:

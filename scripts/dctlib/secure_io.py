@@ -1,9 +1,11 @@
 """Pinned, bounded reads of host control state. Application data uses runtime.anchored."""
 import contextlib
+import errno
 import json
 import hashlib
 import hmac
 import os
+import re
 from pathlib import Path
 import stat
 import sys
@@ -75,6 +77,9 @@ def anchored(path, directory=False, owner=None):
 
 
 def read_text(path, maximum=MAX_JSON, owner=None):
+    text = _cluster_metadata_text(path, maximum)
+    if text is not None:
+        return text
     with anchored(path, owner=owner) as fd:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
@@ -106,9 +111,29 @@ def read_text(path, maximum=MAX_JSON, owner=None):
         return b''.join(chunks).decode('utf-8')
 
 
+def _cluster_metadata_text(path, maximum):
+    # Open FUSE handles make replacements hide the old name as .fuse_hidden*.
+    # IPC reads avoid creating those handles in the first place.
+    try:
+        relative = Path(path).absolute().relative_to('/etc/pve/betterdocker').as_posix()
+    except ValueError:
+        return None
+    if not re.fullmatch(r'(?:[0-9a-f]{32}|ids/[1-9][0-9]{2,8}|nodes/[A-Za-z0-9][A-Za-z0-9.-]*)\.json', relative):
+        return None
+    from .process import run
+    program = 'use PVE::Cluster;my $data=PVE::Cluster::get_config($ARGV[0]);exit 44 unless defined($data);print $data;'
+    result = run(['perl', '-e', program, 'betterdocker/' + relative],
+                 capture_output=True, text=True, errors='strict', timeout=10, output_limit=maximum)
+    if result.returncode == 44:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+    result.check_returncode()
+    return result.stdout
+
+
 def read_json(path, owner=None):
     try:
-        value = structure(json.loads(read_text(path, owner=owner), parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Non-finite JSON number'))))
+        text = read_text(path, owner=owner)
+        value = structure(json.loads(text, parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Non-finite JSON number'))))
         if journal(path) and KEY.exists():
             if not isinstance(value, dict) or not isinstance(value.get('_integrity'), str):
                 raise ValueError('Recovery journal is not authenticated; manual recovery is required')

@@ -74,7 +74,7 @@ def main():
         return rows[0]['id']
 
     def base(identifier):
-        owner = json.loads((worker.METADATA / (identifier + '.json')).read_text())['node']
+        owner = worker.read_json(worker.METADATA / (identifier + '.json'))['node']
         return f'/nodes/{owner}/docker/{identifier}'
 
     def management(identifier):
@@ -87,7 +87,7 @@ def main():
         task(api('create', base(identifier) + '/action', action=verb))
 
     def docker(identifier, *arguments):
-        owner = json.loads((worker.METADATA / (identifier + '.json')).read_text())['node']
+        owner = worker.read_json(worker.METADATA / (identifier + '.json'))['node']
         command = ['docker', *arguments]
         if owner != node:
             command = transfer.ssh_command(owner) + [shlex.join(command)]
