@@ -87,9 +87,19 @@ def main():
         bulk(action,values,expected=403)
     task(bulk('start',{'vms':[vmid]}))
     assert api('get',base()+'/management')['status']=='running'
+    original_node = info()['node']
+    instance_command = ['/usr/local/lib/betterdocker/runtime.py', 'docker', 'ps', '-q',
+                        '--filter', 'label=betterdocker.id=' + guest['id']]
+    original_instances = remote(original_node, instance_command).stdout.split()
+    assert original_instances
     try:task(bulk('migrate',{'vms':[vmid],'target':env.node('secondary')}))
-    except RuntimeError as error: assert 'stop' in str(error).lower(),str(error)
+    except RuntimeError as error:
+        assert 'Running DCT migration requires restart=1' in str(error), str(error)
     else:raise AssertionError('Running ordinary DCT migrated')
+    assert info()['node'] == original_node
+    assert api('get', base() + '/management')['status'] == 'running'
+    assert remote(original_node, instance_command).stdout.split() == original_instances
+    assert not remote(env.node('secondary'), instance_command).stdout.strip()
     task(bulk('shutdown',{'vms':[vmid],'timeout':1,'force-stop':1}))
     assert api('get',base()+'/management')['status']=='stopped'
     task(bulk('migrate',{'vms':[vmid],'target':env.node('secondary')}))
