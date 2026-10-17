@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,46 @@ ROOTLESS = runtime.Runtime('rootless', 'betterdocker', 997, 995,
 
 
 class RuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, 'Runtime installation requires host root')
+    def test_rootless_autostart_is_readable_with_private_installer_umask(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            base.chmod(0o755)
+            home = base / 'state/runtime'
+            account = SimpleNamespace(pw_uid=12345, pw_gid=12345, pw_dir=str(home))
+            save = runtime_install.save
+
+            def local_save(path, text, mode=0o644):
+                if Path(path).is_relative_to(base):
+                    save(path, text, mode)
+
+            info = json.dumps({'SecurityOptions': ['name=rootless'], 'CgroupVersion': '2', 'CgroupDriver': 'systemd'})
+            previous_umask = os.umask(0o077)
+            try:
+                with patch.object(runtime_install, 'HOME', str(home)), \
+                        patch.object(runtime, 'CONFIG', base / 'runtime.json'), \
+                        patch.object(runtime_install, 'preflight'), \
+                        patch.object(runtime_install, 'lifecycle'), \
+                        patch.object(runtime_install, 'save', side_effect=local_save), \
+                        patch.object(runtime_install.pwd, 'getpwnam', return_value=account), \
+                        patch.object(runtime_install, 'command', return_value=subprocess.CompletedProcess([], 0, stdout='betterdocker')), \
+                        patch.object(runtime_install, 'subordinate', return_value=1048576), \
+                        patch.object(runtime, 'load', return_value=ROOTLESS), \
+                        patch.object(runtime, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=info)):
+                    runtime_install.initialize('rootless')
+            finally:
+                os.umask(previous_umask)
+            wants = home / '.config/systemd/user/default.target.wants'
+            self.assertEqual(wants.stat().st_uid, 0)
+            self.assertEqual(wants.stat().st_mode & 0o777, 0o755)
+            result = subprocess.run([sys.executable, '-c',
+                'import sys;from pathlib import Path;p=Path(sys.argv[1]);'
+                'assert [f.name for f in p.iterdir()]==["docker.service"];'
+                'assert "BetterDocker rootless Docker Engine" in (p/"docker.service").read_text()', str(wants)],
+                user=account.pw_uid, group=account.pw_gid, extra_groups=[], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(os.geteuid() == 0, 'Runtime installation requires host root')
     def test_fresh_private_runtime_parent_allows_traversal_without_exposing_siblings(self):
         from types import SimpleNamespace

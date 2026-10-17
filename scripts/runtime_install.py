@@ -307,7 +307,11 @@ WantedBy=multi-user.target
     command(['loginctl', 'enable-linger', ACCOUNT])
     command(['systemctl', 'start', 'user@' + str(user.pw_uid) + '.service'])
     wants = home / '.config/systemd/user/default.target.wants'
-    wants.mkdir(exist_ok=True)
+    wants.mkdir(exist_ok=True, mode=0o755)
+    with anchored(wants, directory=True) as directory:
+        if os.fstat(directory).st_uid != 0:
+            raise ValueError('Rootless service enable directory must be root-owned')
+        os.fchmod(directory, 0o755)
     target = wants / 'docker.service'
     if target.is_symlink():
         if os.readlink(target) != '../docker.service':
