@@ -261,7 +261,6 @@ def main():
             api('set', '/access/acl', path='/storage/local-lvm', roles=host_role, **principal)
             api('set', '/access/acl', path='/sdn/zones/localnetwork/vmbr0', roles=host_role, **principal)
         assert http('GET', base(primary) + '/management', headers=headers)['capabilities']['power']
-        http('GET', f'/nodes/{node}/docker/' + next(item['id'] for item in worker.summaries() if item['vmid'] == 100) + '/management', headers=headers, expected=403)
         try:
             api('delete', '/pools', poolid=a)
         except RuntimeError as error:
@@ -337,6 +336,7 @@ def main():
         cloned = guest(stem + '-clone')
         assert api('get', base(cloned) + '/config')['hookscript'] == hook
         assert any(item['vmid'] == cloned['vmid'] for item in api('get', '/pools', poolid=b)[0]['members'])
+        http('GET', base(cloned) + '/management', headers=headers, expected=403)
         backup_path = f'/nodes/{node}/storage/{args.backup_storage}/content'
         previous = {row['volid'] for row in api('get', backup_path, content='backup', vmid=primary['vmid'])}
         task(api('create', f'/nodes/{node}/vzdump', vmid=primary['vmid'], storage=args.backup_storage, mode='stop'))
