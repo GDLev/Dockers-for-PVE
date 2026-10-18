@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="RELEASE_NOTES.md"><img src="https://img.shields.io/badge/version-0.20.0-blue?style=flat-square" alt="Version 0.20.0" /></a>
+  <a href="RELEASE_NOTES.md"><img src="https://img.shields.io/badge/version-0.20.1-blue?style=flat-square" alt="Version 0.20.1" /></a>
   <a href="#requirements"><img src="https://img.shields.io/badge/Proxmox_VE-9.2-E57000?style=flat-square&amp;logo=proxmox&amp;logoColor=white" alt="Proxmox VE 9.2" /></a>
 </p>
 
@@ -14,7 +14,7 @@ Dockers for Proxmox VE brings Docker projects into the Proxmox VE web interface 
 https://github.com/user-attachments/assets/1f02579a-1869-4d2a-940b-fa072882657b
 
 > [!WARNING]
-> Version 0.20.0 is a prerelease intended for small, non-critical installations. It is not recommended for commercial or complex deployments. Independent security review has not been completed.
+> Version 0.20.1 is a prerelease intended for small, non-critical installations. It is not recommended for commercial or complex deployments. Independent security review has not been completed.
 
 ## Support
 
@@ -65,7 +65,7 @@ PVE still manages networking, storage, and permissions as root in both modes. Ro
 Set up [release verification](SECURITY.md#verify-a-release), then run as root on your PVE node:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.1/install.sh | bash
 ```
 
 You can also download and verify `install.sh` from [Releases](https://github.com/GDLev/Dockers-for-PVE/releases), then run `bash install.sh`.
@@ -77,7 +77,7 @@ Refresh PVE with Ctrl+Shift+R. Dockers for Proxmox VE is now ready to use.
 For unattended installation, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.0/install.sh | bash -s -- install --runtime=rootless --yes
+curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.1/install.sh | bash -s -- install --runtime=rootless --yes
 ```
 
 Add `--nodes=pve1,pve2` to select all cluster nodes on first installation, or `--no-restart` to defer service reload. Later updates and repairs can target individual installed nodes. For DEB installation, see [package installation](CONTRIBUTING.md#build-and-sign).
@@ -96,7 +96,15 @@ bash /var/lib/betterdocker/installer/source/start.sh repair --yes
 
 Repair restores the extension's integration with PVE without changing its version or runtime mode. Check the integration after PVE updates and run Repair if needed. In a cluster, repair affected nodes before creating guests to keep guest IDs protected.
 
-Updates keep your selected runtime mode. To switch modes, follow the separate [runtime conversion instructions](CONTRIBUTING.md#runtime-conversion).
+Updates and repairs keep your selected runtime mode.
+
+## Runtime migration
+
+Choose **Migrate** below **Uninstall** in the installer, select nodes with the same current mode, then choose **rootful** or **rootless**. The installer checks every selected node before asking you to confirm conversion. It prints blockers, progress logs and recovery commands. Migration stops at the first failed node.
+
+Back up your DCTs first and stop all guests on the selected nodes. Guests remain stopped after conversion. Snapshot history, HA, replication and unsupported mounts or networks must be resolved before proceeding; the migrator does not remove them for you.
+
+Keep the printed recovery journal and retained source data. Rollback restores the source runtime and discards subsequent changes in the target runtime. See [runtime conversion](CONTRIBUTING.md#runtime-conversion) for recovery commands and requirements.
 
 ## Uninstall
 

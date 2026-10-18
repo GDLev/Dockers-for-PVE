@@ -30,9 +30,9 @@ class ReleasePublication(unittest.TestCase):
 
     def attempt(self, *, sha='a' * 40, private=False, protected=True, changed=False):
         calls = []
-        names = ['install.sh', 'betterdockers-0.20.0.tar.gz', 'proxmox-betterdockers_0.20.0_all.deb',
+        names = ['install.sh', 'betterdockers-' + publication.VERSION + '.tar.gz', 'proxmox-betterdockers_' + publication.VERSION + '_all.deb',
                  'RELEASE.json', 'RELEASE.sig', 'release-key.pem', 'SHA256SUMS']
-        draft = dict(draft=True, prerelease=True, tag_name='v0.20.0', target_commitish='a' * 40,
+        draft = dict(draft=True, prerelease=True, tag_name='v' + publication.VERSION, target_commitish='a' * 40,
                      assets=[dict(id=i + 1, name=n, size=1) for i, n in enumerate(names)])
         reads = 0
 
