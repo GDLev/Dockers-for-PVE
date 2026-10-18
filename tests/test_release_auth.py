@@ -147,7 +147,7 @@ class ReleaseAuthentication(unittest.TestCase):
 
     def test_streamed_bootstrap_executes_only_the_authenticated_installer(self):
         bootstrap = (ROOT / 'install.sh').read_text()
-        section = bootstrap[bootstrap.index('    local metadata_url='):bootstrap.index('    echo "Downloading Proxmox BetterDockers')]
+        section = bootstrap[bootstrap.index('    local metadata_url='):bootstrap.index('    echo "Downloading ')]
         binaries = self.root / 'bin'
         binaries.mkdir()
         curl = binaries / 'curl'
