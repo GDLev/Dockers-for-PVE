@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/readme-banner.svg" alt="Dockers for Proxmox VE" width="800" />
+  <img src="assets/readme-banner.svg" alt="Dockers for Proxmox VE" width="517" />
 </p>
 
 <p align="center">
