@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import unittest
+import yaml
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,20 @@ spec.loader.exec_module(publication)
 
 
 class ReleasePublication(unittest.TestCase):
+    def test_draft_access_is_scoped_to_manual_release_jobs(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
+        self.assertEqual(workflow['permissions']['contents'], 'read')
+        self.assertEqual(set(workflow.get('on', workflow.get(True))), {'workflow_dispatch'})
+        self.assertEqual(workflow['jobs']['verify']['permissions'], {'contents': 'write', 'actions': 'read'})
+        self.assertEqual(workflow['jobs']['verify']['if'], "github.ref == 'refs/heads/main'")
+        self.assertNotIn('--publish', workflow['jobs']['verify']['steps'][-1]['run'])
+        publisher = workflow['jobs']['publish']
+        self.assertEqual(publisher['environment'], 'release')
+        self.assertIn("vars.RELEASE_PUBLICATION_ENABLED == 'true'", publisher['if'])
+        checks = yaml.safe_load((ROOT / '.github/workflows/check.yml').read_text())
+        self.assertEqual(checks['permissions']['contents'], 'read')
+        self.assertTrue(all(job.get('permissions', checks['permissions']).get('contents') == 'read' for job in checks['jobs'].values()))
+
     def attempt(self, *, sha='a' * 40, private=False, protected=True, changed=False):
         calls = []
         names = ['install.sh', 'betterdockers-0.20.0.tar.gz', 'proxmox-betterdockers_0.20.0_all.deb',

@@ -19,6 +19,10 @@ concurrency:
 jobs:
   verify:
     if: github.ref == 'refs/heads/main'
+    permissions:
+      # GitHub hides draft releases from tokens without push access.
+      contents: write
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
