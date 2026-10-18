@@ -11,7 +11,7 @@
 
 Dockers for Proxmox VE brings Docker projects into the Proxmox VE web interface as **DCT** guests. Each guest has its own ID and can run a single image or a Compose stack. Docker runs directly on the PVE host, using either a rootful or rootless runtime.
 
-https://github.com/user-attachments/assets/e3c720eb-65ea-4d72-9507-beb8227b2b9d
+https://github.com/user-attachments/assets/65829a65-72af-4b6d-b681-c7ac81ec3553
 
 ## Support
 
