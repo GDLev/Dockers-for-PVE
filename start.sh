@@ -7,7 +7,7 @@ if [[ $# -eq 0 ]]; then
 fi
 for option in "$@"; do
     case "$option" in
-        finish|--development-source|--allow-downgrade|--nodes|--nodes=*|--runtime|--yes|--no-restart|--interactive|--help|-h)
+        migrate|finish|--development-source|--allow-downgrade|--nodes|--nodes=*|--runtime|--yes|--no-restart|--interactive|--help|-h)
             exec python3 "$PROJECT_DIR/scripts/installer.py" "$@" ;;
     esac
 done
@@ -48,7 +48,7 @@ else
     python3 "$PROJECT_DIR/scripts/release.py" source "$PROJECT_DIR"
 fi
 exec 9>/run/lock/betterdocker-install.lock
-flock -n 9 || { echo 'Another BetterDocker installer is running.' >&2; exit 1; }
+flock -n 9 || { echo 'Another Dockers for PVE installer is running.' >&2; exit 1; }
 if [[ "$ACTION" != uninstall && "$ACTION" != finish-restart && ${OPERATION:-} != uninstall ]]; then
     python3 "$PROJECT_DIR/scripts/dctlib/requirements.py" host
 fi
@@ -61,14 +61,14 @@ check_uninstall() {
             if (-f $path) {
                 open(my $fh, "<", $path) or die "$path: $!\n";
                 local $/; my $config = <$fh>;
-                die qq(Remove DCT HA resources before uninstalling BetterDocker.\n)
+                die qq(Remove DCT HA resources before uninstalling Dockers for PVE.\n)
                     if $config =~ /^docker:[ \t]*[1-9][0-9]*[ \t]*$/m;
             }
         '
         perl -MPVE::ReplicationConfig -e '
             my $config = PVE::ReplicationConfig->new();
             for my $job (values %{$config->{ids}}) {
-                die "Remove DCT replication jobs before uninstalling BetterDocker.\n"
+                die "Remove DCT replication jobs before uninstalling Dockers for PVE.\n"
                     if -f "/etc/pve/betterdocker/ids/$job->{guest}.json";
             }
         '
@@ -138,7 +138,7 @@ if command -v dockerd >/dev/null; then
 fi
 if [[ "$ACTION" == install ]]; then
     stage dependencies
-    echo 'Updating the package index and installing BetterDocker dependencies.'
+    echo 'Updating the package index and installing Dockers for PVE dependencies.'
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml apparmor ca-certificates curl iputils-arping isc-dhcp-client ndisc6 pve-xtermjs nftables iptables rsync
     if [[ "$RUNTIME_MODE" == rootless ]]; then
@@ -379,8 +379,8 @@ if [[ -f "$PROJECT_DIR/.release.json" ]]; then
 fi
 trap - ERR
 if [[ $DEFER_RESTART == 1 ]]; then
-    echo 'BetterDocker installed. Panel/API reload is pending.'
+    echo 'Dockers for PVE installed. Panel/API reload is pending.'
 else
-    echo 'BetterDocker installed. Refresh with Ctrl+Shift+R and sign in as root@pam.'
+    echo 'Dockers for PVE installed. Refresh with Ctrl+Shift+R and sign in as root@pam.'
 fi
 echo "File backups: $BACKUP_DIR"

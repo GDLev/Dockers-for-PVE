@@ -23,12 +23,12 @@ class TerminalInstallerTests(unittest.TestCase):
             python = Path(directory) / 'python3'
             python.write_text('#!' + sys.executable + '\nimport sys,json\nsys.path.insert(0,' + repr(str(ROOT / 'scripts')) + ')\nfrom installer import parser\nsys.argv=sys.argv[1:]\nprint(json.dumps(vars(parser().parse_args())))\n')
             python.chmod(0o755)
-            for flags in (['--nodes', 'one,two'], ['--nodes=one,two'], ['--runtime', 'rootless', '--nodes', 'one,two']):
-                result = subprocess.run(['bash', str(ROOT / 'start.sh'), 'repair', *flags],
+            for action, flags in (('repair', ['--nodes', 'one,two']), ('repair', ['--nodes=one,two']), ('migrate', ['--runtime', 'rootless', '--nodes', 'one,two'])):
+                result = subprocess.run(['bash', str(ROOT / 'start.sh'), action, *flags],
                                         env=dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH']),
                                         capture_output=True, text=True, check=True)
                 values = json.loads(result.stdout)
-                self.assertEqual((values['action'], values['nodes']), ('repair', 'one,two'))
+                self.assertEqual((values['action'], values['nodes']), (action, 'one,two'))
 
     def test_worker_progress_markers_use_english_messages(self):
         with tempfile.TemporaryDirectory() as folder:

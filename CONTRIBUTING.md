@@ -65,7 +65,7 @@ Live tests require an explicit private configuration. On the disposable test nod
   "addresses": "192.0.2.0/24",
   "backup_storage": "backup",
   "source": "/root/Dockers-for-PVE",
-  "package": "/root/proxmox-betterdockers_0.20.0_all.deb"
+  "package": "/root/proxmox-betterdockers_0.20.1_all.deb"
 }
 ```
 
@@ -100,8 +100,8 @@ The release public key is in `packaging/release-key.pem`. The installer does not
 Install a signed DEB through the verified release helper:
 
 ```bash
-python3 scripts/release.py deb proxmox-betterdockers_0.20.0_all.deb \
-    --manifest RELEASE.json --signature RELEASE.sig --version 0.20.0
+python3 scripts/release.py deb proxmox-betterdockers_0.20.1_all.deb \
+    --manifest RELEASE.json --signature RELEASE.sig --version 0.20.1
 ```
 
 The signer also writes `SHA256SUMS`. Keep the accepted CI artifact unchanged. `packaging/verify-release.py <signed-assets> --build <downloaded-ci-artifact>` verifies the signature, reviewed source, public key, checksums and original build bytes.
