@@ -69,7 +69,7 @@ Run in a new empty directory on the PVE node as root. Install `curl`, `python3`,
 ```bash
 (
 set -euo pipefail
-bd_release_url=https://github.com/GDLev/Dockers-for-PVE/releases/download/v0.20.0
+bd_release_url=https://github.com/GDLev/Dockers-for-PVE/releases/download/v0.20.1
 for file in install.sh RELEASE.json RELEASE.sig release-key.pem; do
     curl --proto '=https' --proto-redir '=https' --fail --location --max-filesize 4194304 \
         "$bd_release_url/$file" --output "$file"
@@ -81,7 +81,7 @@ python3 - <<'VERIFY'
 import hashlib, json, pathlib
 metadata = json.loads(pathlib.Path('RELEASE.json').read_text())
 actual = hashlib.sha256(pathlib.Path('install.sh').read_bytes()).hexdigest()
-if metadata['version'] != '0.20.0' or metadata['artifacts']['install.sh'] != actual:
+if metadata['version'] != '0.20.1' or metadata['artifacts']['install.sh'] != actual:
     raise SystemExit('Installer checksum or version mismatch')
 VERIFY
 install -d -m 0755 /etc/betterdocker
