@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -177,7 +178,8 @@ class DeploymentSecurityTests(unittest.TestCase):
              patch.object(worker, 'detail'), patch.object(worker, 'snapshot_containers', return_value=[]), \
              patch.object(worker, 'snapshot_mounts'), patch.object(worker, 'pve_storage') as storage, \
              patch.object(worker, 'run') as run:
+            run.return_value = subprocess.CompletedProcess([], 0, '[{"Config":{"Labels":{}}}]', '')
             with self.assertRaisesRegex(ValueError, 'project-owned'):
                 worker.snapshot_apply(ID, 'pve', 'unsafe')
             storage.assert_not_called()
-            run.assert_not_called()
+            run.assert_called_once_with(['docker', 'image', 'inspect', 'busybox:1.37'], check=False, capture_output=True)
