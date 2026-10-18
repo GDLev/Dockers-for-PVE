@@ -10,7 +10,7 @@ main() {
     done
     local project_dir
     if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-        echo 'Usage: bash install.sh [install|repair|uninstall|finish|check] [--nodes=node1,node2] [--runtime=rootful|rootless] [--yes] [--no-restart] [--interactive]'
+        echo 'Usage: bash install.sh [install|repair|uninstall|migrate|finish|check] [--nodes=node1,node2] [--runtime=rootful|rootless] [--yes] [--no-restart] [--interactive]'
         return 0
     fi
     [[ $EUID -eq 0 ]] || { echo 'Run as root on a Proxmox VE host.' >&2; return 1; }
@@ -21,7 +21,7 @@ main() {
     project_dir=$(mktemp -d /tmp/betterdocker-install.XXXXXXXX)
     # Expand the path now: the local variable is gone when the EXIT trap runs.
     trap "rm -rf -- '$project_dir'" EXIT
-    local release_version=0.20.0
+    local release_version=0.20.1
     local archive_name="betterdockers-$release_version.tar.gz"
     local release_url="https://github.com/GDLev/Dockers-for-PVE/releases/download/v$release_version"
     local trusted_key=/etc/betterdocker/release-key.pem
@@ -77,7 +77,7 @@ METADATA
         bash "$installer_path" "$@" </dev/null
         return
     fi
-    echo "Downloading Proxmox BetterDockers $release_version."
+    echo "Downloading Dockers for PVE $release_version."
     curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 \
         "${BETTERDOCKER_SOURCE_URL:-$release_url/$archive_name}" --max-filesize 134217728 \
         --output "$project_dir/project.tar.gz" </dev/null
@@ -142,7 +142,7 @@ with tarfile.open(fileobj=source) as handle:
     handle.extractall('/proc/self/fd/' + str(output_fd), members=members, **options)
 PY
     [[ -f "$project_dir/start.sh" && -f "$project_dir/scripts/installer.py" ]] || {
-        echo 'Downloaded archive does not contain the BetterDocker installer.' >&2
+        echo 'Downloaded archive does not contain the Dockers for PVE installer.' >&2
         return 1
     }
     cp "$project_dir/RELEASE.json" "$project_dir/.release.json"

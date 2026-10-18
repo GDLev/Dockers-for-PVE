@@ -1,5 +1,8 @@
 """Rootful security setup must precede any runtime switch or daemon startup."""
 import importlib.util
+import contextlib
+import io
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,6 +26,25 @@ class RuntimeConversionTests(unittest.TestCase):
         setting.start(); self.addCleanup(setting.stop)
         selected = patch.object(conversion.runtime, 'load', return_value=SimpleNamespace(mode='rootless', rootless=True))
         selected.start(); self.addCleanup(selected.stop)
+
+    def test_recovery_journal_is_printed_before_guest_operations(self):
+        report = dict(source='rootful', target='rootless', blockers=[], guests=[dict(id='guest')])
+        output = io.StringIO()
+        folder = self.profile.parent / 'migrations'
+        config = self.profile.parent / 'runtime.json'
+        with patch.object(conversion, 'ROOT', folder), \
+                patch.object(conversion, 'inventory', return_value=report), \
+                patch.object(conversion.runtime, 'CONFIG', config), \
+                patch.object(conversion.subprocess, 'run', return_value=SimpleNamespace(returncode=1)), \
+                patch.object(conversion.worker, 'operation', side_effect=ValueError('guest locked')), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(ValueError, 'guest locked'):
+                conversion.convert('rootless')
+        receipt = json.loads(output.getvalue())
+        journal = folder / receipt['journal'] / 'journal.json'
+        self.assertTrue(journal.is_file())
+        self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'backup')
 
     def test_missing_profile_blocks_preview_and_apply_before_runtime_changes(self):
         self.profile.unlink()
