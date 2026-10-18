@@ -15,6 +15,7 @@ CASES = (
     'test_security_policy.HardenedPolicy',
     'test_security_policy.ControlFiles.test_environment_read_group_is_only_the_selected_runtime',
     'test_private_images.PrivateImages',
+    'test_backup_staging.BackupStaging',
     'test_security_contracts.SecurityContracts',
     'test_apparmor_start.AppArmorStart',
     'test_recovery_availability.RecoveryAvailability',

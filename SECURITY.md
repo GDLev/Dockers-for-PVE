@@ -54,6 +54,8 @@ A managed data disk limits data stored on that disk. It does not cap images, Doc
 
 Log rotation is per container. Retention budgets and free-space reservations limit extension-managed operations, but other host processes can consume the same storage. Tmpfs uses memory. Keep node capacity monitoring and backups in place. See [resource budgets](API_DOCS.md#project-resource-budgets) and [storage admission](API_DOCS.md#peak-space-checks).
 
+Backup restore acquires an operation slot before downloading or decompressing data. Restore staging has a fixed filesystem capacity backed by preallocated host storage; it cannot grow beyond that allocation. Insufficient staging space aborts the restore. Abandoned staging is retained for safe cleanup until its workers have exited.
+
 ## Release security
 
 Release assets are signed with the maintainer key in `packaging/release-key.pem`. Unsigned CI artifacts and development checkouts are not signed installation releases.

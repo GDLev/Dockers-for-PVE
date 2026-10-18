@@ -739,7 +739,7 @@ sub restore_backup {
         my $vmid = eval { reserve_guest_id($identifier, $param->{node}, $param->{newid}); };
         if (my $error = $@) { unlink $path; die $error; }
         my $upid = eval { $rpc->fork_worker('betterdockerrestore', $vmid, $user, sub {
-            eval { PVE::Tools::run_command(['/usr/local/lib/betterdocker/backup.pl', 'restore',
+            eval { PVE::Tools::run_command(['/usr/local/lib/betterdocker/guest_state.py', 'restore-backup',
                 $param->{archive}, $identifier, $param->{node}, $path]); };
             my $error = $@;
             unlink $path;

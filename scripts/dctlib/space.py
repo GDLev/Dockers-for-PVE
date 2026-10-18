@@ -171,6 +171,23 @@ def sweep():
     return removed
 
 
+def release(key):
+    """Drop a reservation after its bytes have been physically allocated."""
+    if not re.fullmatch(r'[0-9a-f]{32,64}', key):
+        raise ValueError('Invalid peak-space reservation key')
+    with anchored(ROOT, directory=True) as directory:
+        gate = admission.open_lock(directory, 'allocation.lock')
+        try:
+            fcntl.flock(gate, fcntl.LOCK_EX)
+            path = ROOT / (key + '.json')
+            saved = read_json(path)
+            if saved['owner'] != owner():
+                raise ValueError('Peak-space reservation owner changed')
+            path.unlink()
+        finally:
+            os.close(gate)
+
+
 @contextlib.contextmanager
 def transfer_loan(token):
     file = ROOT / (token + '.json')
