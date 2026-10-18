@@ -16,6 +16,8 @@ MESSAGES = {
     'install': 'Install / Update',
     'repair': 'Repair',
     'uninstall': 'Uninstall',
+    'migrate': 'Migrate',
+    'migrate_description': 'Convert stopped DCTs between rootful and rootless Docker. Checks prerequisites first and retains source data for recovery.',
     'finish': 'Finish pending reload',
     'check': 'Check compatibility',
     'install_description': 'Install dependencies, Docker and the PVE extension. Existing runtime modes are preserved.',
@@ -120,7 +122,7 @@ class Terminal:
     def heading(self):
         self.output()
         target = self.stream if self.stream else __import__('sys').stdout
-        target.write(self.style('  BetterDockers') + '  ' + self.t('installer') + '\n\n')
+        target.write(self.style('  Dockers for PVE') + '  ' + self.t('installer') + '\n\n')
 
     def width(self):
         try:
