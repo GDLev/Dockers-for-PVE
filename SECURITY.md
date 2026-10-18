@@ -69,7 +69,7 @@ Run in a new empty directory on the PVE node as root. Install `curl`, `python3`,
 ```bash
 (
 set -euo pipefail
-bd_release_url=https://github.com/GDLev/Proxmox-BetterDockers/releases/download/v0.20.0
+bd_release_url=https://github.com/GDLev/dockers-for-pve/releases/download/v0.20.0
 for file in install.sh RELEASE.json RELEASE.sig release-key.pem; do
     curl --proto '=https' --proto-redir '=https' --fail --location --max-filesize 4194304 \
         "$bd_release_url/$file" --output "$file"

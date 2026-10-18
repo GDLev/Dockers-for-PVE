@@ -65,10 +65,10 @@ PVE still manages networking, storage, and permissions as root in both modes. Ro
 Set up [release verification](SECURITY.md#verify-a-release), then run as root on your PVE node:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GDLev/Proxmox-BetterDockers/v0.20.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GDLev/dockers-for-pve/v0.20.0/install.sh | bash
 ```
 
-You can also download and verify `install.sh` from [Releases](https://github.com/GDLev/Proxmox-BetterDockers/releases), then run `bash install.sh`.
+You can also download and verify `install.sh` from [Releases](https://github.com/GDLev/dockers-for-pve/releases), then run `bash install.sh`.
 
 Choose **Install / Update**, select the target nodes and runtime mode, and follow the prompts. Use Space to select nodes and Enter to continue. After installation, press Enter to reload the PVE panel and API services. Cluster installations use PVE's existing SSH access between nodes.
 
@@ -77,7 +77,7 @@ Refresh PVE with Ctrl+Shift+R. Dockers for Proxmox VE is now ready to use.
 For unattended installation, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GDLev/Proxmox-BetterDockers/v0.20.0/install.sh | bash -s -- install --runtime=rootless --yes
+curl -fsSL https://raw.githubusercontent.com/GDLev/dockers-for-pve/v0.20.0/install.sh | bash -s -- install --runtime=rootless --yes
 ```
 
 Add `--nodes=pve1,pve2` to select all cluster nodes on first installation, or `--no-restart` to defer service reload. Later updates and repairs can target individual installed nodes. For DEB installation, see [package installation](CONTRIBUTING.md#build-and-sign).

@@ -16,7 +16,7 @@ const help = () => Ext.create('Ext.window.Window', { title: translate('Docker he
             ["Remove", "Persistent data and deployment files are retained."],
         ].map(([label, text]) => '<p><strong>' + Ext.htmlEncode(translate(label)) + '</strong><br>' +
             Ext.htmlEncode(translate(text)) + '</p>').join('') +
-            '<p><a href="https://github.com/GDLev/Proxmox-BetterDockers" target="_blank" rel="noopener">' + Ext.htmlEncode(translate('Documentation')) + '</a></p>',
+            '<p><a href="https://github.com/GDLev/dockers-for-pve" target="_blank" rel="noopener">' + Ext.htmlEncode(translate('Documentation')) + '</a></p>',
     }] }).show();
 function configureHelp(win) {
     const button = win.down('proxmoxHelpButton');
