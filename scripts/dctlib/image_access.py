@@ -8,7 +8,7 @@ def reference(image, identifier):
     from . import projects as w
     if not isinstance(image, str) or not image:
         raise ValueError('Invalid image reference')
-    if w.trusted_management() or not (image.startswith(('betterdocker-', 'sha256:')) or '@sha256:' in image or re.fullmatch(r'[0-9a-f]{12,64}', image)):
+    if w.trusted_management():
         return
     result = w.run(['docker', 'image', 'inspect', image], check=False, capture_output=True)
     if result.returncode:
