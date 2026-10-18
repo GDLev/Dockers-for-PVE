@@ -56,8 +56,9 @@ def main():
     elif args.operation == 'cleanup-temporary':
         if projects.os.geteuid() != 0:
             raise ValueError('Temporary cleanup requires the host administrator')
-        from . import retention, space
+        from . import retention, space, backup_restore
         result = retention.sweep()
+        result['restore_staging_removed'] = backup_restore.sweep()
         result['space_records_removed'] = space.sweep()
         print(json.dumps(result))
     elif args.operation == 'security-policy':

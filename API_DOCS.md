@@ -144,6 +144,8 @@ Node policies are root-owned JSON files under `/etc/betterdocker/`, with mode `0
 
 Resource defaults affect future delegated guests. Retention checks reject operations exceeding budgets; they do not prune snapshots or delete data. Log rotation applies when containers are created or recreated. Space reservations coordinate extension operations, but other host processes can still consume capacity. These checks are not filesystem quotas for arbitrary application writes.
 
+Restore holds a node operation slot through download, extraction and import. Temporary restore data uses a preallocated, size-limited filesystem. Its capacity is bounded by half of `transfer_bytes` and available host space after the safety margin. Backups that do not fit fail without expanding staging; provide more free space or adjust the administrator budgets. `dct cleanup-temporary` also removes abandoned restore staging after its workers have exited.
+
 Enabling `require_read_only_rootless` requires read-only roots and bounded writable managed disks or explicitly sized tmpfs for Hardened rootless guests. Writable named/anonymous volumes are incompatible. Configure mounts before enabling this policy; existing guests are not automatically recreated. Rootless writable-layer quotas remain unsupported.
 
 For private vulnerability reporting and the isolation model, see [SECURITY.md](SECURITY.md). For CLI help, use `dct help` or `dct help <command>`. Installed extension and guest data locations are listed in [CONTRIBUTING.md](CONTRIBUTING.md#installed-files).

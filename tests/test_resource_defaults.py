@@ -5,6 +5,7 @@ import io
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -119,6 +120,7 @@ class ResourceDefaults(unittest.TestCase):
 
     def test_actual_prepare_uses_same_defaults_for_rootful_and_rootless(self):
         limits.initialize(self.directory)
+        self.engine.return_value = subprocess.CompletedProcess([], 0, '[{"Config":{"Labels":{}}}]', '')
         data = {'mode': 'compose', 'compose': 'services: {app: {image: nginx}}', 'address': '10.0.0.20'}
         for rootless in (False, True):
             self.selected.rootless = rootless
@@ -127,7 +129,9 @@ class ResourceDefaults(unittest.TestCase):
             self.assertEqual(config['services']['app']['cpus'], 1)
             self.assertEqual(config['services']['app']['mem_limit'], 512 * 1048576)
             self.assertEqual(config['services']['app']['pids_limit'], 128)
-        self.engine.assert_not_called()
+        self.assertEqual(self.engine.call_count, 2)
+        for invocation in self.engine.call_args_list:
+            self.assertEqual(invocation.args[0], ['docker', 'image', 'inspect', 'nginx'])
 
     def test_preview_has_budget_without_writing_project_policy(self):
         config = {'services': {'app': {'cpus': 5}}}

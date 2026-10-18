@@ -933,7 +933,7 @@ def main():
     if os.geteuid():
         raise SystemExit('Root required')
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=('capture','restore','pack','unpack','quiesce','cleanup-capture','cleanup-import','clone','template'))
+    parser.add_argument('action',choices=('capture','restore','restore-backup','pack','unpack','quiesce','cleanup-capture','cleanup-import','clone','template'))
     parser.add_argument('values',nargs='*')
     parser.add_argument('--lock-fd',type=int)
     parser.add_argument('--keep-journal',action='store_true')
@@ -945,6 +945,16 @@ def main():
     elif args.action=='restore':
         folder,identifier,node,options=args.values
         value=read(options); restore_state(folder,identifier,node,value.get('deployment',{}),value.get('storage',''),lock_fd=args.lock_fd)
+    elif args.action=='restore-backup':
+        import signal
+        from dctlib.backup_restore import restore
+        def interrupted(signum, frame):
+            raise InterruptedError('DCT restore interrupted')
+        previous = signal.signal(signal.SIGTERM, interrupted)
+        try:
+            restore(*args.values)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
     elif args.action=='quiesce': quiesce(*args.values,lock_fd=args.lock_fd)
     elif args.action=='clone':
         identifier,node,destination,options=args.values
