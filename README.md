@@ -13,6 +13,9 @@ Dockers for Proxmox VE brings Docker projects into the Proxmox VE web interface 
 
 https://github.com/user-attachments/assets/65829a65-72af-4b6d-b681-c7ac81ec3553
 
+> [!WARNING]
+> Version 0.20.0 is a prerelease intended for small, non-critical installations. It is not recommended for commercial or complex deployments. Independent security review has not been completed.
+
 ## Support
 
 Support development on Ko-fi.
@@ -49,9 +52,6 @@ Choose the runtime when installing. Updates and repair preserve the node's mode.
 | Rootful | Host-root daemon | Managed enforcing profile for Hardened guests | Requires `overlay2` on XFS with project quotas |
 
 PVE still manages networking, storage, and permissions as root in both modes. Rootless is the default for new installations. Neither mode provides VM isolation. See [SECURITY.md](SECURITY.md).
-
-> [!WARNING]
-> Version 0.20.0 is a prerelease intended for small, non-critical installations. It is not recommended for commercial or complex deployments. Independent security review has not been completed.
 
 > [!NOTE]
 > Containers share the host kernel. Rootful Docker has host-root authority; rootless guests share one runtime account per node. Neither mode is suitable for hostile workloads. Delegated deployments require the Hardened policy. Administrator access is required for host namespaces, privileged containers, devices, external mounts, and custom drivers.
