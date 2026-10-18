@@ -39,7 +39,7 @@ Support development on Ko-fi.
 - A Linux bridge and available addresses for the DCT endpoints.
 - For rootless mode, the `10.240.0.0/16` and `169.254.240.0/30` ranges must not overlap your host's network routes.
 
-Tested with PVE 9.2.21 and kernel 7.0.14-24-pve. PBS backup/restore uses native PVE storage and was checked with PBS 4.2-0. Other combinations have not been verified.
+Tested with PVE 9.2.21 and kernel 7.0.14-24-pve. PBS backup/restore uses native PVE storage and was checked with PBS 4.2.0-1. Other combinations have not been verified.
 
 Choose the runtime when installing. Updates and repair preserve the node's mode.
 
