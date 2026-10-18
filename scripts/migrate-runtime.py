@@ -181,6 +181,7 @@ def convert(target, resume=None):
                                      for unit in ('docker.service', 'docker.socket')})
         value['active'] = [unit for unit in SERVICES if subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0]
         save(folder / 'journal.json', value)
+    print(json.dumps({'journal': folder.name, 'phase': value['phase']}), flush=True)
     with contextlib.ExitStack() as locks:
         for guest in value['guests']:
             handle = locks.enter_context(worker.operation(guest['id'], 'runtime-conversion', wait_timeout=300))

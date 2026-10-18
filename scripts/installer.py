@@ -337,6 +337,8 @@ check_version(metadata, sys.argv[3] == '1', manifest_digest=digest(sys.argv[1]))
 
 
 def supported(node, action):
+    if action == 'migrate' and (not node['installed'] or not node['mode'] or node['pending']):
+        return False
     return not node['error'] and (action in ('uninstall', 'finish') or supported_pve(node['version']))
 
 
@@ -358,7 +360,7 @@ def installation_targets(inventory, requested, action):
     missing = [item['node'] for item in inventory if item['node'] not in requested and
                (not integration.registered(item['node']) or (not item['error'] and not item['installed']))]
     if missing:
-        raise ValueError('BetterDockers must be installed on every cluster node. Include these nodes with --nodes: ' + ', '.join(missing))
+        raise ValueError('Dockers for PVE must be installed on every cluster node. Include these nodes with --nodes: ' + ', '.join(missing))
 
 
 def register_node(action):
@@ -374,8 +376,8 @@ PVE::Cluster::cfs_lock_file('datacenter.cfg', 10, sub {
 
 
 def parser():
-    result = argparse.ArgumentParser(description='Install, repair or remove BetterDockers on selected PVE nodes.')
-    result.add_argument('action', nargs='?', choices=('install', 'repair', 'uninstall', 'finish', 'check'))
+    result = argparse.ArgumentParser(description='Install, repair, remove or migrate Dockers for PVE on selected nodes.')
+    result.add_argument('action', nargs='?', choices=('install', 'repair', 'uninstall', 'migrate', 'finish', 'check'))
     result.add_argument('--development-source', action='store_true', help='Explicitly install an unsigned local checkout. Never use for downloaded releases.')
     result.add_argument('--allow-downgrade', action='store_true', help='Deliberately install an older signed release.')
     result.add_argument('--nodes', help='Comma-separated cluster node names. Default: local node.')
@@ -425,7 +427,7 @@ def main():
     else:
         import release
         release.source(SOURCE, args.allow_downgrade)
-    interactive = not args.yes and (args.action is None or args.interactive)
+    interactive = not args.yes and (args.action is None or args.interactive or args.action == 'migrate')
     ui = Terminal()
     runner = None
     handlers = {}
@@ -440,7 +442,7 @@ def main():
         cluster = Cluster()
         action = args.action
         if interactive and action is None:
-            action = ui.choose(ui.t('operation'), [Choice(a, ui.t(a), ui.t(a + '_description')) for a in ('install', 'repair', 'uninstall', 'finish')], ['install'])[0]
+            action = ui.choose(ui.t('operation'), [Choice(a, ui.t(a), ui.t(a + '_description')) for a in ('install', 'repair', 'uninstall', 'migrate', 'finish')], ['install'])[0]
         if action is None:
             raise ValueError(ui.t('no_terminal'))
         inventory = cluster.inventory()
@@ -455,7 +457,7 @@ def main():
                     label += '  ' + ui.t('unavailable')
                 description = node['error'] or node['version']
                 if not enabled and not node['error']:
-                    description = ui.t('unsupported') + ' ' + description
+                    description = ('Install the extension and finish any pending reload first. ' if action == 'migrate' and (not node['installed'] or not node['mode'] or node['pending']) else ui.t('unsupported') + ' ') + description
                 choices.append(Choice(node['node'], label, description, enabled))
             if not any(c.enabled for c in choices):
                 raise ValueError(ui.t('no_nodes'))
@@ -469,6 +471,12 @@ def main():
         if any(not supported(node, action) for node in nodes):
             raise ValueError(ui.t('unavailable') + ': ' + ', '.join(node['node'] for node in nodes if not supported(node, action)))
         installation_targets(inventory, requested, action)
+        if action == 'migrate':
+            from installer_migration import migrate
+            runner = Runner(cluster, ui)
+            for name in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(name, runner.cancel)
+            return migrate(runner, nodes, args.runtime, interactive)
         if action in ('uninstall', 'finish', 'check'):
             modes = {node['node']: node['mode'] for node in nodes}
         else:
