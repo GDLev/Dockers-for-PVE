@@ -64,7 +64,7 @@ Live tests require an explicit private configuration. On the disposable test nod
   "api_host": "pve1.example",
   "addresses": "192.0.2.0/24",
   "backup_storage": "backup",
-  "source": "/root/dockers-for-pve",
+  "source": "/root/Dockers-for-PVE",
   "package": "/root/proxmox-betterdockers_0.20.0_all.deb"
 }
 ```
