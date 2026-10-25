@@ -62,6 +62,12 @@ Release assets are signed with the maintainer key in `packaging/release-key.pem`
 
 Before publishing, complete the required release checks, clean signed installation acceptance, the supported environment matrix, and an independent manual review. Publish only the tested artifacts with signed metadata and a public-key fingerprint confirmed through an independent channel. See [release preparation](CONTRIBUTING.md) and [release notes](RELEASE_NOTES.md).
 
+### First installation
+
+The README command downloads the installer over GitHub HTTPS. On a clean host, the installer saves its bundled maintainer public key after checking its pinned fingerprint, then verifies signed release metadata and installation files. This protects the downloaded release files; it does not independently authenticate the first script downloaded over HTTPS.
+
+Existing trust files are never automatically replaced. An incomplete setup, unsafe file permissions or a key/fingerprint mismatch stops installation. For independent verification, confirm the fingerprint with the maintainer and follow the manual procedure below before running the installer.
+
 ### Verify a release
 
 Run in a new empty directory on the PVE node as root. Install `curl`, `python3`, `openssl` and `ca-certificates` first if absent. Confirm this public-key fingerprint directly with the maintainer through an independently trusted channel before using it. Downloading a key and fingerprint together does not establish trust.
@@ -69,7 +75,7 @@ Run in a new empty directory on the PVE node as root. Install `curl`, `python3`,
 ```bash
 (
 set -euo pipefail
-bd_release_url=https://github.com/GDLev/Dockers-for-PVE/releases/download/v0.20.1
+bd_release_url=https://github.com/GDLev/Dockers-for-PVE/releases/download/v0.20.2
 for file in install.sh RELEASE.json RELEASE.sig release-key.pem; do
     curl --proto '=https' --proto-redir '=https' --fail --location --max-filesize 4194304 \
         "$bd_release_url/$file" --output "$file"
@@ -81,7 +87,7 @@ python3 - <<'VERIFY'
 import hashlib, json, pathlib
 metadata = json.loads(pathlib.Path('RELEASE.json').read_text())
 actual = hashlib.sha256(pathlib.Path('install.sh').read_bytes()).hexdigest()
-if metadata['version'] != '0.20.1' or metadata['artifacts']['install.sh'] != actual:
+if metadata['version'] != '0.20.2' or metadata['artifacts']['install.sh'] != actual:
     raise SystemExit('Installer checksum or version mismatch')
 VERIFY
 install -d -m 0755 /etc/betterdocker

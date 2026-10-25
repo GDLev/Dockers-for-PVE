@@ -12,7 +12,7 @@ from check_security_noninvasive import run_suite
 result = run_suite()
 required = unittest.defaultTestLoader.loadTestsFromNames([
     'test_native_fixtures', 'test_compose_integration', 'test_release_auth', 'test_bootstrap_ownership',
-    'test_installer', 'test_terminal_installer', 'test_cluster_installation', 'test_security_install', 'test_acceptance_report', 'test_docker_install', 'test_release_publication',
+    'test_installer', 'test_installer_trust', 'test_terminal_installer', 'test_cluster_installation', 'test_security_install', 'test_acceptance_report', 'test_docker_install', 'test_release_publication',
 ])
 from dctlib import operation_capacity, retention, space, filesystem_policy
 with tempfile.TemporaryDirectory(prefix='bd-ci-controls-') as folder, contextlib.ExitStack() as controls:
