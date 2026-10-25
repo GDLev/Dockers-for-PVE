@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="RELEASE_NOTES.md"><img src="https://img.shields.io/badge/version-0.20.1-blue?style=flat-square" alt="Version 0.20.1" /></a>
+  <a href="RELEASE_NOTES.md"><img src="https://img.shields.io/badge/version-0.20.2-blue?style=flat-square" alt="Version 0.20.2" /></a>
   <a href="#requirements"><img src="https://img.shields.io/badge/Proxmox_VE-9.2-E57000?style=flat-square&amp;logo=proxmox&amp;logoColor=white" alt="Proxmox VE 9.2" /></a>
 </p>
 
@@ -14,7 +14,7 @@ Dockers for Proxmox VE brings Docker projects into the Proxmox VE web interface 
 https://github.com/user-attachments/assets/1f02579a-1869-4d2a-940b-fa072882657b
 
 > [!WARNING]
-> Version 0.20.1 is a prerelease intended for small, non-critical installations. It is not recommended for commercial or complex deployments. Independent security review has not been completed.
+> Version 0.20.2 is a prerelease intended for small, non-critical installations. It is not recommended for commercial or complex deployments. Independent security review has not been completed.
 
 ## Support
 
@@ -62,13 +62,13 @@ PVE still manages networking, storage, and permissions as root in both modes. Ro
 
 ## Installation
 
-Set up [release verification](SECURITY.md#verify-a-release), then run as root on your PVE node:
+Run as root on your PVE node:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.2/install.sh | bash
 ```
 
-You can also download and verify `install.sh` from [Releases](https://github.com/GDLev/Dockers-for-PVE/releases), then run `bash install.sh`.
+The installer sets up its release signing key on first use and verifies the signed downloads. Existing trust files are checked and preserved. The initial command trusts GitHub HTTPS; for independent key verification and offline installation, see [release verification](SECURITY.md#verify-a-release).
 
 Choose **Install / Update**, select the target nodes and runtime mode, and follow the prompts. Use Space to select nodes and Enter to continue. After installation, press Enter to reload the PVE panel and API services. Cluster installations use PVE's existing SSH access between nodes.
 
@@ -77,7 +77,7 @@ Refresh PVE with Ctrl+Shift+R. Dockers for Proxmox VE is now ready to use.
 For unattended installation, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.1/install.sh | bash -s -- install --runtime=rootless --yes
+curl -fsSL https://raw.githubusercontent.com/GDLev/Dockers-for-PVE/v0.20.2/install.sh | bash -s -- install --runtime=rootless --yes
 ```
 
 Add `--nodes=pve1,pve2` to select all cluster nodes on first installation, or `--no-restart` to defer service reload. Later updates and repairs can target individual installed nodes. For DEB installation, see [package installation](CONTRIBUTING.md#build-and-sign).
