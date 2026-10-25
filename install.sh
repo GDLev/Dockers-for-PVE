@@ -21,23 +21,79 @@ main() {
     project_dir=$(mktemp -d /tmp/betterdocker-install.XXXXXXXX)
     # Expand the path now: the local variable is gone when the EXIT trap runs.
     trap "rm -rf -- '$project_dir'" EXIT
-    local release_version=0.20.1
+    local release_version=0.20.2
     local archive_name="betterdockers-$release_version.tar.gz"
     local release_url="https://github.com/GDLev/Dockers-for-PVE/releases/download/v$release_version"
     local trusted_key=/etc/betterdocker/release-key.pem
     local trusted_pin=/etc/betterdocker/release-key.sha256
     python3 - "$trusted_key" "$trusted_pin" <<'TRUST'
-import pathlib, os
-for name in __import__('sys').argv[1:]:
-    p = pathlib.Path(name)
-    for part in [p, *p.parents]:
-        s = part.lstat()
-        if part.is_symlink() or s.st_uid != 0 or s.st_mode & 0o022:
-            raise SystemExit('Release trust files must be root-owned and protected.')
+import fcntl, hashlib, os, pathlib, re, stat, subprocess, sys
+
+PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEApNYWKQTS26OjyZmBoLVl
+ueTC3fbRQ9nLfkOAXkfG3bOfuUKUKkceMENcH4IBMaHvIFf0uTEXyVgjk7WC4CUZ
+Hu8BMeojT77j9yzZwrgGdci9uXfxBgj4VXtVsgYpcIODDUBpv2JBPQ9JinVfz/Mi
+7EHaCoMSfSqrHxSG86Hy9MwqlP7ZIzy4LmucUgYMNydAvn+sieeTjoTgGqDyaSo3
+tLkRP2TwQT1VBk77i4iQyuU/MBkzjAlWp4nPOsDqrEbEq/jig8LbArQ0LEIuMgVN
+6tLVXtdHutZqj8GlUeMdHsoVTrIaAzv50DmjWzOzcuZyQVKUIZ0Iy0TiWA48xf1E
+l65fdzzSqKmZ09FlHsF2tnMZuDLtYZafG2LZ3jbAIKKbAXCnBI/NduMaNGUBZtiA
+ST0KKr+s1qrsK5DnspoB3zmQqQelQ5+s5bUXsprqOaBotqA8gM9JmiOWPbCLbqDO
+mKPl6BhZ0w967nLOlcepOzIRP7IAnb1AzXAHds007DtDAgMBAAE=
+-----END PUBLIC KEY-----
+"""
+FINGERPRINT = '8f1983fa57cf5e003b0cd1e8885472c20a8f5fd7f3b376b6d154714a97fc77ff'
+key, pin = map(pathlib.Path, sys.argv[1:])
+
+def protected(path):
+    for part in reversed([path, *path.parents]):
+        try:
+            value = part.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(value.st_mode) or value.st_uid != 0 or value.st_mode & 0o022:
+            raise SystemExit('Release trust files and directories must be root-owned, protected and free of symbolic links.')
+        if part != path and not stat.S_ISDIR(value.st_mode):
+            raise SystemExit('Release trust parent is not a directory.')
+
+def verify(public, expected):
+    result = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode or not re.fullmatch(r'[0-9a-f]{64}', expected) or hashlib.sha256(result.stdout).hexdigest() != expected:
+        raise SystemExit('Release key fingerprint mismatch. Existing trust files were not changed.')
+
+for path in (key, pin):
+    protected(path)
+key.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+lock_path = key.parent / '.release-trust.lock'
+protected(lock_path)
+if lock_path.exists() and not lock_path.is_file():
+    raise SystemExit('Invalid release trust lock file.')
+fd = os.open(lock_path, os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, 0o600)
+with os.fdopen(fd, 'r+') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    for path in (key, pin):
+        protected(path)
+    present = [path.exists() for path in (key, pin)]
+    if any(present):
+        if not all(present):
+            raise SystemExit('Release trust setup is incomplete. Restore both release-key.pem and release-key.sha256 in /etc/betterdocker before retrying. Existing files were not changed.')
+        for path, maximum in ((key, 16384), (pin, 256)):
+            if not path.is_file() or path.stat().st_size > maximum:
+                raise SystemExit('Invalid release trust file: ' + str(path))
+        try:
+            verify(key.read_bytes(), pin.read_text().strip())
+        except (OSError, UnicodeError):
+            raise SystemExit('Cannot read release trust files. Existing files were not changed.')
+    else:
+        verify(PUBLIC_KEY.encode(), FINGERPRINT)
+        for path, content in ((key, PUBLIC_KEY), (pin, FINGERPRINT + '\n')):
+            with path.open('x') as output:
+                os.fchmod(output.fileno(), 0o644)
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+        print('Release signing key configured. Future runs will reuse it.')
 TRUST
-    local actual_pin
-    actual_pin=$(openssl pkey -pubin -in "$trusted_key" -outform DER | sha256sum | cut -d ' ' -f1)
-    [[ "$actual_pin" == "$(cat "$trusted_pin")" ]] || { echo 'Release key fingerprint mismatch.' >&2; return 1; }
     [[ -z ${BETTERDOCKER_SOURCE_SHA256:-} ]] || { echo 'Checksum overrides are no longer supported; use signed release metadata.' >&2; return 1; }
     local metadata_url=${BETTERDOCKER_RELEASE_URL:-$release_url}
     for file in RELEASE.json RELEASE.sig; do

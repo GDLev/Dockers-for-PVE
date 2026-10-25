@@ -1,5 +1,12 @@
 # Release notes
 
+## 0.20.2 (prerelease)
+
+- Configure the pinned release signing key automatically on first installation. The README installation command now works without a separate trust-setup step.
+- Preserve existing trust files and stop with a readable error when they are incomplete, unsafe or inconsistent.
+
+Release signatures and artifact checksums remain mandatory. The first installer download relies on GitHub HTTPS. Manual independent key verification remains available.
+
 ## 0.20.1 (prerelease)
 
 - Add **Migrate** to the installer for conversion between rootful and rootless Docker, with prerequisite checks, explicit confirmation and recovery commands.
