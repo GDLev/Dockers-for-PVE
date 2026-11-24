@@ -20,9 +20,22 @@ from .operation_capacity import bounded
 def validate(data):
     if not isinstance(data, dict):
         raise ValueError('Deployment must be an object')
-    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid', 'firewall', 'interfaces', 'resources', 'data_disk'}
+    allowed = {'name', 'mode', 'compose', 'image', 'ports', 'environment', 'bridge', 'address', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'vmid', 'firewall', 'interfaces', 'resources', 'data_disk', 'tag'}
     if set(data) - allowed:
         raise ValueError('Unknown deployment setting')
+    tag = data.get('tag', 0)
+    if isinstance(tag, bool) or not isinstance(tag, int) or not 0 <= tag <= 4094:
+        raise ValueError('VLAN tag must be an integer between 1 and 4094')
+    data = {key: value for key, value in data.items() if key != 'tag'}
+    if tag and 'interfaces' in data:
+        raise ValueError('Set the VLAN tag in the network editor')
+    if tag:
+        net0 = {key: data[key] for key in ('bridge', 'ipv4mode', 'cidr', 'hwaddr', 'mtu', 'firewall') if key in data}
+        net0.setdefault('ipv4mode', 'static')
+        if net0['ipv4mode'] == 'static':
+            net0['cidr'] = data.get('cidr') or data.get('address', '')
+        net0['tag'] = tag
+        data['interfaces'] = {'net0': net0}
     if 'interfaces' in data:
         from .endpoints import validate as validate_interfaces
         data = dict(data, interfaces=validate_interfaces(data['interfaces']))

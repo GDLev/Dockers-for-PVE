@@ -3,6 +3,7 @@ const deployment = values => {
         bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
         hwaddr: values.hwaddr || '', mtu: values.mtu || '', firewall: Number(values.firewall) === 1 ? 1 : 0 };
     if (values.vmid) { common.vmid = Number(values.vmid); }
+    if (Number(values.tag) > 0) { common.tag = Number(values.tag); }
     if (values.interfaces) { common.interfaces = values.interfaces; }
     if (values.data_disk) { common.data_disk = values.data_disk; }
     return Object.assign(common, values.mode === 'compose' ? { compose: values.compose } :
@@ -79,6 +80,8 @@ Ext.define('PVE.betterdocker.CreateWizard', {
             column1: [
                 field('bridge', 'Bridge', defaults.bridge || 'vmbr0', { xtype: 'pveBetterDockerBridgeSelector',
                     nodename: me.nodename || Proxmox.NodeName, bridgeType: 'any_bridge', allowBlank: false, readOnly: Boolean(me.projectId) }),
+                field('tag', 'VLAN Tag', defaults.tag || '', { xtype: 'numberfield', minValue: 1, maxValue: 4094, allowDecimals: false,
+                    emptyText: translate('No VLAN'), readOnly: Boolean(me.projectId), disabled: Boolean(me.projectId) }),
                 { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'),
                     checked: Boolean(defaults.firewall), uncheckedValue: 0, readOnly: Boolean(me.projectId) },
                 field('hwaddr', 'MAC address', defaults.hwaddr || '', { readOnly: Boolean(me.projectId),
@@ -114,7 +117,7 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                 const data = [
                     ['Node', values.nodename], ['DCT ID', values.vmid], ['Project name', values.name],
                     ['Deploy from', values.mode === 'compose' ? 'Docker Compose' : 'Docker image'],
-                    ['Bridge', values.bridge], ['IPv4', values.ipv4mode === 'dhcp' ? 'DHCP' : values.address],
+                    ['Bridge', values.bridge], ['VLAN Tag', values.tag || translate('No VLAN')], ['IPv4', values.ipv4mode === 'dhcp' ? 'DHCP' : values.address],
                     ['MAC address', values.hwaddr || 'Auto-generated'],
                     ['MTU', values.mtu || translate('Same as bridge')],
                     ['Firewall', Proxmox.Utils.format_boolean(Number(values.firewall) === 1)],
