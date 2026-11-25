@@ -65,10 +65,18 @@ def ensure_link(info):
         existing = next((link for link in links if link['ifname'] == parent), None)
         if existing and (existing.get('ifalias') != info['owner'] or existing.get('linkinfo', {}).get('info_data', {}).get('id') != info['tag'] or existing.get('link') != info['bridge']):
             raise ValueError('VLAN device ownership changed')
-        if not existing:
-            w.run(['ip', 'link', 'add', 'link', info['bridge'], 'name', parent, 'type', 'vlan', 'id', str(info['tag'])])
-            w.run(['ip', 'link', 'set', 'dev', parent, 'alias', info['owner']])
-        w.run(['ip', 'link', 'set', 'dev', parent, 'up'])
+        # The kernel allows one 802.1Q device per parent and VLAN ID, so reuse one the host already has
+        shared = None if existing else next((link for link in links if link.get('link') == info['bridge'] and
+            link.get('linkinfo', {}).get('info_kind') == 'vlan' and
+            link['linkinfo'].get('info_data', {}).get('id') == info['tag'] and
+            link['linkinfo'].get('info_data', {}).get('protocol', '802.1q').lower() == '802.1q'), None)
+        if shared:
+            parent = shared['ifname']
+        else:
+            if not existing:
+                w.run(['ip', 'link', 'add', 'link', info['bridge'], 'name', parent, 'type', 'vlan', 'id', str(info['tag'])])
+                w.run(['ip', 'link', 'set', 'dev', parent, 'alias', info['owner']])
+            w.run(['ip', 'link', 'set', 'dev', parent, 'up'])
     existing = next((link for link in links if link['ifname'] == info['interface']), None)
     aliases = (info['owner'], 'betterdocker:' + info['id']) if info['net'] == 'net0' else (info['owner'],)
     if existing and (existing.get('ifalias') not in aliases or existing.get('linkinfo', {}).get('info_kind') != 'macvlan' or existing.get('link') != parent):

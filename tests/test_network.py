@@ -46,6 +46,28 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(data['address'], '192.0.2.50')
         self.assertEqual(data['cidr'], '192.0.2.50/24')
 
+    def test_wizard_vlan_tag_becomes_net0_tag(self):
+        data = worker.validate(dict(BASE, address='192.0.2.50/24', tag=20))
+        self.assertNotIn('tag', data)
+        self.assertEqual(data['interfaces']['net0']['tag'], 20)
+        self.assertEqual(data['interfaces']['net0']['bridge'], BASE['bridge'])
+        self.assertEqual(data['cidr'], '192.0.2.50/24')
+        self.assertNotIn('interfaces', worker.validate(dict(BASE, address='192.0.2.50/24', tag=0)))
+    def test_wizard_gateway_goes_to_net0_for_a_tagged_static_address(self):
+        data = worker.validate(dict(BASE, address='192.0.2.50/24', tag=20, gw='192.0.2.1'))
+        self.assertNotIn('gw', {key for key in data if key != 'interfaces'})
+        self.assertEqual(data['interfaces']['net0']['gw'], '192.0.2.1')
+    def test_wizard_gateway_is_rejected_without_a_tag_or_a_matching_subnet(self):
+        static = dict(BASE, address='192.0.2.50/24')
+        dhcp = dict(BASE, ipv4mode='dhcp', address='', cidr='')
+        for request in (dict(static, gw='192.0.2.1'), dict(static, tag=20, gw='198.51.100.1'), dict(static, tag=20, gw=1),
+                        dict(dhcp, tag=20, gw='192.0.2.1')):
+            with self.assertRaises(ValueError):
+                worker.validate(request)
+    def test_wizard_vlan_tag_is_range_checked(self):
+        for tag in (4095, -1, '20', True, 1.5):
+            with self.assertRaises(ValueError):
+                worker.validate(dict(BASE, address='192.0.2.50/24', tag=tag))
     def test_macvlan_has_own_mac_and_does_not_reconfigure_bridge(self):
         with patch.object(worker, 'capture', return_value='[]'), patch.object(worker, 'run') as run:
             worker.ensure_link(INFO)
@@ -56,6 +78,29 @@ class NetworkTests(unittest.TestCase):
             self.assertIn(INFO['interface'], args)
             self.assertNotIn('vmbr0', args)
 
+    def vlan_endpoint(self):
+        return dict(INFO, net='net0', owner='betterdocker:' + IDENTIFIER + ':net0', tag=20)
+    def test_vlan_endpoint_reuses_the_hosts_device_for_the_same_bridge_and_id(self):
+        host = {'ifname': 'vlan20', 'link': 'vmbr0', 'ifalias': None,
+                'linkinfo': {'info_kind': 'vlan', 'info_data': {'protocol': '802.1Q', 'id': 20}}}
+        from dctlib import endpoint_network
+        with patch.object(worker, 'capture', return_value=json.dumps([host])), patch.object(worker, 'run') as run:
+            parent = endpoint_network.ensure_link(self.vlan_endpoint())
+        calls = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(parent, 'vlan20')
+        self.assertEqual([args for args in calls if 'vlan20' in args], [
+            ['ip', 'link', 'add', 'link', 'vlan20', 'name', INFO['interface'], 'address', INFO['hwaddr'], 'type', 'macvlan', 'mode', 'bridge']])
+        self.assertIn(['ip', 'link', 'add', 'link', 'vlan20', 'name', INFO['interface'],
+                       'address', INFO['hwaddr'], 'type', 'macvlan', 'mode', 'bridge'], calls)
+    def test_vlan_endpoint_creates_its_own_device_when_the_host_has_none(self):
+        other = {'ifname': 'vlan30', 'link': 'vmbr0', 'ifalias': None,
+                 'linkinfo': {'info_kind': 'vlan', 'info_data': {'protocol': '802.1Q', 'id': 30}}}
+        from dctlib import endpoint_network
+        with patch.object(worker, 'capture', return_value=json.dumps([other])), patch.object(worker, 'run') as run:
+            parent = endpoint_network.ensure_link(self.vlan_endpoint())
+        calls = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(parent, INFO['interface'][:11] + 'v0')
+        self.assertIn(['ip', 'link', 'add', 'link', 'vmbr0', 'name', parent, 'type', 'vlan', 'id', '20'], calls)
     def test_dhcp_hook_only_configures_managed_address_and_records_lease(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), \
              patch.object(worker, 'summaries', return_value=[INFO]), patch.object(worker, 'current_node', return_value='pve'), \

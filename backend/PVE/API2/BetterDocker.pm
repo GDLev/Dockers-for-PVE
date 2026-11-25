@@ -535,7 +535,13 @@ sub register_docker_method {
                 die "Invalid bridge\n" unless $bridge =~ /\A([a-zA-Z0-9_.-]{1,15})\z/;
                 $bridge = $1;
                 require PVE::LXC;
-                PVE::LXC::check_bridge_access($rpc, $user, "name=eth0,bridge=$bridge");
+                my $net = "name=eth0,bridge=$bridge";
+                if (defined(my $tag = $deployment->{tag})) {
+                    die "Invalid VLAN tag\n" if ref($tag) || $tag !~ /\A(0|[1-9][0-9]{0,3})\z/ || $1 > 4094;
+                    $tag = $1;
+                    $net .= ",tag=$tag" if $tag > 0;
+                }
+                PVE::LXC::check_bridge_access($rpc, $user, $net);
             }
         }
         return $code->($param);
