@@ -67,6 +67,29 @@ class NetworkTests(unittest.TestCase):
             self.assertIn(INFO['interface'], args)
             self.assertNotIn('vmbr0', args)
 
+    def vlan_endpoint(self):
+        return dict(INFO, net='net0', owner='betterdocker:' + IDENTIFIER + ':net0', tag=20)
+    def test_vlan_endpoint_reuses_the_hosts_device_for_the_same_bridge_and_id(self):
+        host = {'ifname': 'vlan20', 'link': 'vmbr0', 'ifalias': None,
+                'linkinfo': {'info_kind': 'vlan', 'info_data': {'protocol': '802.1Q', 'id': 20}}}
+        from dctlib import endpoint_network
+        with patch.object(worker, 'capture', return_value=json.dumps([host])), patch.object(worker, 'run') as run:
+            parent = endpoint_network.ensure_link(self.vlan_endpoint())
+        calls = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(parent, 'vlan20')
+        self.assertEqual([args for args in calls if 'vlan20' in args], [
+            ['ip', 'link', 'add', 'link', 'vlan20', 'name', INFO['interface'], 'address', INFO['hwaddr'], 'type', 'macvlan', 'mode', 'bridge']])
+        self.assertIn(['ip', 'link', 'add', 'link', 'vlan20', 'name', INFO['interface'],
+                       'address', INFO['hwaddr'], 'type', 'macvlan', 'mode', 'bridge'], calls)
+    def test_vlan_endpoint_creates_its_own_device_when_the_host_has_none(self):
+        other = {'ifname': 'vlan30', 'link': 'vmbr0', 'ifalias': None,
+                 'linkinfo': {'info_kind': 'vlan', 'info_data': {'protocol': '802.1Q', 'id': 30}}}
+        from dctlib import endpoint_network
+        with patch.object(worker, 'capture', return_value=json.dumps([other])), patch.object(worker, 'run') as run:
+            parent = endpoint_network.ensure_link(self.vlan_endpoint())
+        calls = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(parent, INFO['interface'][:11] + 'v0')
+        self.assertIn(['ip', 'link', 'add', 'link', 'vmbr0', 'name', parent, 'type', 'vlan', 'id', '20'], calls)
     def test_dhcp_hook_only_configures_managed_address_and_records_lease(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(worker, 'ROOT', Path(folder)), \
              patch.object(worker, 'summaries', return_value=[INFO]), patch.object(worker, 'current_node', return_value='pve'), \
