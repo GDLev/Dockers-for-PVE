@@ -76,12 +76,28 @@ assert.equal(network.column2.find(field => field.name === 'address').vtype, 'IPC
 const ipv4 = network.column2.find(field => field.xtype === 'radiogroup');
 assert.equal(ipv4.items.find(item => item.inputValue === 'dhcp').checked, true);
 assert.equal(network.column2.find(field => field.name === 'address').disabled, true);
-let addressDisabled;
-const addressField = { setDisabled: value => { addressDisabled = value; } };
-ipv4.listeners.change({ up: () => ({ down: () => addressField }), getValue: () => ({ ipv4mode: 'static' }) });
-assert.equal(addressDisabled, false);
-ipv4.listeners.change({ up: () => ({ down: () => addressField }), getValue: () => ({ ipv4mode: 'dhcp' }) });
-assert.equal(addressDisabled, true);
+const stubField = initial => ({ state: { disabled: false, hidden: false }, value: initial,
+    setDisabled(value) { this.state.disabled = value; }, setHidden(value) { this.state.hidden = value; },
+    getValue() { return this.value; } });
+const networkStub = { address: stubField(''), mode: stubField({ ipv4mode: 'dhcp' }), tag: stubField(''), gw: stubField(''), inherited: stubField('') };
+const networkWindow = { down: selector => ({ '[name=address]': networkStub.address, '#ipv4mode': networkStub.mode, '[name=tag]': networkStub.tag,
+    '[name=gw]': networkStub.gw, '#inheritedGateway': networkStub.inherited })[selector] };
+const trigger = { up: () => networkWindow };
+networkStub.mode.value = { ipv4mode: 'static' };
+ipv4.listeners.change(trigger);
+assert.equal(networkStub.address.state.disabled, false);
+assert.deepEqual([networkStub.gw.state.hidden, networkStub.gw.state.disabled, networkStub.inherited.state.hidden], [true, true, false]);
+networkStub.mode.value = { ipv4mode: 'dhcp' };
+ipv4.listeners.change(trigger);
+assert.equal(networkStub.address.state.disabled, true);
+const tagField = network.column1.find(field => field.name === 'tag');
+assert.equal(tagField.maxValue, 4094);
+networkStub.tag.value = 20;
+tagField.listeners.change(trigger);
+assert.deepEqual([networkStub.gw.state.hidden, networkStub.gw.state.disabled, networkStub.inherited.state.hidden], [false, true, true], 'tagged DHCP shows no gateway input');
+networkStub.mode.value = { ipv4mode: 'static' };
+tagField.listeners.change(trigger);
+assert.deepEqual([networkStub.gw.state.hidden, networkStub.gw.state.disabled, networkStub.inherited.state.hidden], [false, false, true], 'tagged static asks for a gateway');
 const inserted = [];
 const user = { ownerCt: { items: { indexOf: () => 2 }, insert: (_, button) => inserted.push(button) } };
 const workspace = { down: () => user };
@@ -1670,8 +1686,17 @@ const formValues = { nodename: 'pve', vmid: 122, name: 'forms-test', mode: 'comp
     compose: 'services: {app: {image: busybox, environment: {TOKEN: secret-value}}}', environment: 'TOKEN=secret-value' };
 const formWizard = { callParent, query: () => [], getValues: () => ({ ...formValues }), close() { wizardClosed++; },
     down(id) { return id === '#creationDisks' ? null : id === 'form' ? { getForm: () => ({ isValid: () => wizardValid }) } :
+        id === '[name=tag]' ? { getValue: () => formValues.tag || '' } : id === '[name=gw]' ? { getValue: () => formValues.gw || '' } :
         id === '#help' ? { setHandler() {} } : { setText(text) { wizardLabels[id] = text; } }; } };
 definitions['PVE.betterdocker.CreateWizard'].initComponent.call(formWizard);
+const editWizard = { callParent, query: () => [], down: () => null, projectId: 'a'.repeat(32), vmid: 122,
+    deployment: { name: 'forms-test', bridge: 'vmbr0', interfaces: { net0: { bridge: 'vmbr0', tag: 20, gw: '192.0.2.1', ipv4mode: 'static', cidr: '192.0.2.50/24' } } } };
+definitions['PVE.betterdocker.CreateWizard'].initComponent.call(editWizard);
+const editNetwork = editWizard.items.find(item => item.title === 'Network');
+assert.equal(editNetwork.column1.find(field => field.name === 'tag').value, 20, 'edit mode shows the stored tag');
+assert.equal(editNetwork.column1.find(field => field.name === 'tag').disabled, true);
+assert.equal(editNetwork.column2.find(field => field.name === 'gw').value, '192.0.2.1');
+assert.equal(editNetwork.column2.find(field => field.name === 'gw').readOnly, true);
 assert.equal(wizardLabels['#submit'], 'Finish');
 const confirmCard = formWizard.items.at(-1);
 assert.equal(confirmCard.tbar, undefined, 'confirmation has no Validate Compose toolbar');
@@ -1683,6 +1708,12 @@ assert(!JSON.stringify(reviewValues).includes('secret-value'));
 assert.equal(reviewValues.find(row => row.key === 'DCT ID').value, 122);
 assert.equal(reviewValues.find(row => row.key === 'Firewall').value, 'No');
 assert.equal(reviewValues.find(row => row.key === 'MTU').value, 1400);
+assert.equal(reviewValues.find(row => row.key === 'VLAN Tag').value, 'No VLAN');
+assert(!reviewValues.some(row => row.key === 'Gateway (IPv4)'), 'untagged deployments show no gateway row');
+Object.assign(formValues, { tag: 20, ipv4mode: 'static', address: '192.0.2.50/24', gw: '192.0.2.1' });
+confirmCard.listeners.show.call(cardScope);
+assert.equal(reviewValues.find(row => row.key === 'VLAN Tag').value, 20);
+assert.equal(reviewValues.find(row => row.key === 'Gateway (IPv4)').value, '192.0.2.1');
 wizardValid = false;
 confirmCard.onSubmit.call(cardScope);
 assert.equal(formRequests.length, 0);
@@ -1694,6 +1725,8 @@ assert.equal(formRequests[0].method, 'POST');
 assert.equal(formRequests[0].params.start, 0);
 assert.equal(formRequests[0].params.pool, 'test');
 assert.equal(JSON.parse(formRequests[0].params.deployment).environment, formValues.environment);
+assert.equal(JSON.parse(formRequests[0].params.deployment).tag, 20);
+assert.equal(JSON.parse(formRequests[0].params.deployment).gw, '192.0.2.1');
 formRequests[0].failure({ htmlStatus: 'Invalid Compose' });
 formRequests[0].callback();
 assert.equal(formAlerts.length, 1);

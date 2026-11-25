@@ -53,6 +53,17 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(data['interfaces']['net0']['bridge'], BASE['bridge'])
         self.assertEqual(data['cidr'], '192.0.2.50/24')
         self.assertNotIn('interfaces', worker.validate(dict(BASE, address='192.0.2.50/24', tag=0)))
+    def test_wizard_gateway_goes_to_net0_for_a_tagged_static_address(self):
+        data = worker.validate(dict(BASE, address='192.0.2.50/24', tag=20, gw='192.0.2.1'))
+        self.assertNotIn('gw', {key for key in data if key != 'interfaces'})
+        self.assertEqual(data['interfaces']['net0']['gw'], '192.0.2.1')
+    def test_wizard_gateway_is_rejected_without_a_tag_or_a_matching_subnet(self):
+        static = dict(BASE, address='192.0.2.50/24')
+        dhcp = dict(BASE, ipv4mode='dhcp', address='', cidr='')
+        for request in (dict(static, gw='192.0.2.1'), dict(static, tag=20, gw='198.51.100.1'), dict(static, tag=20, gw=1),
+                        dict(dhcp, tag=20, gw='192.0.2.1')):
+            with self.assertRaises(ValueError):
+                worker.validate(request)
     def test_wizard_vlan_tag_is_range_checked(self):
         for tag in (4095, -1, '20', True, 1.5):
             with self.assertRaises(ValueError):

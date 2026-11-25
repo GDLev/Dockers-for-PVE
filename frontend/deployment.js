@@ -3,7 +3,10 @@ const deployment = values => {
         bridge: values.bridge, address: values.address || '', ipv4mode: values.ipv4mode,
         hwaddr: values.hwaddr || '', mtu: values.mtu || '', firewall: Number(values.firewall) === 1 ? 1 : 0 };
     if (values.vmid) { common.vmid = Number(values.vmid); }
-    if (Number(values.tag) > 0) { common.tag = Number(values.tag); }
+    if (Number(values.tag) > 0) {
+        common.tag = Number(values.tag);
+        if (values.gw) { common.gw = values.gw; }
+    }
     if (values.interfaces) { common.interfaces = values.interfaces; }
     if (values.data_disk) { common.data_disk = values.data_disk; }
     return Object.assign(common, values.mode === 'compose' ? { compose: values.compose } :
@@ -24,7 +27,12 @@ function updateNetwork(group) {
     const wizard = group.up('window');
     if (!wizard) { return; }
     const address = wizard.down('[name=address]');
-    if (address) { address.setDisabled(group.getValue().ipv4mode !== 'static'); }
+    const mode = wizard.down('#ipv4mode').getValue().ipv4mode;
+    if (address) { address.setDisabled(mode !== 'static'); }
+    const tagged = Number(wizard.down('[name=tag]').getValue()) > 0;
+    wizard.down('[name=gw]').setHidden(!tagged);
+    wizard.down('[name=gw]').setDisabled(!tagged || mode !== 'static');
+    wizard.down('#inheritedGateway').setHidden(tagged);
 }
 Ext.define('PVE.betterdocker.CreateWizard', {
     extend: 'PVE.window.Wizard', subject: 'Docker', title: translate('Create DCT'), width: 720, height: 540, resizable: false, constrain: true,
@@ -80,15 +88,16 @@ Ext.define('PVE.betterdocker.CreateWizard', {
             column1: [
                 field('bridge', 'Bridge', defaults.bridge || 'vmbr0', { xtype: 'pveBetterDockerBridgeSelector',
                     nodename: me.nodename || Proxmox.NodeName, bridgeType: 'any_bridge', allowBlank: false, readOnly: Boolean(me.projectId) }),
-                field('tag', 'VLAN Tag', defaults.tag || '', { xtype: 'numberfield', minValue: 1, maxValue: 4094, allowDecimals: false,
-                    emptyText: translate('No VLAN'), readOnly: Boolean(me.projectId), disabled: Boolean(me.projectId) }),
+                field('tag', 'VLAN Tag', defaults.interfaces?.net0?.tag || '', { xtype: 'numberfield', minValue: 1, maxValue: 4094, allowDecimals: false,
+                    emptyText: translate('No VLAN'), readOnly: Boolean(me.projectId), disabled: Boolean(me.projectId),
+                    listeners: { change: updateNetwork } }),
                 { xtype: 'proxmoxcheckbox', name: 'firewall', fieldLabel: gettext('Firewall'),
                     checked: Boolean(defaults.firewall), uncheckedValue: 0, readOnly: Boolean(me.projectId) },
                 field('hwaddr', 'MAC address', defaults.hwaddr || '', { readOnly: Boolean(me.projectId),
                     emptyText: 'auto', vtype: 'MacAddress' }),
             ],
             column2: [
-                { xtype: 'radiogroup', fieldLabel: translate('IPv4'), columns: 3,
+                { xtype: 'radiogroup', itemId: 'ipv4mode', fieldLabel: translate('IPv4'), columns: 3,
                     items: [
                         { xtype: 'radiofield', name: 'ipv4mode', inputValue: 'static', boxLabel: translate('Static'),
                             checked: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) === 'static', readOnly: Boolean(me.projectId) },
@@ -99,7 +108,9 @@ Ext.define('PVE.betterdocker.CreateWizard', {
                 field('address', 'IPv4/CIDR', defaults.cidr || defaults.address || '', { allowBlank: false, vtype: 'IPCIDRAddress',
                     disabled: (defaults.ipv4mode || (defaults.address ? 'static' : 'dhcp')) !== 'static',
                     readOnly: Boolean(me.projectId), emptyText: '192.0.2.50/24' }),
-                { xtype: 'displayfield', fieldLabel: translate('Gateway (IPv4)'), value: translate('Inherited from host routing') },
+                { xtype: 'displayfield', itemId: 'inheritedGateway', fieldLabel: translate('Gateway (IPv4)'), value: translate('Inherited from host routing') },
+                field('gw', 'Gateway (IPv4)', defaults.interfaces?.net0?.gw || '', { vtype: 'IPAddress', hidden: true, disabled: true,
+                    readOnly: Boolean(me.projectId), emptyText: translate('None, own subnet only') }),
             ],
             advancedColumn1: [field('mtu', 'MTU', defaults.mtu || '', { xtype: 'numberfield', readOnly: Boolean(me.projectId),
                 minValue: 576, maxValue: 9216, allowDecimals: false, emptyText: translate('Same as bridge') })],
@@ -114,14 +125,16 @@ Ext.define('PVE.betterdocker.CreateWizard', {
             }],
             listeners: { show: function () {
                 const values = this.up('window').getValues();
+                const tag = this.up('window').down('[name=tag]').getValue();
                 const data = [
                     ['Node', values.nodename], ['DCT ID', values.vmid], ['Project name', values.name],
                     ['Deploy from', values.mode === 'compose' ? 'Docker Compose' : 'Docker image'],
-                    ['Bridge', values.bridge], ['VLAN Tag', values.tag || translate('No VLAN')], ['IPv4', values.ipv4mode === 'dhcp' ? 'DHCP' : values.address],
+                    ['Bridge', values.bridge], ['VLAN Tag', tag || translate('No VLAN')], ['IPv4', values.ipv4mode === 'dhcp' ? 'DHCP' : values.address],
                     ['MAC address', values.hwaddr || 'Auto-generated'],
                     ['MTU', values.mtu || translate('Same as bridge')],
                     ['Firewall', Proxmox.Utils.format_boolean(Number(values.firewall) === 1)],
                 ];
+                if (tag && values.ipv4mode === 'static') { data.push(['Gateway (IPv4)', values.gw || this.up('window').down('[name=gw]').getValue() || translate('None')]); }
                 if (values.pool) { data.push(['Resource Pool', values.pool]); }
                 if (!me.projectId) { data.push(...creationResourceReview(me)); }
                 if (values.mode === 'image') { data.push(['Image', values.image], ['Published ports', values.ports || translate('None')]); }
